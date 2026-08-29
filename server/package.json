@@ -1,0 +1,23 @@
+{
+  "name": "andora-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Andora 2D-MMORPG Server (Node 20 + TypeScript)",
+  "main": "build/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/main.js",
+    "dev": "tsc && node build/main.js",
+    "schema": "mysql -u andora -p < db/schema.sql"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.5.0"
+  },
+  "engines": { "node": ">=20" }
+}

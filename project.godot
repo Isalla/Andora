@@ -1,0 +1,85 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=4
+
+_global_script_classes=[ {
+"base": "AudioStreamPlayer",
+"class": "AudioStreamPlayerADSR",
+"language": "GDScript",
+"path": "res://addons/midi/ADSR.gd"
+}, {
+"base": "Reference",
+"class": "Bank",
+"language": "GDScript",
+"path": "res://addons/midi/Bank.gd"
+}, {
+"base": "Node",
+"class": "MidiPlayer",
+"language": "GDScript",
+"path": "res://addons/midi/MidiPlayer.gd"
+}, {
+"base": "Reference",
+"class": "Mod",
+"language": "GDScript",
+"path": "res://addons/modplayer/Mod.gd"
+}, {
+"base": "Node",
+"class": "ModPlayer",
+"language": "GDScript",
+"path": "res://addons/modplayer/ModPlayer.gd"
+}, {
+"base": "Reference",
+"class": "SMF",
+"language": "GDScript",
+"path": "res://addons/midi/SMF.gd"
+}, {
+"base": "Reference",
+"class": "SoundFont",
+"language": "GDScript",
+"path": "res://addons/midi/SoundFont.gd"
+}, {
+"base": "Reference",
+"class": "XM",
+"language": "GDScript",
+"path": "res://addons/modplayer/XM.gd"
+} ]
+_global_script_class_icons={
+"AudioStreamPlayerADSR": "",
+"Bank": "",
+"MidiPlayer": "res://addons/midi/icon.png",
+"Mod": "",
+"ModPlayer": "res://addons/modplayer/icon.png",
+"SMF": "",
+"SoundFont": "",
+"XM": ""
+}
+
+[application]
+
+config/name="Andora"
+config/icon="res://icon.png"
+
+[autoload]
+
+I18n="*res://i18n/Localizer.gd"
+
+[gui]
+
+common/drop_mouse_on_gui_input_disabled=true
+
+[physics]
+
+common/enable_pause_aware_picking=true
+
+[rendering]
+
+quality/driver/driver_name="GLES2"
+vram_compression/import_etc=true
+vram_compression/import_etc2=false
+environment/default_environment="res://default_env.tres"

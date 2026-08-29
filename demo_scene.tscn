@@ -1,0 +1,43 @@
+[gd_scene load_steps=2 format=3 uid="uid:17583690304939307909"]
+
+[ext_resource type="Script" path="res://OllamaClient.gd" id="1_09451"]
+[ext_resource type="Script" path="res://OllamaDemo.gd" id="1_12155"]
+
+[node name="OllamaDemo" type="Node"]
+script = ExtResource("1_12155")
+
+[node name="OllamaClient" type="OllamaClient"]
+script = ExtResource("1_09451")
+ollama_url = "http://localhost:11434"
+model_name = "llama3"
+
+[node name="Panel" type="PanelContainer"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 7
+size_flags_vertical = 7
+
+[node name="VBoxContainer" type="VBoxContainer"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 7
+size_flags_vertical = 7
+
+[node name="TextEdit" type="TextEdit"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+size_flags_horizontal = 7
+size_flags_vertical = 7
+text = "Enter your prompt and press Send to interact with Ollama\n"
+
+[node name="HBoxContainer" type="HBoxContainer"]
+anchor_right = 1.0
+size_flags_horizontal = 7
+
+[node name="InputField" type="LineEdit"]
+anchor_right = 1.0
+size_flags_horizontal = 7
+
+[node name="SendButton" type="Button"]
+text = "Send"
+margin_left = 5
