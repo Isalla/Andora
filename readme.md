@@ -1,55 +1,30 @@
-# Godot MIDI Player
+# Andora
 
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/E1E44AWTA)
+Ein 2D-Fantasy-MMORPG, entwickelt auf Basis von Godot 3. Zielplattform des
+Clients ist der Raspberry Pi 4 (8 GB) – der Server läuft auf einem separaten
+x86-System.
 
-Software MIDI player library for Godot Engine 3.4 and 3.5 later
+- **Client**: Godot 3.5 (GLES2), optimiert für den Raspberry Pi
+- **Server**: Node.js + TypeScript (MariaDB 10)
+- **Netz**: WebSocket, 10 Hz Tick, Client-Server-Sync + Interpolation
+- **Lokalisierung**: Deutsch & Englisch von Anfang an (später erweiterbar)
 
-* Changes play speed.
-* Set tempo.
-* Emit on some events (tempo change, appears lyric ...)
-* You can control like AudioStreamPlayer.
+## Verzeichnisse
+- `shared/` – Protokoll & gemeinsame Definitionen (Client + Server)
+- `i18n/` – Übersetzungen (de, en)
+- `server/` – Node/TS-Server, Auktionshaus, Kanäle, NPC-AI
+- `src/` – Godot-Client-Logik
+- `docs/architecture.md` – Architektur & Bauplan
 
-## Try it
+## Start (Client)
+Projekt mit Godot 3 öffnen und ausführen. Autoload `I18n` liefert `t("key")`.
 
-1. Copy *.mid under "res://"
-2. Copy *.sf2 under "res://"
-3. Set MIDI path to MidiPlayer "file" parameter.
-4. Set SoundFont path to MidiPlayer "soundfont" parameter.
-5. call play() method
+## Start (Server)
+```bash
+cd server
+cp config.env.example config.env   # DB + Ollama-Werte eintragen
+npm i && npm run dev
+```
 
-## How to use
-
-* See [wiki](https://bitbucket.org/arlez80/godot-midi-player/wiki/)
-
-### Demo
-
-* [download](https://bitbucket.org/arlez80/godot-midi-player/downloads/demo.zip)
-    * This demo can get MIDIInput events. You can play using MIDI keyboards!
-* BGM "failyland_gm.mid" from [IvyMaze]( http://ivymaze.sakura.ne.jp/ )
-* Youtube: [Demo #1](https://www.youtube.com/watch?v=SdrU4uRepVs)
-* Youtube: [Demo #2](https://www.youtube.com/watch?v=nn21P3eI4hs)
-* Youtube: [Demo #3](https://www.youtube.com/watch?v=dAYfFH-Fq2o)
-
-## Hint
-
-* Set false to `GodotMIDIPlayer.load_all_voices_from_soundfont` to load voices for program change message in MIDI sequence.
-    * of course, `GodotMIDIPlayer.load_all_voices_from_soundfont = true` will be very slow.
-* SMF format 0 loading faster than SMF format 1.
-    * because format 1 data will be convert to format 0 in the player.
-
-## TODO
-
-* See [issues]( https://bitbucket.org/arlez80/godot-midi-player/issues )
-
-## Not TODO
-
-* Supports play format 2
-    * SMF.gd can read it. but I will not implement it to MIDI Player.
-
-## License
-
-MIT License
-
-## Author
-
-* @arlez80 あるる / きのもと 結衣 ( Yui Kinomoto )
+## Lizenz
+MIT
