@@ -1,0 +1,11 @@
+{
+  "name": "andora-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Unabhängiges Monitoring-/Admin-Panel für den Andora-Gameserver",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": { "node": ">=20" }
+}

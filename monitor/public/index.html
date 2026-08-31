@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Andora Server-Monitoring</title>
+<style>
+  :root {
+    --bg: #101418; --panel: #1a2026; --panel2: #212a32;
+    --fg: #d6dee6; --dim: #8b98a6; --line: #2c3640;
+    --ok: #35c26a; --warn: #e0a63a; --bad: #e2564a; --accent: #4a90d9;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--fg); padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--accent); }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 13px; border-bottom: 1px dashed var(--line); }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: var(--dim); }
+  .ok { color: var(--ok); font-weight: 600; }
+  .warn { color: var(--warn); font-weight: 600; }
+  .bad { color: var(--bad); font-weight: 700; }
+  .bar { height: 6px; background: #2a333c; border-radius: 3px; overflow: hidden; margin: 2px 0; }
+  .bar > div { height: 100%; background: var(--accent); }
+  button { background: var(--panel2); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: #3a4650; }
+  button.danger { border-color: #7a3630; }
+  button:disabled { opacity: .4; cursor: default; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; }
+  .note { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  .hidden { display: none; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Andora Server-Monitoring</h1>
+<div class="sub">
+  <span id="state-badge" class="badge bad">offline</span>
+  <span class="note" id="service-line"></span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Status &amp; Spieler</h2>
+    <div class="row"><span class="k">Server</span><span id="online">—</span></div>
+    <div class="row"><span class="k">Uptime</span><span id="uptime">—</span></div>
+    <div class="row"><span class="k">Spieler / Max</span><span id="players">—</span></div>
+    <div class="row"><span class="k">Zonen</span><span id="zones">—</span></div>
+    <div class="row"><span class="k">NPC aktiv</span><span id="npc">—</span></div>
+    <div class="row"><span class="k">Instanzen</span><span id="instances">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Auslastung (Lag-Diagnose)</h2>
+    <div class="row"><span class="k">CPU (gesamt, Proz)</span><span id="cpu">—</span></div>
+    <div class="bar"><div id="cpu-bar" style="width:0%"></div></div>
+    <div class="row"><span class="k">Heap (MB)</span><span id="heap">—</span></div>
+    <div class="row"><span class="k">RSS (MB)</span><span id="rss">—</span></div>
+    <div class="row"><span class="k">Tick durchschnittlich (ms)</span><span id="tickavg">—</span></div>
+    <div class="row"><span class="k">Tickmax (ms)</span><span id="tickmax">—</span></div>
+    <div class="row"><span class="k">Event-Loop-Lag max (ms)</span><span id="loop">—</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Steuerung</h2>
+    <button onclick="confirmControl('start')">Start</button>
+    <button onclick="confirmControl('restart')">Restart</button>
+    <button class="danger" onclick="confirmControl('stop')">Stop</button>
+    <div class="note" id="control-note"></div>
+    <div id="confirm-box" class="hidden" style="margin-top:8px">
+      <div class="note" id="confirm-text">Wirklich ausführen?</div>
+      <button onclick="doControl()">Bestätigen</button>
+      <button onclick="cancelControl()">Abbrechen</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Verlauf der letzten ~10 Min</h2>
+    <table id="hist-table">
+      <thead><tr><th>Zeit</th><th>Online</th><th>Spieler</th><th>CPU %</th><th>Tick Ø ms</th><th>Loop-Lag ms</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card" style="grid-column: 1 / -1">
+    <h2>Spieler-Diagnose</h2>
+    <table id="player-table">
+      <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>Ping (ms)</th><th>Sehen (Entities)</th><th>Inaktiv (s)</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note">Rangliste: nein — nur technische Werte zur Fehlerdiagnose.</div>
+  </div>
+
+  <div class="card" style="grid-column: 1 / -1">
+    <h2>Konfiguration (nur Whitelist, keine Secrets)</h2>
+    <div id="config-note" class="note"></div>
+    <div id="config-rows"></div>
+    <div style="margin-top:8px"><button onclick="saveConfig()">Speichern</button>
+      <span id="config-msg" class="note"></span></div>
+    <div class="note">Änderungen wirken erst nach Neustart des Gameservers.</div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let pendingAction = null;
+
+function fmtUptime(s) {
+  if (s == null) return '—';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h > 0 ? h + ' h ' : '') + m + ' min ' + sec + ' s';
+}
+function zoneStr(zones) {
+  if (!zones || typeof zones !== 'object') return '—';
+  const e = Object.entries(zones);
+  return e.map(([z, c]) => 'Z' + z + ':' + c).join(', ');
+}
+function setClass(el, cls) { el.className = ''; el.classList.add(cls); }
+
+async function refresh() {
+  let data;
+  try { data = await (await fetch('/api/status', { headers: { 'Content-Type': 'application/json' } })).json(); }
+  catch (e) { data = { ok: false, error: String(e) }; }
+
+  const gs = data.game_server || {};
+  const online = gs.online !== false && !!gs.ok;
+  $('state-badge').textContent = online ? 'online' : 'offline';
+  setClass($('state-badge'), online ? 'ok' : 'bad');
+  $('service-line').textContent = 'Dienst: ' + (data.panel ? data.panel.game_server_service : '—') +
+    (data.sudo_rule_installed ? '' : '  [sudo-Regel fehlt – Start/Stop/Restart nicht möglich]');
+  $('control-note').textContent = (data.panel && !data.sudo_rule_installed) ? 'sudo-Regel nicht installiert.' : '';
+
+  $('online').textContent = online ? 'Online' : 'Offline';
+  setClass($('online'), online ? 'ok' : 'bad');
+  $('uptime').textContent = fmtUptime(gs.uptime_s);
+  $('players').textContent = (gs.players != null ? gs.players : 0) + ' / ' + (gs.max_players != null ? gs.max_players : '—');
+  $('zones').textContent = zoneStr(gs.zones);
+  $('npc').textContent = gs.npc_active != null ? gs.npc_active : '—';
+  $('instances').textContent = gs.instances != null ? gs.instances : '—';
+
+  const cpu = gs.cpu_percent != null ? gs.cpu_percent : 0;
+  $('cpu').textContent = cpu + ' %';
+  $('cpu-bar').style.width = Math.min(100, cpu) + '%';
+  const barEl = $('cpu-bar');
+  barEl.style.background = cpu > 80 ? 'var(--bad)' : (cpu > 50 ? 'var(--warn)' : 'var(--accent)');
+  $('heap').textContent = gs.heap_mb != null ? gs.heap_mb + ' MB' : '—';
+  $('rss').textContent = gs.rss_mb != null ? gs.rss_mb + ' MB' : '—';
+  $('tickavg').textContent = (gs.tick && gs.tick.avg_ms != null) ? gs.tick.avg_ms + ' ms' : '—';
+  $('tickmax').textContent = (gs.tick && gs.tick.max_ms != null) ? gs.tick.max_ms + ' ms' : '—';
+  const loop = (gs.event_loop && gs.event_loop.max_lag_ms != null) ? gs.event_loop.max_lag_ms : 0;
+  $('loop').textContent = loop + ' ms';
+  setClass($('loop'), loop > 100 ? 'bad' : (loop > 30 ? 'warn' : 'ok'));
+
+  // Spieler-Tabelle
+  const rows = [];
+  const pl = gs.players;
+  if (Array.isArray(pl)) {
+    const now = Date.now();
+    for (const p of pl) {
+      const inactive = Math.max(0, Math.round((now - p.last_activity) / 1000));
+      rows.push(
+        '<tr>' +
+        '<td>' + p.id + '</td>' +
+        '<td>' + p.name + '</td>' +
+        '<td>' + p.zone_id + '</td>' +
+        '<td>' + (p.ping_ms || 0) + '</td>' +
+        '<td>' + (p.visible_entities || 0) + '</td>' +
+        '<td>' + inactive + '</td>' +
+        '</tr>'
+      );
+    }
+  }
+  $('player-table').innerHTML = rows.length ? rows.join('') : '<tr><td colspan="6">keine Spieler</td></tr>';
+
+  renderConfig();
+  renderPlayersHistory();
+}
+
+async function renderConfig() {
+  let cfg;
+  try { cfg = (await (await fetch('/api/config')).json()).config; }
+  catch (e) { cfg = {}; }
+  const keys = Object.keys(cfg || {});
+  $('config-rows').innerHTML = keys.map((k) =>
+    '<div class="row"><span class="k">' + k + '</span>' +
+    '<input style="flex:1;margin-left:8px" data-k="' + k + '" value="' + (cfg[k] || '').replace(/"/g, '&quot;') + '"></div>'
+  ).join('');
+  $('config-note').textContent = 'DB-Verbindungsdaten / Passwörter sind absichtlich nicht editierbar.';
+}
+
+async function saveConfig() {
+  const changes = {};
+  for (const el of document.querySelectorAll('#config-rows input')) changes[el.dataset.k] = el.value;
+  $('config-msg').textContent = 'Speichere…';
+  const res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ changes }) });
+  const j = await res.json();
+  $('config-msg').textContent = (j.ok ? 'Gespeichert. ' : 'Fehler: ') + (j.note || j.error || '');
+  if (j.ok) renderConfig();
+}
+
+async function renderPlayersHistory() {
+  let h;
+  try { h = (await (await fetch('/api/history')).json()).points; }
+  catch (e) { h = []; }
+  const now = Date.now();
+  const recent = (h || []).filter((p) => now - p.ts < 10 * 60 * 1000).reverse();
+  $('hist-table').innerHTML = recent.length
+    ? recent.map((p) =>
+        '<tr>' +
+        '<td>' + new Date(p.ts).toLocaleTimeString() + '</td>' +
+        '<td class="' + (p.online ? 'ok' : 'bad') + '">' + (p.online ? 'ja' : 'nein') + '</td>' +
+        '<td>' + p.players + '</td>' +
+        '<td>' + p.cpu_percent + '</td>' +
+        '<td>' + p.tick_avg_ms + '</td>' +
+        '<td>' + p.loop_lag_ms + '</td>' +
+        '</tr>'
+      ).join('')
+    : '<tr><td colspan="6">noch kein Verlauf</td></tr>';
+}
+
+function confirmControl(action) {
+  pendingAction = action;
+  $('confirm-text').textContent = 'Wirklich ' + action + ' ausführen?';
+  $('confirm-box').classList.remove('hidden');
+}
+function cancelControl() { pendingAction = null; $('confirm-box').classList.add('hidden'); }
+async function doControl() {
+  if (!pendingAction) return;
+  const act = pendingAction;
+  $('confirm-box').classList.add('hidden');
+  pendingAction = null;
+  const res = await fetch('/api/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: act, confirm: true }) });
+  const j = await res.json();
+  $('control-note').textContent = (j.ok ? j.action + ' -> ok' : 'Fehler: ' + (j.error || ''));
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

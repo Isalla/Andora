@@ -1,0 +1,21 @@
+[Unit]
+Description=Andora MMO Server (Game-Server, Node.js)
+
+[Service]
+Type=simple
+# Produktionsbenutzer ohne root-Privilegien; in der README anpassen.
+User=andora
+WorkingDirectory=/opt/andora/server
+ExecStart=/usr/bin/node /opt/andora/server/build/main.js
+# Automatik-Neustart nach Crash ist hier verantwortlich (nicht das Panel).
+Restart=on-failure
+RestartSec=5
+# Nur das, was der Prozess wirklich braucht:
+NoNewPrivileges=true
+ProtectSystem=true
+# CPU/Auslastung-Debugging: Limits sind optional, standard auskommentiert.
+# CPUQuota=50%
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

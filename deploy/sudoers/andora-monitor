@@ -1,0 +1,8 @@
+# andora-monitor — beschränkte sudo-Regel für das Monitoring-Panel
+#
+# Diese Datei kommt in /etc/sudoers.d/ (Dateiename = andora-monitor).
+# Sie erlaubt NUR die drei explizit gelisteten systemctl-Befehle, ohne
+# Passwort, auf genau einer Unit. Kein Shell, keine weiteren Befehle.
+#
+# User anpassen (User=pi muss zum [Service] User=pi der Monitor-Unit passen).
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl start andora-server.service, /usr/bin/systemctl stop andora-server.service, /usr/bin/systemctl restart andora-server.service

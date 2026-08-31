@@ -14,3 +14,4 @@ TestScene.tscn
 server/config.env
 server/node_modules/
 server/build/
+.tmp/

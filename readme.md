@@ -26,5 +26,19 @@ cp config.env.example config.env   # DB + Ollama-Werte eintragen
 npm i && npm run dev
 ```
 
+## Monitoring & Admin-Panel (nur für Admin, keine Spieler)
+```bash
+cd monitor
+node server.js                     # Panel auf 127.0.0.1:3003
+```
+- Gameserver liefert `GET /health`, `GET /status`, `GET /players` auf Port 3002
+  (Spielerzahl, Tick-/Event-Loop-Last, CPU/RAM, Zonen/NPC/Instanzen,
+  Spielerdiagnose inkl. Ping & sichtbarer Entities).
+- Panel: eigenes Node-Tool (keine Dependencies): Dashboard, Verlauf
+  (~1 min, In-Memory), Steuerung start/stop/restart (mit Bestätigung,
+  nur via `sudo -n systemctl`), Config-Editor (Whitelist, keine Secrets).
+- Produktions-Installation: `deploy/` (systemd-Units + sudoers-Vorlage +
+  Anleitung) — Details in `docs/monitoring_web_panel.md`.
+
 ## Lizenz
 MIT
