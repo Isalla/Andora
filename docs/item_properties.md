@@ -68,17 +68,14 @@ This document describes all properties and characteristics of items in the game 
 - Selling or trading
 - Crafting with materials
 
-## Item Drop System
+### Bindung
 
-### Loot Containers
-1. **Normal Chest**: 100% chance of common quality items
-2. **Standard Chest**: 70% common, 30% uncommon quality items  
-3. **Rare Chest**: 50% uncommon, 40% rare, 10% epic quality items
-4. **Epic Chest**: 30% rare, 60% epic, 10% legendary quality items
-5. **Master Chest**: Contains only legendary quality items
+Gegenstände können als handelbar oder charaktergebunden definiert werden.
 
-### Monster Drops
-- Low-level monsters (1-10): Normal chests
-- Mid-level monsters (11-30): Standard chests  
-- High-level monsters (31-60): Rare chests
-- Boss monsters (61+): Epic or Master chests
+Charaktergebundene Gegenstände können nicht an andere Spieler weitergegeben, verkauft oder über das Auktionshaus gehandelt werden.
+
+Die Bindung wird insbesondere für besonders wertvolle Raid-, Boss-, Quest- oder Eventgegenstände verwendet, deren Wert aus einer besonderen spielerischen Leistung entstehen soll.
+
+Rohstoffe, hergestellte Gegenstände und andere für die Spielerwirtschaft vorgesehene Gegenstände bleiben grundsätzlich handelbar.
+
+Welche Gegenstände gebunden sind, wird über die jeweilige Gegenstandsdefinition festgelegt.

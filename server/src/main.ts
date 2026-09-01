@@ -1,13 +1,24 @@
 #!/usr/bin/env node
 // main.ts — Einstiegspunkt Andora-Server (dünn, nur Verkabelung)
 import { config } from './config';
-import { initDatabase, closeDatabase } from './db';
+import { initCharacterDb, closeCharacterDb } from './db/character';
+import { initWorldDataDb, closeWorldDataDb } from './db/worldData';
+import { initRealmStateDb, closeRealmStateDb } from './db/realmState';
 import { setupHealth } from './health';
 import { initWebSocket } from './net';
 import { worldTick } from './world';
 
 async function main(): Promise<void> {
-  await initDatabase();
+  // Drei getrennte Datenbankverbindungen, je eigener Pool:
+  // character, world_data, realm_state (realm_state_<realm>).
+  // Der Realm-/World-Server besitzt KEINEN direkten auth-DB-Zugriff;
+  // Auth-Funktionen laufen ausschließlich über die Auth-API
+  // (Auth/API-Service), definiert in db/authApi.ts.
+  // Fehlt eine Konfiguration, abbrechen mit klarer Fehlermeldung
+  // (keine stillschweigende Fallback-DB, keine Sammelverbindung).
+  await initCharacterDb();
+  await initWorldDataDb();
+  await initRealmStateDb();
   setupHealth();
   initWebSocket();
 
@@ -16,7 +27,9 @@ async function main(): Promise<void> {
   const shutdown = async (sig: string) => {
     console.log(sig, '-> shutting down');
     clearInterval(tick);
-    await closeDatabase();
+    await closeCharacterDb();
+    await closeWorldDataDb();
+    await closeRealmStateDb();
     process.exit(0);
   };
   process.on('SIGINT', () => shutdown('SIGINT'));

@@ -1,9 +1,0 @@
-[gd_scene load_steps=2 format=3 uid="uid://d87921568174"]
-
-[ext_resource type="GDScript" path="res://src/entities/enemies/boss/RaidBoss.gd" id="1_p45k5"]
-
-[node name="RaidBoss" type="CharacterBody2D"]
-	script = ExtResource( 1_p45k5 )
-	monitorable = false
-	visible = true
-	physics_process = true

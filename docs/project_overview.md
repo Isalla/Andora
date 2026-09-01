@@ -1,20 +1,514 @@
-# Projektübersicht: 2D Fantasy MMORPG
+# Andora – Projektübersicht
 
-## Allgemeine Informationen
-- **Name**: [Zukünftiger Projektname]
-- **Genre**: 2D Fantasy MMORPG
-- **Plattform**: PC/Console
-- **Engine**: Godot Engine
+## Status
 
-## Hauptfeatures
-- Geschichten und Quests
-- Charakteraufstieg (Leveling)
-- Hausbau Funktionen
-- Crafting Systeme
-- Exploration verschiedener Areas
-- Gilden und Raids
-- Einzelspieler- und Gildenaufgaben
+**Konzept / Entwicklung**
 
-## Zielgruppe
-- Spieler, die Fantasy-RPGLoops lieben
-- Spieler, die Coop-Möglichkeiten schätzen
+Andora ist ein serverautoritäres **2D Fantasy MMORPG** mit einer persistenten gemeinsamen Spielwelt.
+
+Der Schwerpunkt liegt nicht nur auf klassischen MMORPG-Systemen wie Quests, Crafting, Gruppen und Raids, sondern auf einer Welt, deren NPCs als individuelle Personen existieren, Informationen weitergeben, Beziehungen entwickeln und auf Spieler sowie Ereignisse reagieren können.
+
+---
+
+# 1. Projekt
+
+**Name:** Andora
+**Genre:** 2D Fantasy MMORPG
+**Client:** Godot Engine 3.5
+**Server:** Node.js 20 / TypeScript
+**Datenbank:** MariaDB
+**Content/Scripting:** Lua
+**KI:** Ollama / lokale Sprachmodelle
+
+---
+
+# 2. Plattformen
+
+Die vorgesehenen Clientplattformen von Andora sind:
+
+Raspberry Pi
+Webbrowser
+
+Der Raspberry Pi ist die primäre Referenz für die Leistungsanforderungen des Clients. Die Darstellung und Clientlogik werden deshalb bewusst ressourcenschonend entwickelt.
+
+Die Webversion soll dieselbe Spielwelt und dieselben serverseitigen Systeme verwenden. Gameplay- und Weltlogik dürfen deshalb nicht von einer bestimmten Clientplattform abhängig sein.
+
+Der Gameserver läuft unabhängig von den Clientplattformen auf einem x86-Linux-System.
+
+Pi und Web sind unterschiedliche Zugänge zu derselben persistenten Andora-Welt.
+
+---
+
+# 3. Grundidee
+
+Andora verbindet klassische MMORPG-Systeme mit einer dynamischen persistenten Welt.
+
+Spieler sollen nicht nur Aufgaben aus einer statischen Liste abarbeiten.
+
+Sie sollen Teil einer Welt sein, in der:
+
+* NPCs individuelle Personen sind
+* NPCs Beziehungen zu Spielern entwickeln
+* NPCs nur Informationen kennen, die sie tatsächlich erhalten haben
+* Informationen zwischen NPCs weitergegeben werden können
+* NPCs reisen und ihren Aufenthaltsort verändern
+* World Events Auswirkungen auf die Welt besitzen
+* Spielerhandlungen spätere Begegnungen beeinflussen können
+* KI Dialoge und Reaktionen dynamischer gestaltet
+
+---
+
+# 4. Serverautorität
+
+Andora verwendet eine serverautoritative Architektur.
+
+Der Server bestimmt den tatsächlichen Zustand der Spielwelt.
+
+Dazu gehören unter anderem:
+
+* Spielerpositionen
+* NPC-Positionen
+* Combat
+* Items
+* Inventory
+* Quests
+* Beziehungen
+* NPC-Wissen
+* Reisen
+* Crafting
+* World Events
+* Gruppen
+* Raids
+* Szenen
+* persistente Weltzustände
+
+Der Client stellt diese Informationen dar und sendet Spieleraktionen an den Server.
+
+> **Der Server ist die Quelle der Wahrheit.**
+
+---
+
+# 5. Welt
+
+Andora ist grundsätzlich eine 2D-Spielwelt.
+
+Die Darstellung kann durch Techniken wie:
+
+* Layer
+* Y-Sortierung
+* Transparenz
+* Shader
+* Licht
+* Schatten
+* Tiefeneffekte
+
+räumlicher wirken.
+
+Echte 3D-Technik soll nur dort verwendet werden, wo sie einen konkreten Vorteil bietet.
+
+Die eigentliche Welt- und Gameplaylogik bleibt unabhängig davon, ob ein Gebiet isometrisch oder klassisch von oben dargestellt wird.
+
+---
+
+# 6. Charaktere
+
+Spieler erstellen ihren eigenen Charakter.
+
+Geplante Völker umfassen:
+
+* Menschen
+* Elfen
+* Andorer
+* Luzilla
+* Mandalonier
+
+Die Völker besitzen unterschiedliche visuelle und erzählerische Eigenschaften.
+
+Das aktuelle maximale Charakterlevel ist:
+
+**Level 40**
+
+Spätere Erweiterungen können die Levelgrenze erhöhen.
+
+---
+
+# 7. Quests und Geschichten
+
+Andora besitzt ein serverautoritäres Quest-System.
+
+Mögliche Questziele umfassen:
+
+* Kämpfen
+* Sammeln
+* Gespräche
+* Reisen
+* Entdeckungen
+* Lieferungen
+* Eskorten
+* Crafting
+* World Events
+
+Questdefinitionen können über Lua bereitgestellt werden.
+
+Der tatsächliche Questfortschritt wird serverseitig kontrolliert und persistent gespeichert.
+
+---
+
+# 8. NPC-System
+
+NPCs sollen ein zentraler Bestandteil von Andora werden.
+
+Ein wichtiger Grundsatz lautet:
+
+> **Jeder NPC ist eine einmalige Person in einer gemeinsamen Welt – kein NPC existiert gleichzeitig an zwei Orten.**
+
+NPCs können unter anderem besitzen:
+
+* Persönlichkeit
+* Beruf
+* Beziehungen
+* Wissen
+* Aufenthaltsort
+* Tagesablauf
+* Dienstleistungen
+* soziale Kontakte
+* Reisen
+* Erinnerungen an relevante Ereignisse
+
+NPCs können auf Spieler und andere NPCs reagieren.
+
+---
+
+# 9. NPC-Wissen
+
+NPCs besitzen keine automatische globale Allwissenheit.
+
+Grundregel:
+
+> **NPCs dürfen nur auf Informationen reagieren, die sie tatsächlich erhalten haben.**
+
+Informationen können beispielsweise entstehen durch:
+
+* eigene Beobachtung
+* Gespräche
+* andere NPCs
+* Spieler
+* Boten
+* World Events
+* berufliche Informationsquellen
+
+Dadurch können unterschiedliche NPCs unterschiedliche Kenntnisse über dieselbe Welt besitzen.
+
+---
+
+# 10. NPC-Beziehungen
+
+Spieler können Beziehungen zu NPCs entwickeln.
+
+Beziehungen können beeinflussen:
+
+* Preise
+* Dienstleistungen
+* Dialoge
+* Vertrauen
+* Hilfsbereitschaft
+* Crafting-Aufträge
+* besondere Möglichkeiten
+* Informationsweitergabe
+* Ablehnung
+
+Ein Schmied, bei dem ein Spieler regelmäßig arbeitet und einkauft, kann diesen Spieler beispielsweise anders behandeln als einen Fremden.
+
+---
+
+# 11. KI-System
+
+KI wird serverseitig über Ollama angebunden.
+
+Sie dient unter anderem für:
+
+* NPC-Dialoge
+* natürliche Reaktionen
+* Interpretation von Spielerbefehlen
+* narrative Dialoge
+* personalisierte Szenen
+* Interpretation natürlicher Crafting-Wünsche
+
+Die KI besitzt keine direkte Kontrolle über die Spielwelt.
+
+> **Die KI erzählt mit den Fakten der Welt – sie bestimmt die Fakten der Welt nicht.**
+
+Gameplayentscheidungen werden vom TypeScript-Server validiert.
+
+---
+
+# 12. Crafting
+
+Crafting soll ein bedeutender Bestandteil der Welt werden.
+
+Geplant sind unter anderem:
+
+* verschiedene Materialien
+* unterschiedliche Qualitätsstufen
+* Rezepte
+* Handwerker-NPCs
+* individuelle Aufträge
+* Beziehungen zu Handwerkern
+* besondere Gegenstände
+* seltene Masterwork-Ergebnisse
+
+Spieler können einem Handwerker später auch natürlich beschreiben, was sie herstellen lassen möchten.
+
+Die KI interpretiert den Wunsch.
+
+Der Server entscheidet anschließend, ob der Gegenstand möglich ist und welche:
+
+* Materialien
+* Kosten
+* Eigenschaften
+* Qualität
+* Herstellungszeit
+
+gelten.
+
+---
+
+# 13. Items und Inventory
+
+Gegenstände besitzen ein serverseitiges Item-System.
+
+Geplant sind unter anderem:
+
+* Equipment
+* Verbrauchsgegenstände
+* Materialien
+* Questgegenstände
+* besondere Gegenstände
+* verschiedene Qualitätsstufen
+* Gewicht
+* unterschiedliche Platzanforderungen
+
+Rucksäcke können unterschiedliche Kapazitäten besitzen.
+
+`weight` beschreibt das tatsächliche Gewicht eines Gegenstands.
+
+`size` beschreibt den benötigten Inventarplatz.
+
+---
+
+# 14. Gruppen und Raids
+
+Spieler können gemeinsam Inhalte bestreiten.
+
+Geplant sind:
+
+* Gruppen
+* Gilden
+* Gruppenaufgaben
+* World Events
+* Raids
+* Bossbegegnungen
+
+Raids bleiben bewusst Spielerinhalt.
+
+NPC-Söldner oder KI-Begleiter dürfen keine echten Spieler in einem Raid ersetzen.
+
+NPCs können einen Raid jedoch außerhalb des eigentlichen Kampfes unterstützen.
+
+---
+
+# 15. Begleiter und Söldner
+
+Spieler können von NPC-Begleitern oder Söldnern unterstützt werden.
+
+Diese können beispielsweise:
+
+* folgen
+* kämpfen
+* schützen
+* heilen
+* auf Befehle reagieren
+
+Natürliche Sprachbefehle können durch ein kleines KI-Modell in strukturierte Spielbefehle übersetzt werden.
+
+Die tatsächliche Aktion wird anschließend vom Server validiert.
+
+---
+
+# 16. Kommunikation
+
+Andora besitzt unterschiedliche Kommunikationsbereiche.
+
+Geplant sind:
+
+* Say
+* Nähe
+* Lokal
+* Gruppe
+* Gilde
+
+Sprachkommunikation kann ebenfalls integriert werden.
+
+Begleiterbefehle können über einen privaten Push-to-Talk-Kanal gegeben werden, sodass andere Spieler weder Sprachbefehl noch Transkription hören.
+
+NPCs in entsprechender Wahrnehmungsreichweite können öffentliche `Say`-Kommunikation wahrnehmen und darauf reagieren.
+
+---
+
+# 17. World Events
+
+Die Welt kann durch dynamische Ereignisse verändert werden.
+
+Beispiele:
+
+* Angriffe auf Städte
+* besondere Gegner
+* regionale Ereignisse
+* öffentliche Feste
+* Belagerungen
+* Veränderungen von Gebieten
+* gemeinschaftliche Aufgaben
+
+World Events können:
+
+* NPCs beeinflussen
+* Reisen auslösen
+* Informationen verbreiten
+* Quests verändern
+* Szenen auslösen
+* Spieler zusammenführen
+
+---
+
+# 18. Dynamic Scene System
+
+Andora besitzt ein serverautoritäres Szenensystem.
+
+Es kann beispielsweise verwendet werden für:
+
+* Quest-Szenen
+* Bossbegegnungen
+* World Events
+* Hochzeiten
+* besondere NPC-Ereignisse
+* Story-Momente
+
+TypeScript kontrolliert die Mechanik.
+
+Lua definiert das Drehbuch.
+
+Godot stellt die Szene dar.
+
+Die KI kann ausdrücklich freigegebene Dialogteile improvisieren.
+
+> **Eine Szene soll zuverlässig gescriptet sein, sich aber nicht gescriptet anfühlen.**
+
+---
+
+# 19. Häuser und Bauen
+
+Spieler sollen eigene Häuser besitzen bzw. bauen und verwenden können.
+
+Das System ist Bestandteil der langfristigen Weltplanung.
+
+Bei Gebäuden kann die 2D-Darstellung beispielsweise Dächer und Wände beim Betreten transparent ausblenden, damit Innenräume sichtbar werden.
+
+Die genaue Hausbau- und Besitzarchitektur wird separat definiert.
+
+---
+
+# 20. Gilden
+
+Gilden bilden einen sozialen Bestandteil der persistenten Welt.
+
+Geplant sind unter anderem:
+
+* gemeinsame Aktivitäten
+* Gildenaufgaben
+* Gruppenorganisation
+* Raids
+* soziale Systeme
+
+Weitere Gildenmechaniken werden separat spezifiziert.
+
+---
+
+# 21. Exploration
+
+Erkundung ist ein wichtiger Bestandteil von Andora.
+
+Spieler sollen unterschiedliche:
+
+* Regionen
+* Städte
+* Dörfer
+* Landschaften
+* Dungeons
+* besondere Orte
+
+entdecken können.
+
+Gebietsbetritt kann serverseitige Ereignisse, Quests oder Dynamic Scenes auslösen.
+
+---
+
+# 22. Content-Architektur
+
+Andora trennt Engine, Inhalte, Persistenz und KI.
+
+```text id="q7s9k0"
+TypeScript
+→ Engine, Regeln und Autorität
+
+Lua
+→ Gameplay-Inhalte und Definitionen
+
+MariaDB
+→ persistenter Zustand
+
+Ollama
+→ Sprache, Interpretation und kontrollierte Improvisation
+
+Godot
+→ Client und Darstellung
+```
+
+Diese Trennung soll ermöglichen, Inhalte später zu erweitern, ohne zentrale Servermechaniken ständig verändern zu müssen.
+
+---
+
+# 23. Technisches Ziel
+
+Andora soll trotz dynamischer Welt und KI-Systemen ressourcenschonend bleiben.
+
+Dafür gelten unter anderem folgende Prinzipien:
+
+* 10-Hz-World-Tick
+* Area-of-Interest-System
+* begrenzte Clientdarstellung
+* KI niemals pro Tick
+* KI eventbasiert
+* asynchrone Ollama-Anfragen
+* serverseitige AI-Budgets
+* persistente Daten nur dort speichern, wo sie benötigt werden
+* Weltlogik funktioniert auch ohne Ollama
+
+---
+
+# 24. Ziel
+
+Andora soll sich nicht nur wie eine Sammlung klassischer MMORPG-Systeme anfühlen.
+
+Das langfristige Ziel ist eine Welt, in der Spieler das Gefühl bekommen:
+
+> **Die Welt wartet nicht nur darauf, dass der Spieler eine Quest anklickt – sie existiert auch ohne ihn.**
+
+NPCs haben Orte, Beziehungen und Wissen.
+
+Ereignisse können Auswirkungen haben.
+
+Informationen können sich verbreiten.
+
+Spieler können Beziehungen und Geschichten aufbauen.
+
+KI unterstützt diese Welt dabei, natürlicher auf ihre Bewohner und Spieler zu reagieren, ohne selbst die Kontrolle über die Spielregeln zu übernehmen.

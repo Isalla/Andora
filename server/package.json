@@ -7,8 +7,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node build/main.js",
-    "dev": "tsc && node build/main.js",
-    "schema": "mysql -u andora -p < db/schema.sql"
+    "dev": "tsc && node build/main.js"
   },
   "dependencies": {
     "mysql2": "^3.11.0",

@@ -1,9 +1,34 @@
-// config.ts — Konfiguration aus server/config.env laden
+// config.ts — Konfiguration aus server/config.env laden (Realm-/World-Server)
+// DREI getrennte Datenbankverbindungen dieses Servers (je DB: eigene
+// Konfiguration, eigener technischer DB-Benutzer, eigener Connection-Pool —
+// siehe db/pool.ts): character, world_data, realm_state.
+// Es gibt keine WORLD_DB_*-Sammelkonfiguration und keinen Legacy-Fallback auf DB_*.
+// Fehlt eine notwendige DB-Konfiguration, wird beim Init des jeweiligen Pools
+// mit klarer Fehlermeldung abgebrochen; es wird nie stillschweigend eine
+// andere Datenbank verwendet.
+// Die AUTH-DB gehoert NICHT zu diesem Server: Der Realm-/World-Server besitzt
+// keine AUTH_DB_*-Zugangsdaten und keinen direkten auth-DB-Zugriff. Fuer
+// Auth-Funktionen (Handoff-/Session-Validierung, Account-Permissionen,
+// World-Server-Authentifizierung, Heartbeat) verwendet er ausschliesslich die
+// Auth-API des separaten Auth-/API-Services (Berechtigung: handoff.validate,
+// session.validate, account.permissions; z. B. docs/Auth_API_Architektur.md
+// Abschnitt 8/10, docs/Login_Realm_Architektur.md Abschnitt 6/7). Diese
+// Auth-/API-Schnittstelle wird spaeter in einem eigenen Auth-API-Modul
+// abgebildet; dieses Config bzw. der Realm-/World-Server liefert und speichert
+// keinerlei AUTH-Zugangsdaten.
 import fs from 'fs';
 import path from 'path';
 
 export interface Env {
   [k: string]: string;
+}
+
+export interface DbConfig {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
 }
 
 export function loadEnv(p: string): Env {
@@ -25,6 +50,17 @@ const num = (k: string, d: number) => {
   return Number.isFinite(v) && v > 0 ? v : d;
 };
 
+// Liest eine DB-Konfiguration aus einem Env-Block (z. B. AUTH_DB_*).
+function dbConfig(p: string, dName: string): DbConfig {
+  return {
+    host: env[p + '_HOST'] || '',
+    port: num(p + '_PORT', 3306),
+    user: env[p + '_USER'] || '',
+    password: env[p + '_PASSWORD'] || '',
+    database: env[p + '_NAME'] || dName
+  };
+}
+
 export const config = {
   wsPort: num('PORT_WS', 3001),
   healthPort: num('PORT_HTTP', 3002),
@@ -43,11 +79,10 @@ export const config = {
     temperatureQuality: Number(env['OLLAMA_TEMP_QUALITY'] || 1.0),
     fallback: env['OLLAMA_FALLBACK'] === '1'
   },
-  db: {
-    host: env['DB_HOST'] || 'localhost',
-    port: num('DB_PORT', 3306),
-    user: env['DB_USER'] || 'andora',
-    password: env['DB_PASS'] || '',
-    database: env['DB_NAME'] || 'andora'
-  }
+  // character-DB: persoenliche Charakterdaten und Fortschritt (eigene Verbindung)
+  characterDb: dbConfig('CHARACTER_DB', 'character'),
+  // world_data-DB: statische globale Weltdaten (eigene Verbindung, zumeist lesend)
+  worldDataDb: dbConfig('WORLD_DATA_DB', 'world_data'),
+  // realm_state-DB: persistenter Zustand eines konkreten Realms (realm_state_<realm>)
+  realmStateDb: dbConfig('REALM_STATE_DB', 'realm_state_de1')
 };

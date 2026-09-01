@@ -1,0 +1,887 @@
+# Automatische und direkte Erfüllung von Kaufgesuchen
+
+Ein Kaufgesuch ist eine aktive Kauforder.
+
+Beispiel:
+
+> **Kaufe 100 Wolfsfelle für maximal 67 Kupfer pro Stück.**
+
+Das dafür benötigte Geld wird beim Erstellen des Kaufgesuchs reserviert.
+
+---
+
+## Automatische Erfüllung
+
+Stellt ein anderer Spieler denselben Gegenstand zum Verkauf ein und verlangt **höchstens den Preis eines vorhandenen Kaufgesuchs**, kann das Auktionshaus den Handel automatisch durchführen.
+
+Beispiel:
+
+Aktives Kaufgesuch:
+
+> 100 Wolfsfelle gesucht
+> maximal 67 Kupfer pro Stück
+
+Ein anderer Spieler stellt 30 Wolfsfelle für:
+
+> 65 Kupfer pro Stück
+
+zum Verkauf ein.
+
+Da der Verkaufspreis innerhalb des Kaufgesuchs liegt, kauft das Auktionshaus die 30 Wolfsfelle automatisch.
+
+Das Kaufgesuch verbleibt anschließend mit:
+
+> 70 Wolfsfellen gesucht
+
+im Markt.
+
+Die genaue Regel, welcher Preis bei einer solchen Überschneidung tatsächlich abgerechnet wird, wird später für das Wirtschaftssystem festgelegt.
+
+---
+
+## Direkt an ein Kaufgesuch verkaufen
+
+Ein Spieler kann ein vorhandenes Kaufgesuch auch selbst auswählen.
+
+Beispiel:
+
+> **Kaufgesuch:**
+> 100 Wolfsfelle
+> 67 Kupfer pro Stück
+
+Der Spieler besitzt 40 Wolfsfelle und entscheidet:
+
+> **An dieses Kaufgesuch verkaufen**
+
+Die 40 Wolfsfelle werden unmittelbar verkauft.
+
+Das Kaufgesuch benötigt danach noch:
+
+> 60 Wolfsfelle
+
+Der Verkäufer muss dafür kein eigenes Verkaufsangebot erstellen und nicht darauf warten, dass jemand seine Ware kauft.
+
+---
+
+# Zwei Handelswege
+
+Damit besitzt der Marktplatz zwei Seiten:
+
+**Verkaufsangebot**
+
+> „Ich verkaufe diesen Gegenstand für diesen Preis.“
+
+und
+
+**Kaufgesuch**
+
+> „Ich kaufe diesen Gegenstand bis zu diesem Preis.“
+
+Treffen beide Seiten preislich aufeinander, kann der Markt den Handel automatisch ausführen.
+
+---
+
+# Teilerfüllung
+
+Sowohl Verkaufsangebote als auch Kaufgesuche können teilweise erfüllt werden.
+
+Beispiel:
+
+Kaufgesuch:
+
+> 100 Wolfsfelle × 67 Kupfer
+
+Spieler A verkauft 20.
+
+> Rest: 80
+
+Spieler B verkauft 50.
+
+> Rest: 30
+
+Spieler C verkauft 30.
+
+> Kaufgesuch vollständig erfüllt.
+
+Nach vollständiger Erfüllung wird die Kauforder automatisch geschlossen.
+
+---
+
+# Grundregel
+
+> **Treffen Verkaufsangebot und Kaufgesuch beim Preis aufeinander, kann Andora den Handel automatisch abschließen.**
+
+Spieler können außerdem jederzeit vorhandene Kaufgesuche ansehen und ihre Gegenstände direkt zu dem angebotenen Preis verkaufen.
+
+# AH-Depot und Marktguthaben
+
+## Eigenes AH-Guthaben
+
+Jeder Spieler besitzt im Auktionshaus ein eigenes **Marktdepot mit Geldguthaben**.
+
+Dieses Guthaben ist vom normalen Geld getrennt, das der Charakter bei sich trägt.
+
+Das AH-Depot wird für Käufe und Verkäufe über den Marktplatz verwendet.
+
+---
+
+# Geld einzahlen
+
+Der Spieler kann Geld aus seinem normalen Charaktervermögen in das AH-Depot einzahlen.
+
+Dieses Geld steht anschließend für:
+
+* normale Käufe
+* automatische Kaufgesuche
+* Marktgebühren
+
+zur Verfügung.
+
+---
+
+# Verkaufserlöse
+
+Wird ein Gegenstand über das Auktionshaus verkauft, landet der Verkaufserlös direkt im **AH-Depot** des Verkäufers.
+
+Das Geld muss dadurch nicht zunächst über den Briefkasten abgeholt werden.
+
+Beispiel:
+
+Ein Spieler verkauft:
+
+> 100 Eisenbarren für insgesamt 2 Gold
+
+Nach Abschluss des Verkaufs werden die 2 Gold seinem AH-Guthaben gutgeschrieben.
+
+Dieses Guthaben kann sofort für weitere Käufe verwendet werden.
+
+---
+
+# Geld abheben
+
+Der Spieler kann vorhandenes AH-Guthaben wieder abheben.
+
+Das Geld wird dadurch aus dem Marktdepot zurück in das normale Charaktervermögen übertragen.
+
+Damit kann der Spieler selbst entscheiden:
+
+* Geld im Auktionshaus lassen
+* Verkaufserlöse für weitere Käufe verwenden
+* Geld aus dem Auktionshaus abheben
+
+---
+
+# Kaufgesuche und AH-Guthaben
+
+Beim Erstellen eines Kaufgesuchs muss **nicht der vollständige Kaufbetrag reserviert werden**.
+
+Stattdessen versucht das Auktionshaus, passende Angebote mit dem aktuell verfügbaren AH-Guthaben zu kaufen.
+
+Beispiel:
+
+> Kaufe 100 Wolfsfelle für maximal 67 Kupfer pro Stück.
+
+Solange ausreichend AH-Guthaben vorhanden ist, kann das Kaufgesuch automatisch erfüllt werden.
+
+---
+
+# Unzureichendes Guthaben
+
+Reicht das AH-Guthaben nicht mehr aus, wird das Kaufgesuch **nicht gelöscht**.
+
+Es wird automatisch:
+
+**PAUSIERT**
+
+Während dieser Zeit finden keine weiteren automatischen Käufe für dieses Kaufgesuch statt.
+
+Bereits gekaufte Gegenstände bleiben davon unberührt.
+
+---
+
+# Automatische Fortsetzung
+
+Ein pausiertes Kaufgesuch kann automatisch wieder aktiviert werden, sobald genügend AH-Guthaben vorhanden ist.
+
+Neues Guthaben kann beispielsweise entstehen durch:
+
+* Einzahlung des Spielers
+* Verkauf anderer Gegenstände
+* Verkaufserlöse aus bereits laufenden Angeboten
+
+Beispiel:
+
+Kaufgesuch benötigt weitere Wolfsfelle.
+
+AH-Guthaben:
+
+> 0 Kupfer
+
+Status:
+
+> **PAUSIERT – unzureichendes Guthaben**
+
+Währenddessen verkauft der Spieler eine Rüstung.
+
+Der Erlös landet im AH-Depot.
+
+Sobald ausreichend Guthaben vorhanden ist, kann das Kaufgesuch wieder automatisch am Markt teilnehmen.
+
+---
+
+# Mehrere Kaufgesuche
+
+Besitzt ein Spieler mehrere aktive Kaufgesuche, greifen diese auf dasselbe AH-Depot zu.
+
+Beispielsweise:
+
+* 100 Wolfsfelle
+* 50 Eisenbarren
+* 20 Heilkräuter
+
+Alle Kaufgesuche verwenden das verfügbare Marktguthaben.
+
+Die genaue Reihenfolge beziehungsweise Priorisierung mehrerer Kaufgesuche wird später festgelegt.
+
+---
+
+# Gegenstände aus Käufen
+
+Automatisch oder direkt gekaufte Gegenstände werden über das Briefkastensystem zugestellt.
+
+Dort gelten die normalen Aufbewahrungsregeln:
+
+**30 Tage Aufbewahrung**
+
+Danach werden nicht abgeholte Gegenstände automatisch gelöscht.
+
+---
+
+# Trennung von Geld und Gegenständen
+
+**Geld aus AH-Verkäufen**
+→ AH-Depot
+
+**Geld für AH-Käufe**
+→ AH-Depot
+
+**gekaufte Gegenstände**
+→ Briefkasten
+
+**nicht verkaufte Gegenstände**
+→ Briefkasten
+
+Damit dient der Briefkasten der Zustellung von Gegenständen, während Geld innerhalb des Marktsystems über das AH-Depot verwaltet wird.
+
+---
+
+# Grundregel
+
+> **Der Marktplatz besitzt ein eigenes Gelddepot des Spielers. Verkäufe füllen das Depot, Käufe verwenden es.**
+
+Reicht das Guthaben für ein Kaufgesuch nicht aus, wird dieses pausiert und kann automatisch weiterlaufen, sobald durch Verkäufe oder Einzahlungen wieder genügend Marktguthaben vorhanden ist.
+
+# Asynchroner Handel und faire Spielzeit
+
+## Grundgedanke
+
+Das Marktsystem von Andora soll nicht voraussetzen, dass ein Spieler viele Stunden täglich online ist oder den Markt ständig beobachtet.
+
+Spieler mit Arbeit, Familie oder anderen Verpflichtungen sollen eine funktionierende Spielerwirtschaft nutzen können, ohne gegenüber Spielern mit sehr hoher täglicher Spielzeit unnötig benachteiligt zu werden.
+
+> **Der Markt darf weiterarbeiten, während der Spieler es nicht kann.**
+
+---
+
+# Beispiel: Handwerker
+
+Ein Spieler stellt am Abend mehrere selbst gefertigte Rüstungen zum Verkauf ein.
+
+Gleichzeitig erstellt er Kaufgesuche für die Rohstoffe, die er für seine nächsten Rüstungen benötigt.
+
+Danach verlässt er das Spiel.
+
+Während der Spieler offline ist:
+
+1. andere Spieler kaufen seine Rüstungen
+2. der Verkaufserlös landet automatisch in seinem AH-Depot
+3. dadurch steigt sein verfügbares Marktguthaben
+4. seine Kaufgesuche können passende Rohstoffe automatisch erwerben
+5. gekaufte Materialien werden an seinen Briefkasten geliefert
+
+Wenn der Spieler später wieder Andora betritt, kann er die Materialien abholen und mit der nächsten Herstellung beginnen.
+
+---
+
+# Automatischer Wirtschaftskreislauf
+
+Dadurch kann beispielsweise folgender Kreislauf entstehen:
+
+**Rohstoffe kaufen**
+↓
+**Rüstung herstellen**
+↓
+**Rüstung verkaufen**
+↓
+**Erlös landet im AH-Depot**
+↓
+**Kaufgesuche erwerben neue Rohstoffe**
+↓
+**Rohstoffe landen im Briefkasten**
+↓
+**nächste Rüstung herstellen**
+
+Der Spieler bestimmt diesen Kreislauf, muss ihn aber nicht permanent überwachen.
+
+---
+
+# Offline-Funktion
+
+Bereits erstellte Marktaufträge bleiben auch dann aktiv, wenn der Spieler offline ist.
+
+Dazu gehören:
+
+* Verkaufsangebote
+* Kaufgesuche
+* automatische Verkäufe
+* automatische Käufe
+* AH-Depot
+* Zustellungen an den Briefkasten
+
+Der Spieler muss nicht eingeloggt sein, damit ein bereits erteilter Marktauftrag ausgeführt werden kann.
+
+---
+
+# Kein Offline-Crafting
+
+Das Marktsystem automatisiert **Handel**, nicht das eigentliche Spielen.
+
+Insbesondere bedeutet das nicht automatisch:
+
+* Gegenstände werden offline hergestellt
+* Ressourcen werden offline gesammelt
+* der Charakter erhält automatisch Crafting-Fortschritt
+* Quests werden offline erledigt
+* der Charakter erhält automatisch Erfahrung
+
+Der Spieler stellt seine Gegenstände weiterhin selbst her und beschafft beziehungsweise erwirtschaftet seine Grundlage selbst.
+
+Automatisiert wird lediglich die Ausführung der von ihm vorher festgelegten Marktaufträge.
+
+---
+
+# Ziel
+
+Andora soll langfristige Spieler nicht dadurch bevorzugen, dass sie rund um die Uhr einen Marktplatz beobachten können.
+
+Mehr Spielzeit kann selbstverständlich mehr Möglichkeiten bieten, die Welt zu erleben, zu craften, Ressourcen zu sammeln oder Abenteuer zu bestreiten.
+
+Der Zugang zur Spielerwirtschaft soll jedoch nicht davon abhängen, ob jemand den ganzen Tag online bleiben kann.
+
+Das Auktionshaus übernimmt deshalb die wiederkehrende Marktbeobachtung für zuvor klar definierte Kauf- und Verkaufsaufträge.
+
+---
+
+# Designgrundsatz
+
+> **Andora soll die Zeit des Spielers respektieren.**
+
+Ein Spieler mit einem geregelten Alltag soll nach der Arbeit einloggen und **weiterspielen können**, statt zuerst eine Stunde lang den Markt verwalten zu müssen.
+
+Das Auktionshaus unterstützt deshalb eine asynchrone Wirtschaft, in der vorher erteilte Handelsaufträge auch während der Offline-Zeit weiter ausgeführt werden.
+
+# Persönliche AH-Übersicht auf der Webseite
+
+## Grundprinzip
+
+Die Andora-Webseite kann einem angemeldeten Spieler später eine persönliche Übersicht seines Auktionshauses anzeigen.
+
+Diese Funktion dient ausschließlich der **Beobachtung und Information**.
+
+Der Spieler kann sehen, was während seiner Offline-Zeit beziehungsweise seit seinem letzten Login auf dem Markt passiert ist.
+
+> **Die Webseite zeigt, was in Andora passiert – sie spielt Andora nicht für den Spieler.**
+
+---
+
+# Persönliches Markt-Dashboard
+
+Der Spieler kann beispielsweise sehen:
+
+* aktuelles AH-Guthaben
+* aktive Verkaufsangebote
+* aktive Kaufgesuche
+* pausierte Kaufgesuche
+* verkaufte Gegenstände
+* automatisch gekaufte Rohstoffe
+* teilweise erfüllte Kaufgesuche
+* vollständig erfüllte Kaufgesuche
+* abgelaufene Angebote
+* Gegenstände, die im Briefkasten warten
+* verbleibende Aufbewahrungszeit wichtiger Briefkasteninhalte
+
+---
+
+# Aktivitäten während der Abwesenheit
+
+Die Webseite kann eine chronologische Übersicht anzeigen.
+
+Beispiel:
+
+**08:14**
+
+> Meisterhafte Eisenrüstung verkauft
+> +12 Gold 40 Silber
+
+**09:37**
+
+> 50 Eisenbarren automatisch gekauft
+> -2 Gold 15 Silber
+
+**10:52**
+
+> Weitere 30 Eisenbarren gekauft
+> -1 Gold 29 Silber
+
+**11:18**
+
+> Lederrüstung verkauft
+> +8 Gold 70 Silber
+
+**11:19**
+
+> Kaufgesuch „Wolfsfell“ automatisch fortgesetzt
+
+Dadurch kann der Spieler verfolgen, wie seine zuvor erteilten Marktaufträge ausgeführt werden.
+
+---
+
+# Keine Eingriffe über die Webseite
+
+Die persönliche Marktübersicht besitzt ausschließlich **Lesezugriff**.
+
+Über die Webseite können insbesondere nicht:
+
+* Gegenstände gekauft werden
+* Gegenstände verkauft werden
+* Preise geändert werden
+* neue Verkaufsangebote erstellt werden
+* Kaufgesuche erstellt werden
+* Kaufgesuche verändert werden
+* Kaufgesuche pausiert oder fortgesetzt werden
+* Angebote abgebrochen werden
+* Geld eingezahlt werden
+* AH-Guthaben abgehoben werden
+* Gegenstände aus dem Briefkasten genommen werden
+
+Alle spielverändernden Aktionen müssen weiterhin im Andora-Spielclient durchgeführt werden.
+
+---
+
+# Öffentliche Marktübersicht
+
+Zusätzlich zur persönlichen Ansicht kann die Webseite öffentliche Marktdaten anzeigen.
+
+Beispielsweise:
+
+* aktuelle Verkaufsangebote
+* aktuelle Kaufgesuche
+* Preise
+* regionale Preisunterschiede
+* verfügbare Mengen
+* aktuelle Nachfrage
+
+Auch diese Ansicht ist ausschließlich lesend.
+
+---
+
+# Persönlich und öffentlich
+
+Damit besitzt die Webseite zwei unterschiedliche Marktansichten:
+
+## Öffentlicher Markt
+
+Jeder kann beobachten:
+
+* Was wird angeboten?
+* Was wird gesucht?
+* Wie entwickeln sich Preise?
+* In welcher Region gibt es bestimmte Waren?
+
+## Persönliches AH-Dashboard
+
+Der angemeldete Spieler kann zusätzlich beobachten:
+
+* Was wurde von mir verkauft?
+* Was wurde für mich gekauft?
+* Wie hat sich mein AH-Guthaben verändert?
+* Welche meiner Kaufgesuche wurden erfüllt?
+* Welche Aufträge sind noch aktiv?
+* Welche Aufträge wurden wegen fehlendem Guthaben pausiert?
+* Was wartet auf mich im Briefkasten?
+
+---
+
+# Zweck
+
+Die Webseite soll Spielern ermöglichen, während ihres normalen Alltags einen Blick auf die Entwicklung ihrer Handelsaktivitäten zu werfen.
+
+Ein Spieler kann beispielsweise während einer Arbeitspause feststellen:
+
+> Zwei Rüstungen wurden verkauft.
+> Die gewünschten Eisenbarren wurden gekauft.
+> 40 Wolfsfelle fehlen noch.
+> Das AH-Depot besitzt noch ausreichend Guthaben.
+
+Er kann diese Informationen sehen, aber **nicht eingreifen**.
+
+Erst wenn er später Andora startet, kann er neue Entscheidungen treffen.
+
+---
+
+# Designgrundsatz
+
+> **Beobachten darf jederzeit möglich sein. Handeln findet im Spiel statt.**
+
+Die Webseite erweitert damit die Verbindung des Spielers zu Andora, ohne selbst zu einem zweiten Spielclient oder zu einem Werkzeug für Offline-Gameplay zu werden.
+
+# AH-Log / Handelshistorie
+
+## Grundprinzip
+
+Jeder Spieler besitzt einen persönlichen **AH-Log**, in dem sämtliche ausgeführten Markttransaktionen nachvollziehbar gespeichert werden.
+
+Der AH-Log ist besonders wichtig für automatische Kaufgesuche, da der tatsächlich bezahlte Preis niedriger sein kann als der vom Spieler festgelegte Maximalpreis.
+
+> **Der Spieler soll jederzeit nachvollziehen können, was sein Auktionshaus mit seinem Geld gemacht hat.**
+
+---
+
+# Maximalpreis und tatsächlicher Kaufpreis
+
+Bei einem Kaufgesuch gibt der Spieler den **maximalen Preis pro Stück** an, den er bereit ist zu bezahlen.
+
+Beispiel:
+
+> Kaufe 100 Wolfsfelle
+> maximal 67 Kupfer pro Stück
+
+67 Kupfer sind damit nicht automatisch der Kaufpreis.
+
+Findet das Auktionshaus ein günstigeres Verkaufsangebot, wird zum tatsächlich angebotenen günstigeren Preis gekauft.
+
+Beispiel:
+
+Kaufgesuch:
+
+> maximal 67 Kupfer
+
+Verkaufsangebot:
+
+> 42 Kupfer
+
+Das Auktionshaus kauft die Ware für:
+
+> **42 Kupfer pro Stück**
+
+und nicht für 67 Kupfer.
+
+Die Differenz verbleibt im AH-Depot des Käufers.
+
+---
+
+# Beispiel einer automatischen Bestellung
+
+Der Spieler sucht:
+
+> 100 Wolfsfelle für maximal 67 Kupfer pro Stück.
+
+Die Bestellung könnte während seiner Abwesenheit folgendermaßen erfüllt werden:
+
+**20 Wolfsfelle × 39 Kupfer**
+= 780 Kupfer
+
+**30 Wolfsfelle × 48 Kupfer**
+= 1.440 Kupfer
+
+**25 Wolfsfelle × 55 Kupfer**
+= 1.375 Kupfer
+
+**25 Wolfsfelle × 67 Kupfer**
+= 1.675 Kupfer
+
+Gesamt:
+
+> 100 Wolfsfelle gekauft
+> 5.270 Kupfer bezahlt
+
+Maximal wäre der Spieler bereit gewesen:
+
+> 6.700 Kupfer
+
+Dadurch wurden:
+
+> **1.430 Kupfer weniger ausgegeben**
+
+als der festgelegte Maximalbetrag.
+
+---
+
+# Inhalt eines Kauf-Logeintrags
+
+Ein Kauf sollte mindestens dokumentieren:
+
+* Datum und Uhrzeit
+* Gegenstand
+* Menge
+* tatsächlicher Stückpreis
+* Gesamtpreis
+* festgelegter Maximalpreis
+* Region / Markt
+* mögliche Marktgebühren
+* automatische oder direkte Ausführung
+
+Optional kann zusätzlich angezeigt werden:
+
+* durchschnittlicher Einkaufspreis einer teilweise erfüllten Kauforder
+* bisher ausgegebener Gesamtbetrag
+* verbleibende gewünschte Menge
+
+---
+
+# Inhalt eines Verkaufs-Logeintrags
+
+Bei Verkäufen sollte der Spieler ebenfalls nachvollziehen können:
+
+* Datum und Uhrzeit
+* verkaufter Gegenstand
+* Menge
+* Verkaufspreis pro Stück
+* Gesamtverkaufspreis
+* Gebühren
+* tatsächlich gutgeschriebener Betrag
+* Region / Markt
+* Verkaufsart
+
+Damit ist auch nachvollziehbar, warum sich das AH-Guthaben verändert hat.
+
+---
+
+# Kauforder-Zusammenfassung
+
+Für ein Kaufgesuch kann zusätzlich eine Zusammenfassung geführt werden.
+
+Beispiel:
+
+**Wolfsfelle**
+
+Gesucht:
+
+> 100
+
+Gekauft:
+
+> 73
+
+Verbleibend:
+
+> 27
+
+Maximalpreis:
+
+> 67 Kupfer
+
+Durchschnittlich bezahlt:
+
+> 49,8 Kupfer
+
+Bisher ausgegeben:
+
+> 3.635 Kupfer
+
+Status:
+
+> Aktiv
+
+Damit kann der Spieler schnell erkennen, wie erfolgreich seine Kauforder arbeitet.
+
+---
+
+# AH-Depot-Log
+
+Auch Bewegungen des AH-Guthabens sollen nachvollziehbar sein.
+
+Beispiele:
+
+* Einzahlung
+* Auszahlung
+* Verkaufserlös
+* automatischer Einkauf
+* direkter Einkauf
+* Marktgebühr
+* Rückerstattung
+* sonstige Markttransaktion
+
+Dadurch entsteht eine vollständige Historie des persönlichen Marktdepots.
+
+---
+
+# Darstellung auf der Webseite
+
+Der persönliche AH-Log kann später über die Andora-Webseite eingesehen werden.
+
+Beispiel:
+
+**08:17 – Verkauf**
+
+> Meisterhafte Eisenrüstung verkauft
+> +12 Gold 40 Silber
+
+**08:19 – Automatischer Kauf**
+
+> 40 Eisenbarren gekauft
+> Maximalpreis: 8 Silber/Stück
+> Tatsächlich bezahlt: 6 Silber/Stück
+> Gesamt: -2 Gold 40 Silber
+
+**09:43 – Automatischer Kauf**
+
+> 20 Wolfsfelle gekauft
+> Maximalpreis: 67 Kupfer/Stück
+> Tatsächlich bezahlt: 41 Kupfer/Stück
+> Gesamt: -8 Silber 20 Kupfer
+
+Die Webseite besitzt weiterhin ausschließlich **Lesezugriff**.
+
+---
+
+# Transparenz
+
+Automatisierter Handel darf für den Spieler keine Blackbox sein.
+
+Deshalb müssen insbesondere folgende Fragen nachträglich beantwortbar sein:
+
+* Was wurde gekauft?
+* Was wurde verkauft?
+* Wann geschah es?
+* Welche Menge wurde gehandelt?
+* Welchen Maximalpreis hatte ich angegeben?
+* Welcher Preis wurde tatsächlich bezahlt?
+* Welche Gebühren sind entstanden?
+* Wie viel Geld wurde meinem Depot gutgeschrieben?
+* Warum wurde ein Kaufgesuch pausiert oder wieder aktiviert?
+
+---
+
+# Grundregel
+
+> **Automatischer Handel braucht vollständige Transparenz.**
+
+Das Auktionshaus darf selbstständig zuvor erteilte Aufträge ausführen, aber jede Geld- und Warenbewegung muss für den Spieler anschließend nachvollziehbar sein.
+
+# AH-Log – Begrenzung
+
+Der persönliche AH-Log speichert maximal die **100 neuesten Einträge**.
+
+Sobald ein neuer Eintrag hinzukommt und bereits 100 Einträge vorhanden sind, wird der älteste Eintrag automatisch entfernt.
+
+Der Log enthält unter anderem:
+
+* Käufe
+* Verkäufe
+* automatische Käufe
+* Einzahlungen
+* Auszahlungen
+* Gebühren
+* Rückerstattungen
+* Pausierung von Kaufgesuchen
+* erneute Aktivierung von Kaufgesuchen
+
+Die Begrenzung gilt auch für die persönliche AH-Ansicht auf der Webseite.
+
+> **Der AH-Log zeigt die letzten 100 relevanten Marktaktivitäten des Spielers.**
+
+Eine unbegrenzte persönliche Handelshistorie ist nicht vorgesehen.
+
+# Angebotsdauer und Ablauf
+
+## Laufzeit
+
+Sowohl **Verkaufsangebote** als auch **Kaufgesuche** besitzen eine maximale Laufzeit von:
+
+**7 Tagen**
+
+Die Laufzeit beginnt mit dem Einstellen beziehungsweise Erstellen des Marktauftrags.
+
+---
+
+# Verbleibende Zeit
+
+Bei jedem Verkaufsangebot und Kaufgesuch wird die noch verbleibende Laufzeit angezeigt.
+
+Beispielsweise:
+
+* 6 Tage 14 Stunden
+* 3 Tage 8 Stunden
+* 18 Stunden 24 Minuten
+* 42 Minuten
+
+Die Anzeige zählt kontinuierlich herunter, damit der Spieler jederzeit erkennen kann, wie lange ein Angebot noch am Markt verfügbar ist.
+
+---
+
+# Ablauf eines Verkaufsangebots
+
+Wurde ein Gegenstand nach 7 Tagen nicht oder nur teilweise verkauft, endet das Verkaufsangebot automatisch.
+
+Nicht verkaufte Gegenstände werden aus dem Auktionshaus entfernt und an den **Briefkasten des Spielers** geschickt.
+
+Dort gelten anschließend die normalen:
+
+**30 Tage Aufbewahrungszeit**
+
+Nach Ablauf dieser 30 Tage werden nicht abgeholte Gegenstände automatisch gelöscht.
+
+---
+
+# Ablauf eines Kaufgesuchs
+
+Ein Kaufgesuch endet ebenfalls nach 7 Tagen automatisch.
+
+Wurde es nur teilweise erfüllt, werden keine weiteren Gegenstände gekauft.
+
+Da Kaufgesuche das vorhandene AH-Depot verwenden und kein Geld für die vollständige Order reservieren, ist keine Rückzahlung eines reservierten Gesamtbetrags notwendig.
+
+Bereits gekaufte Gegenstände bleiben selbstverständlich erhalten und werden über den Briefkasten zugestellt.
+
+---
+
+# Pausierte Kaufgesuche
+
+Auch ein wegen unzureichendem AH-Guthaben pausiertes Kaufgesuch behält seine ursprüngliche Laufzeit.
+
+Die verbleibende Zeit läuft während der Pause weiter.
+
+Beispiel:
+
+> Kaufgesuch erstellt: 7 Tage
+> Nach 4 Tagen wegen fehlendem Guthaben pausiert
+> Verbleibende Laufzeit: 3 Tage
+
+Wird rechtzeitig wieder ausreichend AH-Guthaben verfügbar, kann das Kaufgesuch automatisch fortgesetzt werden.
+
+Nach Ablauf der ursprünglichen 7 Tage endet es unabhängig davon, wie lange es pausiert war.
+
+---
+
+# Grundregeln
+
+* Verkaufsangebote: **7 Tage**
+* Kaufgesuche: **7 Tage**
+* verbleibende Zeit wird sichtbar heruntergezählt
+* Pausierung stoppt die Laufzeit nicht
+* abgelaufene Verkaufsware → Briefkasten
+* Briefkasten-Aufbewahrung → **30 Tage**
+* danach nicht abgeholte Gegenstände → automatische Löschung
+
+> **Jeder Marktauftrag besitzt eine klar sichtbare und begrenzte Laufzeit.**

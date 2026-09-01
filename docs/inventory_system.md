@@ -111,7 +111,8 @@ The inventory system consists of:
 ### Boss System Integration
 - Item rewards from boss battles are added to player inventory
 - Special item drops that trigger personal cutscenes when found
-- Inventory size affects item drop chances and quality
+- Inventory size affects how many items the player can carry,
+  but does not affect item drop chance or item quality.
 
 ### Quest System Integration
 - Items required for quests are tracked

@@ -1,7 +1,7 @@
 // handlers/hello.ts — HELLO: Charakter laden, registrieren, Nachbarn Spawn
 import WebSocket from 'ws';
 import { S2C } from '../protocol';
-import { loadCharacter } from '../db';
+import { loadCharacter } from '../db/character';
 import { players, bySocket, ensureVisible } from '../world';
 import { config } from '../config';
 import type { NetMsg, Player } from '../types';

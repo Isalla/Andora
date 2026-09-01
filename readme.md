@@ -1,44 +1,77 @@
 # Andora
 
-Ein 2D-Fantasy-MMORPG, entwickelt auf Basis von Godot 3. Zielplattform des
-Clients ist der Raspberry Pi 4 (8 GB) – der Server läuft auf einem separaten
-x86-System.
+Andora ist ein Fantasy-MMORPG mit einer isometrischen Spielwelt. Der Client wird mit Godot 3.5 entwickelt und ist von Anfang an auf eine ressourcenschonende Darstellung ausgelegt. Primäre Referenzplattform ist der Raspberry Pi 4 (8 GB). Der Server läuft auf einem separaten x86-Linux-System.
 
-- **Client**: Godot 3.5 (GLES2), optimiert für den Raspberry Pi
-- **Server**: Node.js + TypeScript (MariaDB 10)
-- **Netz**: WebSocket, 10 Hz Tick, Client-Server-Sync + Interpolation
-- **Lokalisierung**: Deutsch & Englisch von Anfang an (später erweiterbar)
+## Technik
+
+* **Client:** Godot 3.5 (GLES2), optimiert für den Raspberry Pi
+* **Server:** Node.js 20 + TypeScript
+* **Datenbank:** MariaDB 10
+* **Netzwerk:** WebSocket, serverautoritativ, 10-Hz-World-Tick
+* **Lokalisierung:** Deutsch und Englisch von Anfang an, später erweiterbar
+* **KI:** optionale Anbindung lokaler KI-Dienste für dafür vorgesehene Spielsysteme
 
 ## Verzeichnisse
-- `shared/` – Protokoll & gemeinsame Definitionen (Client + Server)
-- `i18n/` – Übersetzungen (de, en)
-- `server/` – Node/TS-Server, Auktionshaus, Kanäle, NPC-AI
-- `src/` – Godot-Client-Logik
-- `docs/architecture.md` – Architektur & Bauplan
 
-## Start (Client)
-Projekt mit Godot 3 öffnen und ausführen. Autoload `I18n` liefert `t("key")`.
+* `client/` – Godot-Client
+* `server/` – Node.js-/TypeScript-Server
+* `shared/` – gemeinsames Netzwerkprotokoll und Definitionen
+* `i18n/` – Übersetzungen und Lokalisierung
+* `monitor/` – Monitoring- und Admin-Werkzeuge
+* `deploy/` – Deployment-Konfiguration und systemd-Vorlagen
+* `docs/` – Architektur-, System- und Spieldesign-Dokumentation
 
-## Start (Server)
+## Serverarchitektur
+
+Andora trennt unterschiedliche Verantwortungsbereiche bewusst voneinander.
+
+Die persistente Datenhaltung ist in mehrere logische Bereiche gegliedert:
+
+* `auth` – Accounts, Authentifizierung, Sessions und Serverautorisierung
+* `character` – persistente Charakterdaten
+* `world_data` – statische und versionierte Weltdefinitionen
+* `realm_state_<realm>` – persistenter Zustand eines einzelnen Realms
+
+Der Realm-/World-Server besitzt keinen direkten Zugriff auf die Auth-Datenbank. Authentifizierungsfunktionen werden über eine getrennte Auth/API-Grenze bereitgestellt.
+
+## Start des Clients
+
+Das Projekt im Verzeichnis `client/` mit Godot 3.5 öffnen und ausführen.
+
+Die Lokalisierung wird clientseitig über das dafür vorgesehene i18n-System bereitgestellt.
+
+## Start des Servers
+
 ```bash
 cd server
-cp config.env.example config.env   # DB + Ollama-Werte eintragen
-npm i && npm run dev
+cp config.env.example config.env
+npm install
+npm run dev
 ```
 
-## Monitoring & Admin-Panel (nur für Admin, keine Spieler)
+`config.env` enthält die lokale Serverkonfiguration und darf keine produktiven Zugangsdaten in das Git-Repository übertragen.
+
+## Monitoring & Admin-Panel
+
+Das Monitoring-System ist ausschließlich für Administration und Betrieb vorgesehen und nicht Bestandteil des Spielerclients.
+
 ```bash
 cd monitor
-node server.js                     # Panel auf 127.0.0.1:3003
+node server.js
 ```
-- Gameserver liefert `GET /health`, `GET /status`, `GET /players` auf Port 3002
-  (Spielerzahl, Tick-/Event-Loop-Last, CPU/RAM, Zonen/NPC/Instanzen,
-  Spielerdiagnose inkl. Ping & sichtbarer Entities).
-- Panel: eigenes Node-Tool (keine Dependencies): Dashboard, Verlauf
-  (~1 min, In-Memory), Steuerung start/stop/restart (mit Bestätigung,
-  nur via `sudo -n systemctl`), Config-Editor (Whitelist, keine Secrets).
-- Produktions-Installation: `deploy/` (systemd-Units + sudoers-Vorlage +
-  Anleitung) — Details in `docs/monitoring_web_panel.md`.
+
+Der Gameserver stellt Monitoring- und Health-Endpunkte bereit. Das separate Admin-Panel kann diese Informationen für Diagnose und Serverbetrieb darstellen.
+
+Produktionsbezogene Konfigurationen und Vorlagen befinden sich unter `deploy/`.
+
+Weitere technische Details befinden sich in der Dokumentation unter `docs/`.
+
+## Entwicklungsprinzip
+
+Andora wird serverautoritativ entwickelt. Der Server bestimmt den verbindlichen Zustand der Spielwelt; der Client stellt diesen Zustand dar und verarbeitet die Benutzereingaben.
+
+Neue Systeme werden modular entwickelt und sollen vorhandene Komponenten wiederverwenden, anstatt parallele Implementierungen aufzubauen.
 
 ## Lizenz
+
 MIT

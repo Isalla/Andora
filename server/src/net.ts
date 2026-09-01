@@ -3,7 +3,7 @@ import WebSocket from 'ws';
 import { config } from './config';
 import { C2S } from './protocol';
 import { bySocket, players } from './world';
-import { savePosition } from './db';
+import { savePosition } from './db/character';
 import { handleHello } from './handlers/hello';
 import { handleHeartbeat } from './handlers/heartbeat';
 import { handleMove } from './handlers/move';

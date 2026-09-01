@@ -1,127 +1,506 @@
-# AI Cutscene System Documentation
+# Andora – Arena-System
 
-## Overview
+## Status
 
-The AI cutscene system generates personalized, dynamic cutscenes throughout the entire game based on player actions and in-game events. This system enhances storytelling by creating unique experiences for each player using AI-generated content.
+**Konzept / Planung**
 
-## Core Functionality
+Das Arena-System ist noch nicht implementiert. Dieses Dokument hält die bisher festgelegten Regeln und Architekturentscheidungen fest.
 
-### Integration Points
-The AI cutscene system is integrated throughout the game:
-- **Boss Battles**: Victory/defeat cutscenes personalized per player
-- **Quest Completion**: Unique story moments based on quest outcomes
-- **Item Discovery**: Personalized reactions to rare item acquisitions
-- **Character Events**: Dynamic narrative moments during gameplay
+---
 
-### Event Triggers
-The system responds to various game events:
-- Boss defeat/victory (boss_victory, boss_defeat)
-- Quest completion/failure (quest_completed, quest_failed)  
-- Item found in inventory (item_found)
-- Player level up or achievement unlock
-- Special story moments or narrative branches
+## 1. Grundprinzip
 
-## Technical Implementation
+Arena-Kämpfe sind vom normalen Weltkampf getrennt.
 
-### Prompt System Architecture
-The core of the system uses a prompt-based approach:
-1. **Event Detection**: Game detects relevant event (e.g., boss defeat)
-2. **Context Gathering**: Collects relevant information (player stats, item types, etc.)
-3. **Prompt Generation**: Creates AI-compatible prompt based on event type and context
-4. **AI Processing**: Sends prompt to AI generator for visualization
-5. **Cutscene Creation**: Generates visual/multimedia cutscene from AI output
+> **Arena-Niederlage und Welt-Tod sind zwei vollständig getrennte Zustände.**
 
-### Prompt Template Structure
-```json
-{
-  "event_type": "boss_victory",
-  "context": {
-    "player_level": 15,
-    "boss_name": "Dragon Lord",
-    "item_found": "Ancient Sword",
-    "player_gender": "male"
-  },
-  "prompt_text": "Player defeated {boss_name} in a dramatic battle. The victory feels personal and meaningful to the player. A {item_found} was found as a reward."
-}
+Ein Spieler, der in einer Arena besiegt wird, stirbt nicht in der Spielwelt.
+
+Die normale Death-Mechanik darf deshalb während eines aktiven Arena-Kampfes nicht ausgelöst werden.
+
+---
+
+## 2. Arena-Match
+
+Jeder Arena-Kampf besitzt einen eigenen serverseitigen Match-Kontext.
+
+Beispiel:
+
+```text
+ArenaMatch
+├── match_id
+├── arena_id
+├── player_ids[]
+├── state
+├── win_condition
+├── started_at
+└── result
 ```
 
-## Integration with Inventory System
+Mögliche grundlegende Match-Zustände:
 
-The AI cutscene system works closely with the inventory management:
-- Uses item quality and rarity to personalize cutscenes
-- Triggers special cutscenes for rare items found in inventory
-- Creates emotional story moments based on player's inventory progress
-- Generates unique reward experiences during boss battles
+```text
+WAITING
+ACTIVE
+FINISHED
+```
 
-### Item Size Impact
-The relationship between items and cutscene generation:
-- **Small Items** (Tier 1): Simple cutscenes with basic visual elements
-- **Medium Items** (Tier 2-3): More detailed cutscenes with item-specific visuals
-- **Large Items** (Tier 4-5): Complex cutscenes showing item effects on environment
-- **Unique Items**: Special cinematic sequences with personal narrative elements
+Der aktive Match-Zustand liegt während des Kampfes im Arbeitsspeicher des Gameservers.
 
-## Player Personalization
+MariaDB dient für persistente Daten wie:
 
-### Individual Experiences
-Each player receives a unique cutscene experience based on:
-- Personal game history and stats
-- Choice-based decisions in the narrative  
-- Current inventory content and progress
-- Story progression through quests and events
+* Match-ID
+* Teilnehmer
+* Arena / Spielmodus
+* Gewinner und Verlierer
+* Start und Ende
+* mögliche Wertungsänderungen
+* Statistiken
+* Match-Historie
 
-### Dynamic Content Generation
-The system adapts to:
-- Player performance (success/failure rates)
-- Difficulty selections
-- Preferred play style or character class
-- Item collection patterns
+Die Datenbank wird nicht bei jedem Treffer abgefragt.
 
-## AI Generation Process
+---
 
-### Input Processing
-1. Game engine sends event data to AI system
-2. Context is analyzed and structured for AI consumption
-3. Templates are filled with relevant game data
-4. Specialized prompts are created based on item size categories
+## 3. Sieg- und Niederlagebedingungen
 
-### Output Integration
-Generated cutscenes are then:
-- Integrated into the main game flow
-- Adapted to player preferences and history  
-- Tracked for future storyline development
+Der jeweilige Arena-Modus bestimmt seine eigenen Siegbedingungen.
 
-## Implementation Benefits
+Mögliche Bedingungen sind beispielsweise:
 
-### Storytelling Enhancement
-- **Dynamic Narratives**: Stories evolve with individual player choices
-- **Personalized Moments**: Each combat outcome feels unique and meaningful
-- **Emotional Impact**: Cutscenes can reflect player's connection to characters or items
+* Lebenspunkte erreichen 0
+* Spieler steckt X Treffer ein
+* Spieler erreicht X Punkte
+* bestimmtes Ziel wird erfüllt
+* Zeitlimit mit anschließendem Punktvergleich
 
-### Technical Advantages
-- **Scalable Content**: AI generation reduces need for pre-made cutscenes
-- **Consistent Quality**: Maintains high production value across all events
-- **Adaptive Experience**: Content adapts to game progress and player stats
+Diese Bedingungen sollen nicht fest in die allgemeine Combat-Engine eingebaut werden.
 
-## System Requirements
+Der Arena-Modus definiert die geltenden Regeln.
 
-### Game Integration Points
-The system connects with:
-- BossManager: For combat-related events
-- InventorySystem: For item discovery and reward events  
-- QuestManager: For quest completion and failure scenes
-- PlayerStats: For personalized narrative elements
+---
 
-### Performance Considerations
-- Cutscene generation is async to avoid blocking gameplay
-- Pre-cached templates for quick response times
-- Resource optimization to handle multiple concurrent requests
+## 4. 0 HP in der Arena
 
-## Future Development
+Während:
 
-### Expansion Plans
-1. **Advanced AI Integration**: Incorporate deep learning for more natural storytelling
-2. **Multi-language Support**: Generate cutscenes in multiple languages based on player preferences
-3. **Custom Avatar Integration**: Personalize cutscenes with player character customization 
-4. **Emotional Modeling**: Enhance narrative based on player's emotional state detection
+```text
+ArenaMatch.state = ACTIVE
+```
 
-This system represents a significant advancement for RPG storytelling, creating unique personalized experiences for every player.
+bedeutet:
+
+```text
+HP <= 0
+```
+
+nicht den Tod des Spielers.
+
+Stattdessen wird der Spieler als besiegt markiert.
+
+Beispiel:
+
+```text
+arena_status = DEFEATED
+hp = 0
+combat_locked = true
+```
+
+Dabei wird insbesondere nicht ausgelöst:
+
+* normaler Welt-Tod
+* Leiche
+* normaler Respawn
+* Todesmalus
+* Lootverlust
+
+Der Spieler bleibt Bestandteil des Arena-Matches, kann aber nicht weiterkämpfen.
+
+---
+
+## 5. Ende des Kampfes
+
+Der Server entscheidet verbindlich, wann der Kampf beendet ist.
+
+Erst bei:
+
+```text
+ArenaMatch.state = FINISHED
+```
+
+werden die Arena-Kampfsperren aufgehoben.
+
+Ein besiegter Spieler steht anschließend mit mindestens:
+
+```text
+HP = 1
+```
+
+wieder auf.
+
+Danach greifen wieder die normalen Spielmechaniken.
+
+---
+
+## 6. Söldner und Begleiter
+
+Söldner dürfen ihren Spieler grundsätzlich bis in die Arena begleiten.
+
+Bei normalen Arena-Kämpfen nehmen sie jedoch nicht am Kampf teil.
+
+Vor Kampfbeginn:
+
+```text
+Spieler betritt Arena
+        ↓
+Söldner folgt
+        ↓
+Match wird ACTIVE
+        ↓
+Söldner verlässt Kampffläche
+        ↓
+Söldner wartet am Arenarand
+```
+
+Während des aktiven Kampfes dürfen diese Söldner keine spielmechanische Unterstützung leisten.
+
+Dazu gehören insbesondere:
+
+* keine Heilung
+* keine Buffs
+* keine Angriffe
+* keine Items
+* keine sonstige Combat-Unterstützung
+
+Sie bleiben jedoch als Figuren anwesend und können ihren Spieler beispielsweise anfeuern.
+
+---
+
+## 7. Verhalten nach dem Kampf
+
+Sobald der Server das Match auf:
+
+```text
+FINISHED
+```
+
+setzt, dürfen die normalen Begleitermechaniken wieder aktiviert werden.
+
+Die Söldner kommen vom Arenarand zu ihrem Spieler zurück.
+
+Hat der Spieler beispielsweise einen Heiler als Begleiter und wurde im Kampf verletzt, darf der Heiler ihn **nach dem offiziellen Kampfende** wieder heilen.
+
+Beispiel:
+
+```text
+Match = FINISHED
+        ↓
+Companion Actions freigegeben
+        ↓
+Spieler verletzt?
+        ↓
+Heiler kann HEAL_OWNER ausführen
+```
+
+Der Arena-Kampf selbst bleibt dadurch unbeeinflusst.
+
+---
+
+## 8. Arena-Modi mit Söldnern
+
+Es kann besondere Arena-Modi geben, in denen Söldner ausdrücklich am Kampf teilnehmen dürfen.
+
+Beispiel:
+
+```text
+Standard Arena
+companions_allowed = false
+```
+
+oder:
+
+```text
+Companion Arena
+companions_allowed = true
+max_companions = 2
+```
+
+Der Arena-Modus entscheidet serverseitig, ob Begleiter teilnehmen dürfen.
+
+Die Söldner-KI entscheidet dies nicht selbst.
+
+---
+
+## 9. Arena als Instanz
+
+Für Arena-Kämpfe ist eine eigene serverseitige Instanz vorgesehen.
+
+Beispiel:
+
+```text
+World
+├── normale Region
+├── Dungeon Instance
+├── Arena Instance 1204
+└── Arena Instance 1205
+```
+
+Nur die für das Match vorgesehenen Teilnehmer befinden sich aktiv in der Kampfinstanz.
+
+Dadurch können:
+
+* fremde Spieler nicht eingreifen
+* Weltmonster nicht in den Kampf gelangen
+* Teilnehmer eindeutig bestimmt werden
+* Arena-Regeln sauber angewendet werden
+* Kampfgrenzen kontrolliert werden
+* Zuschauer von Teilnehmern getrennt werden
+
+Die Arena muss dafür kein eigener Serverprozess sein.
+
+Sie kann eine World-Instance innerhalb des Gameservers darstellen.
+
+---
+
+## 10. Zuschauer
+
+Da eine instanzierte Arena von normalen Spielern nicht direkt betreten werden kann, erhält das Arena-System einen eigenen Zuschauermechanismus.
+
+Zuschauer befinden sich nicht als aktive Teilnehmer in der Kampfinstanz.
+
+Der Zuschauerzugriff ist:
+
+```text
+READ ONLY
+```
+
+Zuschauer können:
+
+* Kämpfer sehen
+* Bewegungen sehen
+* Animationen sehen
+* Treffer sehen
+* Arena-Effekte sehen
+* relevante Matchinformationen sehen
+
+Zuschauer können nicht:
+
+* kämpfen
+* Skills benutzen
+* Teilnehmer beeinflussen
+* Gegenstände in den Kampf bringen
+* sich als Teilnehmer ausgeben
+
+---
+
+## 11. Spectator Viewpoints
+
+Eine Arena kann mehrere fest definierte Zuschauer-Sichtpunkte besitzen.
+
+Beispiel:
+
+```text
+Arena
+├── Viewpoint 1 – Gesamtansicht
+├── Viewpoint 2 – Nordseite
+├── Viewpoint 3 – Südseite
+├── Viewpoint 4 – Seitenansicht
+└── Viewpoint 5 – erhöhte Übersicht
+```
+
+Der Zuschauer darf zwischen diesen Sichtpunkten wechseln.
+
+Die Kamera kann jedoch nicht frei durch die Arena bewegt werden.
+
+> **Zuschauer dürfen ausschließlich zwischen den von der Arena vorgegebenen Spectator Viewpoints wechseln.**
+
+Die Anzahl und Position der Viewpoints wird durch die jeweilige Arena definiert.
+
+Eine kleine Arena kann beispielsweise nur wenige Sichtpunkte besitzen, während eine große Turnierarena mehr Perspektiven anbieten kann.
+
+---
+
+## 12. Arena-Monitor
+
+Außerhalb einer Arena können Monitore bzw. Zuschauerflächen vorgesehen werden, auf denen laufende Kämpfe verfolgt werden können.
+
+Diese verwenden ebenfalls die Spectator-Daten der Arena-Instanz.
+
+Ein Monitor kann beispielsweise immer einen festgelegten:
+
+```text
+main_viewpoint
+```
+
+anzeigen.
+
+Damit können Spieler einen laufenden Kampf beobachten, obwohl sich die eigentlichen Kämpfer in einer privaten Arena-Instanz befinden.
+
+---
+
+## 13. Technisches Grundprinzip
+
+Die Arena erweitert bzw. überschreibt während eines Matches bestimmte normale Weltregeln.
+
+```text
+Combat Event
+     ↓
+Ist Spieler Teilnehmer eines ACTIVE ArenaMatch?
+     ↓
+JA                         NEIN
+ ↓                           ↓
+Arena-Regeln             Welt-Regeln
+ ↓                           ↓
+DEFEATED                 normaler Death
+```
+
+Die allgemeine Combat-Engine bleibt dadurch verwendbar.
+
+Arena-spezifische Regeln werden über den Match-Kontext angewendet.
+
+---
+
+## 14. Wichtige Architekturregel
+
+> **Arena-Kämpfe laufen in einer eigenen serverseitigen Instanz mit eigenem Match-Kontext. Der aktive Match-Zustand liegt im RAM und überschreibt für die Teilnehmer die normale Death-Mechanik. Persistente Ergebnisse werden in MariaDB gespeichert.**
+
+Zusätzlich gilt:
+
+> **Spielmodi bestimmen serverseitig, welche Fähigkeiten und Aktionen Begleitern während eines Matches erlaubt sind. Der NPC selbst bleibt dabei eine persistente Figur der Welt.**
+
+Und für Zuschauer:
+
+> **Arena-Zuschauer verwenden einen Read-only-Spectator-Modus mit festen, wechselbaren Kamerapositionen. Zuschauer greifen niemals in das aktive Match ein.**
+
+# 27. NPC Scene Lock und Szenensteuerung
+
+Die Dynamic Scene Engine kann beteiligte NPCs für die Dauer einer Szene temporär **reservieren und sperren**.
+
+Dadurch wird verhindert, dass ein NPC während einer wichtigen Szene durch sein normales Verhalten:
+
+* seinen Arbeitsplatz verlässt
+* seinem Tagesablauf folgt
+* zufällig herumläuft
+* eine Reise beginnt
+* auf unwichtige Umgebungsereignisse reagiert
+* eine andere normale Tätigkeit startet
+* gleichzeitig von einem anderen System verwendet wird
+
+Ein NPC bleibt dabei dieselbe persistente Person der Spielwelt. Er wird nicht kopiert und nicht durch einen speziellen Cutscene-NPC ersetzt.
+
+## Scene Lock
+
+Wird ein NPC für eine Szene benötigt, versucht die Scene Engine zunächst, ihn für diese Szene zu reservieren.
+
+Beispiel:
+
+```text
+NPC normal verfügbar
+        ↓
+Scene benötigt NPC
+        ↓
+NPC für Scene reservieren
+        ↓
+SCENE_LOCKED
+        ↓
+Scene Engine übernimmt erlaubte Steuerung
+```
+
+Während `SCENE_LOCKED` wird das normale autonome Verhalten des NPCs für die betroffenen Bereiche pausiert.
+
+Die Scene Engine kann anschließend beispielsweise kontrollieren:
+
+* Zielposition
+* Laufweg
+* Blickrichtung
+* Animation
+* Haltung
+* Interaktionszustand
+* Szenendialog
+* Zeitpunkt einer Aktion
+* Wechsel zur nächsten Szenenposition
+
+Beispiel:
+
+```text
+Zeremonienmeister
+        ↓
+SCENE_LOCKED
+        ↓
+gehe zum Altar
+        ↓
+warte auf Position
+        ↓
+drehe dich zum Brautpaar
+        ↓
+beginne Rede
+        ↓
+führe weitere Szenenaktionen aus
+```
+
+## Priorität der Szene
+
+Ein Scene Lock verhindert normales autonomes NPC-Verhalten, bedeutet jedoch nicht, dass sämtliche serverseitigen Regeln außer Kraft gesetzt werden.
+
+Die Scene Engine erhält keine Möglichkeit, grundlegende Weltregeln zu umgehen.
+
+Insbesondere bleiben serverautoritativ:
+
+* Existenz des NPCs
+* Tod
+* gültige Positionen
+* Welt-/Instanzzugehörigkeit
+* grundlegende Bewegungsregeln
+* wichtige Systemzustände
+
+Die Scene Engine steuert den NPC ausschließlich innerhalb der vom Server erlaubten Möglichkeiten.
+
+## Reservierung vor Szenenbeginn
+
+Wenn ein bestimmter persistenter NPC zwingend für eine Szene benötigt wird, muss seine Verfügbarkeit vor Beginn geprüft werden.
+
+Ein NPC kann beispielsweise bereits:
+
+* auf Reisen sein
+* an einem anderen wichtigen Event teilnehmen
+* reserviert sein
+* nicht verfügbar sein
+* tot sein
+
+Die Scene Engine darf deshalb keinen zweiten Borin erzeugen, nur weil der echte Borin gerade woanders ist.
+
+Die jeweilige Lua-Szene bestimmt, wie mit einem nicht verfügbaren NPC umgegangen wird, beispielsweise:
+
+* Szene kann noch nicht beginnen
+* Szene wird verschoben
+* ein zulässiger Ersatz-NPC übernimmt die Rolle
+* eine alternative Szenenvariante wird verwendet
+
+## Freigabe nach der Szene
+
+Nach Abschluss oder Abbruch der Szene wird der NPC wieder freigegeben.
+
+```text
+SCENE_LOCKED
+        ↓
+Scene FINISHED / CANCELLED
+        ↓
+Scene Lock entfernen
+        ↓
+normaler NPC-Zustand
+        ↓
+NPC AI / Tagesablauf übernimmt wieder
+```
+
+Dabei muss das NPC-System berücksichtigen, wo sich der NPC nach der Szene tatsächlich befindet und welcher Weltzustand inzwischen gilt.
+
+Der NPC wird nicht einfach blind auf seinen Zustand vor der Szene zurückgesetzt.
+
+## Grundregel
+
+> **Die Scene Engine darf benötigte NPCs für die Dauer einer Szene reservieren, ihre autonome Steuerung temporär sperren und ihre szenenrelevanten Bewegungen, Positionen, Animationen und Aktionen kontrollieren. Nach Ende oder Abbruch der Szene wird die Kontrolle sauber an das normale NPC-System zurückgegeben.**
+
+Dabei gilt weiterhin:
+
+> **Ein persistenter NPC existiert nur einmal. Eine Cutscene darf keinen zweiten NPC erzeugen, nur weil das Original gerade nicht verfügbar ist.**
+

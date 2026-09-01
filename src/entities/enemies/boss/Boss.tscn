@@ -1,9 +1,0 @@
-[gd_scene load_steps=2 format=3 uid="uid://cj14198q7g6h"]
-
-[ext_resource type="GDScript" path="res://src/entities/enemies/boss/Boss.gd" id="1_p45k5"]
-
-[node name="Boss" type="CharacterBody2D"]
-	script = ExtResource( 1_p45k5 )
-	monitorable = false
-	visible = true
-	physics_process = true

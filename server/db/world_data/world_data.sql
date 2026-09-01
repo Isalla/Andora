@@ -1,0 +1,9 @@
+-- world_data — statische globale Weltdaten (Definitionen: Items, Monster, NPC, Region, ...)
+-- "world_data beschreibt, was in Andora existieren kann."
+-- Diese Datei wird NICHT vom Server ausgefuehrt (kein CREATE DATABASE);
+-- das Anlegen der Datenbank liegt beim Betreiber.
+-- Migrationen in migrations/ und Seed-Daten in seed/ werden mit den
+-- eingeschaerften world-data-DB-Rechten angewendet (im Serverbetrieb nur SELECT).
+-- Aktuell noch keine bestaendigen Definitionstabellen aus dem Altschema uebernommen:
+-- die alten Test-/Prototyp-Tabellen enthielten keine statischen Definitionsdaten.
+-- Erste Migrationen werden mit den ersten contentbedingten Definitionstabellen angelegt.

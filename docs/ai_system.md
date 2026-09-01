@@ -1,83 +1,928 @@
-# AI System Documentation
+# Andora – AI System
 
-## Overview
-The AI system provides intelligent responses to player interactions through a client-server architecture with caching capabilities. The system integrates with all game elements including inventory management, boss battles, quest progression, and crafting.
+## Status
 
-## Architecture
+**Architektur / Planung**
 
-### Client-Server Communication
-- **Client**: Game frontend that handles user interaction
-- **Server**: Central processing unit that manages AI requests and responses
-- **Message Protocol**: All communication occurs through standardized message format
+Dieses Dokument beschreibt die zentrale KI-Architektur von Andora.
 
-### AI Request Process
-1. Client sends message to server
-2. Server determines if AI response is required
-3. If AI assistance needed, server forwards request to AI engine
-4. AI engine processes query and generates response
-5. Server returns response to client for player display
-6. All requests/responses are cached in server RAM
+Spezialisierte Systeme wie NPC-KI, Dynamic Scene System oder AI-Crafting besitzen eigene Dokumentationen und bauen auf diesen gemeinsamen Regeln auf.
 
-### Cache System
-- **Cache Storage**: RAM-based storage for all queries and responses
-- **Cache Lifetime**: Automatic clearing after 10 minutes of inactivity
-- **Cache Optimization**: Eliminates redundant AI processing for identical queries
-- **Memory Management**: Efficient caching mechanism to reduce server load
+---
 
-## Integration Points
+# 1. Grundprinzip
 
-### Inventory System Integration
-- AI provides contextual help for inventory items
-- Answers questions about item properties, quality levels, and usage
-- Supports crafting guidance based on available inventory items
-- Offers equipment recommendations based on player level tier
+KI ist in Andora eine zusätzliche Interpretations-, Dialog- und Erzählebene.
 
-### Boss System Integration
-- AI generates personalized responses to boss encounters
-- Provides tactical advice during boss battles
-- Creates unique dialogue sequences for special boss events
-- Handles cutscene storytelling based on item discoveries
+Sie ist **nicht die Autorität über die Spielwelt**.
 
-### Quest System Integration
-- AI responds to quest-related queries
-- Provides hints and guidance for quest completion
-- Generates dynamic quest narratives based on player progress
-- Offers reward explanations and item tracking assistance
+Grundregel:
 
-### Crafting System Integration
-- AI explains crafting recipes and requirements
-- Provides tips for efficient crafting strategies
-- Answers questions about material availability and quality levels
-- Suggests optimal combinations based on player inventory
+> **Der Server bestimmt, was wahr ist und was passieren darf. Die KI interpretiert, formuliert und reagiert innerhalb dieses Rahmens.**
 
-### Cutscene System Integration
-- AI generates personalized cutscene content based on item discoveries
-- Creates celebration scenes for inventory expansions
-- Develops unique storytelling moments for rare item finds
-- Provides context-specific dialogue for different game situations
+Die Spielwelt muss vollständig weiterlaufen können, wenn das KI-System nicht verfügbar ist.
 
-## Technical Implementation Details
+---
 
-### Message Format
-All communications follow this standardized format:
+# 2. Architektur
+
+Grundlegender Kommunikationsweg:
+
+```text
+Godot Client
+      ↓
+Andora Gameserver
+      ↓
+AI Service
+      ↓
+Ollama
+      ↓
+AI Service
+      ↓
+Andora Gameserver
+      ↓
+Godot Client
 ```
+
+Der Client kommuniziert niemals direkt mit Ollama.
+
+Der Gameserver kontrolliert:
+
+* welche KI-Anfragen erlaubt sind
+* welche Informationen an die KI gehen
+* welche KI-Antworten verwendet werden
+* welche Aktionen daraus entstehen dürfen
+
+---
+
+# 3. Aufgabenverteilung
+
+## TypeScript
+
+TypeScript ist für die Spielmechanik und Autorität verantwortlich.
+
+Dazu gehören:
+
+* Weltzustand
+* Spielerzustand
+* NPC-Zustand
+* Positionen
+* Combat
+* Inventory
+* Items
+* Crafting
+* Quests
+* Beziehungen
+* Knowledge
+* Events
+* Reisen
+* Gruppen
+* Instanzen
+* Szenen
+* Validierung
+* Berechtigungen
+
+Die KI darf diese Systeme nicht direkt umgehen.
+
+---
+
+## Lua
+
+Lua definiert Gameplay-Inhalte und KI-spezifische Content-Regeln.
+
+Dazu können gehören:
+
+* NPC-Persönlichkeiten
+* NPC-Prompt-Fragmente
+* Dialogregeln
+* Questdefinitionen
+* Itemdefinitionen
+* Rezepte
+* Eventdefinitionen
+* Scene Scripts
+* feste Dialoge
+* Narrative Regeln
+* erlaubte AI-Kontexte
+
+Lua führt kein beliebiges SQL aus und verändert Weltzustände ausschließlich über kontrollierte Server-APIs.
+
+---
+
+## MariaDB
+
+MariaDB speichert persistente Zustände.
+
+Beispiele:
+
+* Charaktere
+* Inventare
+* Item-Instanzen
+* Questfortschritt
+* Beziehungen
+* NPC-Zustände
+* NPC-Wissen
+* Reisen
+* wichtige Ereignisse
+* Story Flags
+* World States
+* Hochzeiten
+* Statistiken
+
+Die KI erhält keinen direkten Datenbankzugriff.
+
+---
+
+## Ollama
+
+Ollama verarbeitet ausschließlich vom AI-Service vorbereitete Aufgaben.
+
+Mögliche Aufgaben:
+
+* NPC-Dialog
+* Interpretation natürlicher Sprache
+* persönliche Dialogvarianten
+* Narrative Texte
+* Scene-Dialog
+* Crafting-Wünsche interpretieren
+* situationsabhängige Reaktionen
+
+Ollama ist niemals die Quelle des tatsächlichen Weltzustands.
+
+---
+
+# 4. Zentrale AI-Regel
+
+> **Die KI erzählt mit den Fakten der Welt – sie bestimmt die Fakten der Welt nicht.**
+
+Beispiel:
+
+```text
+Server:
+Borin befindet sich in Ardan.
+Borin kennt Spieler.
+Beziehung = 72.
+Borin weiß, dass die Brücke zerstört wurde.
+
+        ↓
+
+AI Context
+
+        ↓
+
+KI:
+formuliert Borins Reaktion
+```
+
+Die KI darf nicht eigenständig behaupten, dass Borin gestern einen Drachen besiegt hat, wenn diese Information nicht Teil seines Wissens oder des erlaubten Szenenkontexts ist.
+
+---
+
+# 5. NPCs dürfen trotzdem lügen
+
+Die Regel gegen erfundene Weltfakten bedeutet nicht, dass jeder NPC immer die Wahrheit sagen muss.
+
+Ein NPC darf:
+
+* lügen
+* Informationen verschweigen
+* manipulieren
+* übertreiben
+* täuschen
+* eine Antwort verweigern
+
+wenn:
+
+* seine Persönlichkeit dies erlaubt
+* er über das notwendige Wissen verfügt
+* die Situation dazu passt
+
+Beispiel:
+
+```text
+Server-Wahrheit:
+In der Ruine wartet kein Schatz.
+Dort befinden sich Banditen.
+
+NPC-Wissen:
+NPC kennt beide Fakten.
+
+NPC-Persönlichkeit:
+betrügerisch
+
+        ↓
+
+NPC:
+"In der alten Ruine liegt ein wertvoller Schatz."
+```
+
+Die KI hat dabei keine Weltinformation erfunden.
+
+Der NPC hat bewusst über eine bekannte Wahrheit gelogen.
+
+---
+
+# 6. AI Context
+
+Ollama bekommt nicht automatisch den gesamten Weltzustand oder die vollständige Datenbank.
+
+Der Server erstellt für jede Anfrage einen begrenzten, relevanten Kontext.
+
+Beispiel:
+
+```text
+AI Request
+├── request_type
+├── player_context
+├── npc_context
+├── world_context
+├── knowledge_context
+├── relationship_context
+├── scene_context
+├── allowed_actions
+└── locale
+```
+
+Nur benötigte Daten werden übergeben.
+
+---
+
+# 7. Narrative Context
+
+Rohdaten können vor der KI-Anfrage durch den Server in erzählerisch sinnvolle Informationen übersetzt werden.
+
+Beispiel:
+
+```text
+playtime_hours = 1240
+quests_completed = 387
+
+        ↓
+
+Narrative Context
+
+long_time_adventurer = true
+experienced_adventurer = true
+helped_many_people = true
+```
+
+Lua kann NPC-spezifisch festlegen, wie solche Informationen interpretiert werden dürfen.
+
+Ein Zeremonienmeister kann dieselben Daten anders verwenden als ein Schmied, Wirt oder Gildenmeister.
+
+---
+
+# 8. KI-Systeme
+
+Andora verwendet nicht eine einzige KI-Aufgabe für alles.
+
+Das AI-System wird in spezialisierte Bereiche getrennt.
+
+## NPC Dialogue AI
+
+Verantwortlich für:
+
+* Gespräche
+* Persönlichkeit
+* Reaktionen
+* Wissen
+* Beziehungen
+* situationsabhängige Antworten
+* bewusstes Lügen oder Verschweigen
+
+Details:
+
+`Ki-NPC.md`
+
+---
+
+## Command AI
+
+Ein kleines, schnelles Modell kann Sprache bzw. natürliche Befehle in strukturierte Spielbefehle übersetzen.
+
+Beispiel:
+
+```text
+"Alle zurück und beschützt mich!"
+
+        ↓
+
+Command AI
+
+        ↓
+
 {
-  "type": "request",
-  "content": "Player query or action",
-  "timestamp": "ISO timestamp",
-  "player_id": "Unique identifier",
-  "context": "Game situation details"
+    intent: "RETREAT_AND_PROTECT",
+    scope: "ALL_COMPANIONS"
 }
 ```
 
-### Response Handling
-- Server analyzes incoming messages for AI requirement
-- Requests forwarded to AI engine when appropriate
-- Responses cached for potential reuse within 10-minute window
-- Client receives optimized responses with minimal processing delay
+Die KI führt diesen Befehl nicht aus.
 
-### Performance Optimization
-- RAM cache reduces duplicate AI processing
-- Automatic cleanup prevents memory overflow
-- Context-sensitive responses improve player experience
-- Seamless integration maintains game performance
+Der Server prüft anschließend:
+
+* Eigentümer
+* Begleiter
+* Zustand
+* Fähigkeiten
+* Ziel
+* Reichweite
+* Cooldowns
+* Ressourcen
+* Berechtigungen
+
+Erst danach wird eine erlaubte Aktion ausgeführt.
+
+---
+
+## Narrative AI
+
+Verantwortlich für:
+
+* dynamische Scene-Dialoge
+* persönliche Story-Reaktionen
+* World-Event-Dialoge
+* Zeremonien
+* besondere narrative Momente
+
+Die Scene Engine bestimmt Ablauf und Weltzustand.
+
+Die Narrative AI improvisiert ausschließlich freigegebene Dialogpassagen.
+
+Details:
+
+`AI-Cutscene.md`
+
+---
+
+## AI Request Parser
+
+Natürliche Wünsche können in strukturierte Anforderungen übersetzt werden.
+
+Beispiel Crafting:
+
+```text
+Spieler:
+"Ich möchte ein Schwert aus Mithril mit zwei Sockeln
+und einem Rubin."
+
+        ↓
+
+AI Request Parser
+
+        ↓
+
+{
+    type: "sword",
+    material: "mithril",
+    sockets: 2,
+    gem: "ruby"
+}
+```
+
+Danach übernimmt der normale CraftingService.
+
+Die KI bestimmt niemals:
+
+* Kosten
+* benötigte Materialien
+* erlaubte Sockel
+* Stats
+* Qualität
+* Craftingzeit
+
+Diese Werte bestimmt der Server.
+
+---
+
+# 9. Strukturierte AI-Ausgaben
+
+Wo eine KI-Antwort eine Spielaktion beeinflussen kann, sollte sie möglichst strukturiert erfolgen.
+
+Beispiel:
+
+```json
+{
+  "intent": "HEAL_OWNER",
+  "target": "player_123",
+  "confidence": 0.94
+}
+```
+
+Der Server behandelt diese Ausgabe als:
+
+> **Vorschlag**
+
+nicht als Befehl.
+
+Erst die Servervalidierung entscheidet über die tatsächliche Aktion.
+
+---
+
+# 10. i18n
+
+Das bestehende Andora-i18n-System ist die einzige Quelle für die Sprache des Spielers.
+
+Es gibt keine separate KI-Spracheinstellung.
+
+```text
+Godot i18n
+      ↓
+Spieler-Locale
+      ↓
+Gameserver
+      ↓
+AI Service
+      ↓
+Ollama
+```
+
+Der AI-Service gibt die gewünschte Ausgabesprache zentral vor.
+
+Beispiel:
+
+```text
+locale = de
+```
+
+Die Lua-Prompts dürfen intern beispielsweise auf Englisch geschrieben sein.
+
+Die Antwort an den Spieler erfolgt trotzdem auf Deutsch.
+
+> **Die aktuell gewählte i18n-Sprache bestimmt auch die Sprache KI-generierter Spielinhalte.**
+
+---
+
+# 11. Asynchrone Verarbeitung
+
+KI-Anfragen dürfen niemals den normalen Gameserver-Tick blockieren.
+
+Der Andora-World-Tick läuft mit:
+
+```text
+10 Hz
+100 ms
+```
+
+KI-Anfragen werden davon getrennt verarbeitet.
+
+```text
+Game Event
+     ↓
+AI Request erzeugen
+     ↓
+asynchrone Verarbeitung
+
+World Tick ───────────────────────→ läuft weiter
+
+     ↓
+AI Response
+     ↓
+Server validiert
+     ↓
+Ergebnis verwenden
+```
+
+Der Server wartet niemals innerhalb des World-Ticks synchron auf Ollama.
+
+---
+
+# 12. Prioritäten
+
+Nicht jede KI-Anfrage ist gleich wichtig.
+
+Das AI-System sollte Anfragen kategorisieren können.
+
+Beispiel:
+
+```text
+HIGH
+→ wichtiger Scene-Dialog
+→ direkte Spieler-NPC-Interaktion
+
+NORMAL
+→ NPC-Reaktion
+→ Crafting-Interpretation
+
+LOW
+→ Ambient NPC Conversation
+→ optionale Hintergrundreaktion
+```
+
+Bei hoher Auslastung können unwichtige KI-Aufgaben verzögert oder verworfen werden.
+
+Gameplay darf dadurch nicht blockiert werden.
+
+---
+
+# 13. AI Budget
+
+Die Anzahl gleichzeitig laufender KI-Anfragen muss begrenzt werden.
+
+Besonders wichtig ist dies später bei:
+
+* Tavernen
+* Städten
+* World Events
+* vielen Spielern
+* NPC-zu-NPC-Gesprächen
+
+Beispiel:
+
+```text
+AI Request Queue
+        ↓
+Priority
+        ↓
+Concurrency Limit
+        ↓
+Ollama
+```
+
+Ein Raum mit 30 NPCs darf nicht automatisch 30 parallele LLM-Anfragen erzeugen.
+
+---
+
+# 14. Cache-System
+
+Das alte Konzept eines globalen 10-Minuten-Response-Caches wird nicht übernommen.
+
+Dynamische Antworten hängen häufig von aktuellem Kontext ab.
+
+Beispiel:
+
+```text
+Spieler:
+"Wo ist Borin?"
+```
+
+Eine Antwort von vor fünf Minuten kann bereits falsch sein.
+
+Deshalb werden persönliche oder weltabhängige KI-Antworten grundsätzlich nicht blind wiederverwendet.
+
+---
+
+# 15. Was gecacht werden darf
+
+Geeignete Cache-Kandidaten sind beispielsweise:
+
+* statische Prompt-Bausteine
+* vorbereitete System-Prompts
+* Lua-NPC-Definitionen
+* Itemdefinitionen
+* Questdefinitionen
+* statische Narrative Regeln
+* unveränderliche Referenzinformationen
+
+Nicht allgemein wiederverwenden:
+
+* NPC-Dialogantworten
+* persönliche Scene-Dialoge
+* aktuelle Weltinformationen
+* Beziehungsreaktionen
+* Knowledge-basierte Antworten
+* aktuelle Service-Verfügbarkeit
+
+Falls später Response-Caching benötigt wird, muss der vollständige relevante Kontext Bestandteil der Cache-Entscheidung sein.
+
+---
+
+# 16. AI-Ausfall
+
+Ollama ist kein kritischer Bestandteil des World-Ticks.
+
+Bei einem Ausfall:
+
+```text
+Ollama offline
+       ↓
+World Tick läuft weiter
+       ↓
+Combat läuft weiter
+       ↓
+NPC-Bewegung läuft weiter
+       ↓
+Quests funktionieren
+       ↓
+Inventory funktioniert
+       ↓
+Crafting-Grundsystem funktioniert
+```
+
+KI-abhängige Funktionen verwenden:
+
+* Fallbacktexte
+* Lua-Regeln
+* deterministische Antworten
+* temporäre Nichtverfügbarkeit
+
+Ein Ollama-Ausfall darf niemals den Gameserver zum Stillstand bringen.
+
+---
+
+# 17. NPC-Wissen
+
+Die KI bekommt für einen NPC nur Informationen, die dieser NPC tatsächlich besitzen darf.
+
+> **NPCs dürfen nur auf Informationen reagieren, die sie tatsächlich erhalten haben.**
+
+Information kann beispielsweise entstehen durch:
+
+* eigene Beobachtung
+* Spieler erzählt etwas
+* anderer NPC erzählt etwas
+* Messenger übermittelt Nachricht
+* World Event wird beobachtet
+* offizielle regionale Information
+* erlaubte berufliche Informationen
+
+Der AI-Service darf einem NPC keine globale Allwissenheit geben.
+
+---
+
+# 18. Weltwissen und NPC-Wissen
+
+Es muss zwischen Server-Wahrheit und NPC-Wissen unterschieden werden.
+
+```text
+WORLD TRUTH
+"Die Brücke wurde zerstört."
+
+NPC A
+→ hat es gesehen
+→ weiß es
+
+NPC B
+→ befindet sich weit entfernt
+→ weiß es nicht
+
+NPC C
+→ bekam Nachricht von NPC A
+→ weiß es
+```
+
+Alle drei NPCs können deshalb auf dieselbe Spielerfrage unterschiedlich reagieren.
+
+---
+
+# 19. AI und Gameplay-Aktionen
+
+Eine KI darf niemals direkt:
+
+* Items erzeugen
+* Gold verändern
+* XP vergeben
+* Spieler teleportieren
+* NPCs teleportieren
+* Quests abschließen
+* Schaden verursachen
+* Spieler heilen
+* Beziehungen verändern
+* World States ändern
+* DB-Einträge direkt verändern
+
+Stattdessen kann die KI eine erlaubte Aktion vorschlagen.
+
+Beispiel:
+
+```text
+AI
+→ HEAL_OWNER
+
+        ↓
+
+Server
+
+Darf NPC heilen?
+Hat NPC Fähigkeit?
+Genug Mana?
+Cooldown bereit?
+Ziel gültig?
+Reichweite gültig?
+
+        ↓
+
+JA
+→ HealService führt Aktion aus
+```
+
+---
+
+# 20. Lua und AI
+
+Lua darf Prompt-Fragmente und AI-Regeln definieren.
+
+Beispiel:
+
+```lua
+ai = {
+    personality = "friendly_blacksmith",
+
+    prompt = [[
+        Speak like an experienced blacksmith.
+        Keep answers concise.
+        Use only provided world knowledge.
+    ]]
+}
+```
+
+Globale Sicherheits- und Autoritätsregeln werden jedoch zentral vom AI-Service ergänzt.
+
+Eine fehlerhafte Lua-Datei darf die zentrale Regel:
+
+> Server ist die Quelle der Wahrheit.
+
+nicht aufheben.
+
+---
+
+# 21. AI und Dynamic Scene System
+
+Die Scene Engine kontrolliert:
+
+* Teilnehmer
+* Positionen
+* NPC Scene Locks
+* Bewegungen
+* Animationen
+* Szenenphasen
+* Bedingungen
+* Konsequenzen
+
+Die KI kontrolliert:
+
+* ausdrücklich freigegebene Dialogpassagen
+* persönliche Formulierungen
+* situationsabhängige Reaktionen
+
+Damit können Szenen teilweise gescriptet und teilweise improvisiert sein.
+
+---
+
+# 22. AI und Crafting
+
+KI kann natürliche Crafting-Wünsche verstehen.
+
+Sie darf jedoch keine Crafting-Regeln bestimmen.
+
+```text
+Spielerwunsch
+      ↓
+AI Parser
+      ↓
+strukturierte Spezifikation
+      ↓
+CraftingService
+      ↓
+Validierung
+      ↓
+Kosten / Materialien / Ergebnis
+```
+
+Der Server bleibt vollständig autoritativ.
+
+---
+
+# 23. AI und Bosskämpfe
+
+KI kann Dialoge und Reaktionen rund um Bosskämpfe erzeugen.
+
+Taktische Informationen dürfen jedoch nur verwendet werden, wenn der entsprechende NPC diese Informationen tatsächlich kennt.
+
+Ein NPC darf nicht durch das AI-System plötzlich Zugriff auf:
+
+* versteckte Bossmechaniken
+* interne Serverwerte
+* unbekannte Fähigkeiten
+* nicht beobachtete Ereignisse
+
+erhalten.
+
+---
+
+# 24. Datenschutz innerhalb des Spiels
+
+Nicht jeder gespeicherte Spielerwert sollte automatisch in einen KI-Prompt gelangen.
+
+Der Context Builder übergibt nur Informationen, die:
+
+1. für die aktuelle Anfrage relevant sind,
+2. für den betreffenden NPC bzw. die Szene erlaubt sind,
+3. narrativ sinnvoll verwendet werden können.
+
+Beispielsweise kann eine Hochzeitszeremonie Spielzeit und gemeinsame Abenteuer berücksichtigen, während ein zufälliger Händler diese Informationen nicht automatisch erhält.
+
+---
+
+# 25. Fehlerbehandlung
+
+Jede AI-Anfrage benötigt definierte Fehlerfälle.
+
+Dazu gehören:
+
+```text
+TIMEOUT
+MODEL_UNAVAILABLE
+INVALID_RESPONSE
+INVALID_JSON
+CONTEXT_INVALID
+ACTION_REJECTED
+REQUEST_CANCELLED
+```
+
+Eine fehlerhafte KI-Antwort darf nicht ungeprüft in Gameplay umgesetzt werden.
+
+---
+
+# 26. Logging und Monitoring
+
+Das Monitoring-System sollte später grundlegende AI-Metriken anzeigen können.
+
+Beispiele:
+
+```text
+AI Status
+aktive Requests
+wartende Requests
+Requests pro Minute
+durchschnittliche Antwortzeit
+Timeouts
+Fehler
+Modell
+Queue-Auslastung
+```
+
+Dabei sollten keine unnötigen vollständigen privaten Spielerunterhaltungen dauerhaft als Monitoringdaten gespeichert werden.
+
+---
+
+# 27. Erweiterbarkeit
+
+Die Architektur soll weitere KI-Funktionen ermöglichen, ohne die Serverautorität aufzugeben.
+
+Mögliche spätere Systeme:
+
+* NPC-zu-NPC-Gespräche
+* dynamische World-Event-Reaktionen
+* Gilden-/Fraktionsreaktionen
+* zusätzliche Command-Modelle
+* narrative Ereignisse
+* komplexere NPC-Planung
+
+Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
+
+---
+
+# 28. Architekturübersicht
+
+```text
+                       ┌──────────────┐
+                       │ Godot Client │
+                       └──────┬───────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │ Andora Server   │
+                    │   TypeScript    │
+                    └───────┬─────────┘
+                            │
+              ┌─────────────┼─────────────┐
+              │             │             │
+              ▼             ▼             ▼
+          MariaDB          Lua        AI Context
+                                        Builder
+                                          │
+                                          ▼
+                                     AI Service
+                                          │
+                                          ▼
+                                        Ollama
+                                          │
+                                          ▼
+                                   AI Response
+                                          │
+                                          ▼
+                                Server Validation
+                                          │
+                                          ▼
+                                   Game Systems
+```
+
+---
+
+# 29. Zentrale Architekturregeln
+
+> **Serverzustand ist Wahrheit.**
+
+> **KI interpretiert – sie autorisiert nicht.**
+
+> **Die KI erhält nur den Kontext, den sie für ihre aktuelle Aufgabe benötigt.**
+
+> **NPCs dürfen nur auf Wissen reagieren, das sie tatsächlich besitzen.**
+
+> **KI-Anfragen dürfen den World-Tick niemals blockieren.**
+
+> **Das Spiel muss auch ohne Ollama funktionieren.**
+
+> **Spielmechanik liegt in TypeScript, Inhalte und Prompt-Fragmente liegen in Lua, Persistenz liegt in MariaDB und die KI übernimmt Sprache, Interpretation und kontrollierte Improvisation.**
+
+> **Die i18n-Sprache des Spielers bestimmt auch die Sprache der KI-Ausgabe.**
