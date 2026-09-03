@@ -1,9 +1,9 @@
-// lib/envconfig.js — Lese-/Schreib-Logik für server/config.env (Whitelist-basiert)
+// lib/envconfig.js — Lese-/Schreib-Logik für src/realm/config.env (Whitelist-basiert)
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
 
-/** Parses server/config.env wie der Server-Satz (Key=Value, # Kommentare). */
+/** Parses src/realm/config.env wie der Server-Satz (Key=Value, # Kommentare). */
 function readEnvFile(p) {
   const out = {};
   if (!fs.existsSync(p)) return out;
@@ -103,12 +103,12 @@ function validateValue(key, v) {
 }
 
 /**
- * Schreibt geänderte, validierte Values in server/config.env.
+ * Schreibt geänderte, validierte Values in src/realm/config.env.
  * Kommentare und nicht-Whitelist-Keys (DB*, Passwörter …) bleiben unangetastet.
  */
 function writeChanges(changes) {
   const p = config.serverConfigPath;
-  if (!fs.existsSync(p)) throw new Error('server/config.env existiert nicht');
+  if (!fs.existsSync(p)) throw new Error('src/realm/config.env existiert nicht');
   const lines = fs.readFileSync(p, 'utf8').split('\n');
   const set = new Set(Object.keys(changes));
   const present = new Set();

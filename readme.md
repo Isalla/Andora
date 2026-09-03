@@ -13,8 +13,8 @@ Andora ist ein Fantasy-MMORPG mit einer isometrischen Spielwelt. Der Client wird
 
 ## Verzeichnisse
 
+* `src/` – Server-Dienste: `realm/` (Node.js-/TypeScript-Server), `api/` (Go-API-/Security-Service), `login/` und `coordinator/` (Struktur vorgesehen, noch ohne Code)
 * `client/` – Godot-Client
-* `server/` – Node.js-/TypeScript-Server
 * `shared/` – gemeinsames Netzwerkprotokoll und Definitionen
 * `i18n/` – Übersetzungen und Lokalisierung
 * `monitor/` – Monitoring- und Admin-Werkzeuge
@@ -43,7 +43,7 @@ Die Lokalisierung wird clientseitig über das dafür vorgesehene i18n-System ber
 ## Start des Servers
 
 ```bash
-cd server
+cd src/realm
 cp config.env.example config.env
 npm install
 npm run dev

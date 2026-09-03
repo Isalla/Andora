@@ -7,9 +7,9 @@
 --   email_lookup_hash = nicht reversibler Lookup-Hash (SHA-256, BINARY(32))
 -- Sessions, Login-Tokens, Recovery-Tokens, Realm- und World-Server-Daten
 -- werden in eigenen späteren Migrationen angelegt.
--- Diese Datei ist identisch zu migrations/001_accounts.sql gehalten.
-USE auth;
-
+-- Diese Datei ist inhaltlich identisch zu migrations/001_accounts.sql
+-- gehalten. Kein "USE <db>": der Runner verbindet bereits mit der
+-- konfigurierten auth-DB.
 CREATE TABLE IF NOT EXISTS accounts (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(32) NOT NULL UNIQUE,

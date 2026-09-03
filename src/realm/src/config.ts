@@ -1,4 +1,4 @@
-// config.ts — Konfiguration aus server/config.env laden (Realm-/World-Server)
+// config.ts — Konfiguration aus src/realm/config.env laden (Realm-/World-Server)
 // DREI getrennte Datenbankverbindungen dieses Servers (je DB: eigene
 // Konfiguration, eigener technischer DB-Benutzer, eigener Connection-Pool —
 // siehe db/pool.ts): character, world_data, realm_state.

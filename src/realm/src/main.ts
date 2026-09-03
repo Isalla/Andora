@@ -12,8 +12,8 @@ async function main(): Promise<void> {
   // Drei getrennte Datenbankverbindungen, je eigener Pool:
   // character, world_data, realm_state (realm_state_<realm>).
   // Der Realm-/World-Server besitzt KEINEN direkten auth-DB-Zugriff;
-  // Auth-Funktionen laufen ausschließlich über die Auth-API
-  // (Auth/API-Service), definiert in db/authApi.ts.
+  // Auth-Funktionen laufen ausschließlich über die Auth-API des
+  // Auth-/API-Service (Go, src/api).
   // Fehlt eine Konfiguration, abbrechen mit klarer Fehlermeldung
   // (keine stillschweigende Fallback-DB, keine Sammelverbindung).
   await initCharacterDb();

@@ -96,7 +96,7 @@ Technologie:
 ```text
 Node.js 20
 TypeScript
-Projekt: server/
+Projekt: src/realm/
 ```
 
 Start:
@@ -119,19 +119,19 @@ mysql2 Promise API
 Konfiguration:
 
 ```text
-server/config.env
+src/realm/config.env
 ```
 
 wird erstellt aus:
 
 ```text
-server/config.env.example
+src/realm/config.env.example
 ```
 
 Datenbankschema:
 
 ```text
-server/db/schema.sql
+src/realm/db/
 ```
 
 TypeScript-Regeln:
@@ -613,13 +613,13 @@ Keine Godot-4-APIs verwenden.
 Datei:
 
 ```text
-server/src/ai/ollama.ts
+src/realm/src/ai/ollama.ts
 ```
 
 Falls das AI-System wächst, weitere klar abgegrenzte Dateien unter:
 
 ```text
-server/src/ai/
+src/realm/src/ai/
 ```
 
 verwenden.

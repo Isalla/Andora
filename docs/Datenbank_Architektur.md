@@ -6,64 +6,80 @@ Andora verwendet mehrere logisch getrennte Datenbanken.
 
 Die Trennung dient dazu:
 
--   Verantwortlichkeiten klar zu halten
--   sensible Accountdaten vom World-Server fernzuhalten
--   Realm-Zustände voneinander zu isolieren
--   statische Weltdaten zentral bereitzustellen
--   spätere Erweiterungen und Migrationen übersichtlich zu halten
--   Datenbankrechte nach dem Prinzip der minimal notwendigen
-    Berechtigung zu vergeben
+* Verantwortlichkeiten klar zu halten
+* sensible Accountdaten von Realm-Servern fernzuhalten
+* Realm-Zustände vollständig voneinander zu isolieren
+* Charakter- und Spieldaten eines Realms gemeinsam zu verwalten
+* statische Weltdaten zentral bereitzustellen
+* Transaktionen innerhalb eines Realms möglichst einfach und zuverlässig zu halten
+* spätere Erweiterungen und Migrationen übersichtlich zu halten
+* Datenbankrechte nach dem Prinzip der minimal notwendigen Berechtigung zu vergeben
 
 Grundregel:
 
-> Jede Datenbank hat eine klar definierte Aufgabe.\
+> Jede Datenbank hat eine klar definierte Aufgabe.
 > Daten dürfen nicht beliebig zwischen Datenbanken verteilt werden.
 
-------------------------------------------------------------------------
+Zusätzliche Grundregel:
+
+> Charakterdaten gehören zu dem Realm, auf dem der Charakter existiert.
+
+Eine separate globale `character`-Datenbank wird daher nicht verwendet.
+
+---
 
 ## 2. Datenbank-Übersicht
 
-``` text
+```text
 MariaDB
 │
 ├── auth
 │   └── Accounts, Login, Sessions, Realm-/Server-Registrierung
 │
-├── character
-│   └── persönliche Charakterdaten und Fortschritt
-│
 ├── world_data
 │   └── statische globale Weltdaten
 │
-└── realm_state_<realm>
-    └── persistenter Zustand eines konkreten Realms
+├── realm_state_de1
+│   └── Charaktere + vollständiger persistenter Zustand von DE-1
+│
+├── realm_state_de2
+│   └── Charaktere + vollständiger persistenter Zustand von DE-2
+│
+└── realm_state_en1
+    └── Charaktere + vollständiger persistenter Zustand von EN-1
 ```
 
 Beispiel:
 
-``` text
+```text
 auth
-character
 world_data
 realm_state_de1
 realm_state_de2
 realm_state_en1
 ```
 
-------------------------------------------------------------------------
+Die frühere separate Datenbank
+
+```text
+character
+```
+
+entfällt.
+
+---
 
 ## 3. auth
 
 Datei:
 
-``` text
-server/db/auth/auth.sql
+```text
+src/api/db/auth/auth.sql
 ```
 
 ### Aufgabe
 
-Die `auth`-Datenbank verwaltet Identität, Authentifizierung und die
-technische Realm-Verwaltung.
+Die `auth`-Datenbank verwaltet Identität, Authentifizierung und die technische Realm-Verwaltung.
 
 Sie beantwortet vor allem die Frage:
 
@@ -73,165 +89,116 @@ Sie beantwortet vor allem die Frage:
 
 Zum Beispiel:
 
--   Accounts
--   Passwort-Hashes
--   verschlüsselte E-Mail-Adressen
--   E-Mail-Lookup-Hashes
--   Accountstatus
--   Sessions
--   Login-Tokens
--   registrierte Realms
--   registrierte World-Server
--   World-Server-Credentials
--   Serverfreigaben
--   Realm-Metadaten
--   Fresh-Start-Konfiguration
--   Transferregeln
--   Heartbeat-/Online-Informationen
+* Accounts
+* Passwort-Hashes
+* verschlüsselte E-Mail-Adressen
+* E-Mail-Lookup-Hashes
+* Accountstatus
+* Sessions
+* Login-Tokens
+* registrierte Realms
+* registrierte World-Server
+* World-Server-Credentials
+* Serverfreigaben
+* Realm-Metadaten
+* Fresh-Start-Konfiguration
+* Transferregeln
+* Heartbeat-/Online-Informationen
 
 ### Enthält ausdrücklich nicht
 
--   Charakterinventar
--   Charakterausrüstung
--   Skills
--   Questfortschritt
--   Gildenstädte
--   Realm-Politik
--   Monsterzustände
--   Loot
--   NPC-Weltzustände
+* Charakterinventar
+* Charakterausrüstung
+* Skills
+* persönliche Questfortschritte
+* Charakterattribute
+* Item-Instanzen
+* Crafting-Aufträge
+* Gildenstädte
+* Realm-Politik
+* Monsterzustände
+* Loot
+* NPC-Weltzustände
 
 ### Zugriff
 
-Nur der Auth/API-Service besitzt direkten Zugriff auf die
-`auth`-Datenbank.
+Nur der Auth/API-Service besitzt direkten Zugriff auf die `auth`-Datenbank.
 
-Der Auth/API-Service verwendet dafür den technischen DB-Benutzer
-`andora_auth`. Dieser Benutzer erhält ausschließlich die für `auth`
-notwendigen Rechte.
+Der Auth/API-Service verwendet dafür den technischen DB-Benutzer `andora_auth`.
 
-Die `AUTH_DB_*`-Zugangsdaten befinden sich ausschließlich in der
-Konfiguration des Auth/API-Service.
+Dieser Benutzer erhält ausschließlich die für `auth` notwendigen Rechte.
 
-Webseite, Loginserver, Realm-/World-Server und Client erhalten keinen
-direkten Zugriff auf `auth`. Webseite, Loginserver und
-Realm-/World-Server kommunizieren für Auth-Funktionen ausschließlich
-über definierte Endpunkte des Auth/API-Service. Jeder Dienst erhält
-eigene Service-Credentials und nur die minimal notwendigen
-API-Berechtigungen.
+Die `AUTH_DB_*`-Zugangsdaten befinden sich ausschließlich in der Konfiguration des Auth/API-Service.
 
-Der Realm-/World-Server darf insbesondere keine Passwort-Hashes,
-E-Mail-Daten, Verschlüsselungsschlüssel oder andere sensible
-Accountdaten direkt lesen.
+Webseite, Loginserver, Realmserver, Coordinator und Client erhalten keinen direkten Zugriff auf `auth`.
 
-Die genaue Sicherheits- und Service-Struktur ist in
-`docs/Auth_API_Architektur.md` definiert.
+Webseite, Loginserver und Realmserver kommunizieren für Auth-Funktionen ausschließlich über definierte Endpunkte des Auth/API-Service.
 
-> Nur der Auth/API-Service besitzt direkten Zugriff auf die
-> Auth-Datenbank.
+Jeder Dienst erhält eigene Service-Credentials und nur die minimal notwendigen API-Berechtigungen.
 
-------------------------------------------------------------------------
+Der Realmserver darf insbesondere keine:
 
-## 4. character
+* Passwort-Hashes
+* E-Mail-Daten
+* Verschlüsselungsschlüssel
+* Login-Geheimnisse
+* andere sensible Accountdaten
+
+direkt lesen.
+
+Die genaue Sicherheits- und Service-Struktur ist in:
+
+```text
+docs/Auth_API_Architektur.md
+```
+
+definiert.
+
+> Nur der Auth/API-Service besitzt direkten Zugriff auf die Auth-Datenbank.
+
+---
+
+## 4. world_data
 
 Datei:
 
-``` text
-server/db/character/character.sql
+```text
+src/realm/db/world_data/world_data.sql
 ```
 
 ### Aufgabe
 
-Die `character`-Datenbank speichert Daten, die einem Charakter
-persönlich gehören.
-
-Sie beantwortet vor allem die Frage:
-
-> Was gehört zu diesem Charakter und welchen persönlichen Fortschritt
-> hat er?
-
-### Enthält
-
-Zum Beispiel:
-
--   Charakter-Grunddaten
--   Name
--   Rasse
--   Geschlecht
--   Appearance-Werte
--   Klasse
--   Level
--   Erfahrung
--   Attribute
--   Inventar
--   Ausrüstung
--   Skills
--   persönliche Questfortschritte
--   persönliche Rufwerte
--   persönliche NPC-Beziehungen
--   persönliche Freischaltungen
--   persönliche Reise-/Portal-Freischaltungen
--   persönliche Crafting-Fortschritte
--   weitere charaktergebundene Daten
-
-### Realm-Zuordnung
-
-Ein Charakter besitzt eine Zuordnung zu einem Realm.
-
-Dadurch kann geprüft werden:
-
--   auf welchem Realm der Charakter aktuell beheimatet ist
--   ob ein Transfer erlaubt ist
--   ob Fresh-Start-Regeln gelten
--   wie viele Charaktere ein Account auf einem Realm besitzt
-
-Realm-spezifische Weltzustände selbst gehören jedoch nicht in
-`character`.
-
-------------------------------------------------------------------------
-
-## 5. world_data
-
-Datei:
-
-``` text
-server/db/world_data/world_data.sql
-```
-
-### Aufgabe
-
-`world_data` enthält statische bzw. versionierte Definitionen der
-Spielwelt.
+`world_data` enthält statische bzw. versionierte Definitionen der Spielwelt.
 
 Grundsatz:
 
-> world_data beschreibt, was in Andora existieren kann.
+> `world_data` beschreibt, was in Andora existieren kann.
 
 ### Enthält
 
 Zum Beispiel:
 
--   Itemdefinitionen
--   Waffen- und Rüstungsdefinitionen
--   Monsterdefinitionen
--   NPC-Grunddefinitionen
--   Loot-Tabellen
--   Regionen
--   Dungeons
--   Ressourcen
--   Spawnregeln
--   Händler-Grunddaten
--   Crafting-Grunddaten
--   Weltobjektdefinitionen
--   weitere globale Definitionsdaten
+* Itemdefinitionen
+* Waffen- und Rüstungsdefinitionen
+* Monsterdefinitionen
+* NPC-Grunddefinitionen
+* Loot-Tabellen
+* Regionen
+* Dungeons
+* Ressourcen
+* Spawnregeln
+* Händler-Grunddaten
+* Crafting-Grunddaten
+* Weltobjektdefinitionen
+* weitere globale Definitionsdaten
 
 ### Wichtig
 
-`world_data` ist nicht der aktuelle Zustand eines Realms.
+`world_data` enthält weder Charakterzustände noch den aktuellen Zustand eines Realms.
 
 Beispiel:
 
-``` text
+```text
 world_data:
 NPC Borin existiert als NPC-Definition.
 
@@ -242,36 +209,43 @@ realm_state_de2:
 Borin befindet sich gerade auf dem Weg nach Stadt B.
 ```
 
+Ebenso:
+
+```text
+world_data:
+Definition eines seltenen Eisenschwertes.
+
+realm_state_de1:
+Konkrete Item-Instanz dieses Schwertes gehört Charakter 4711.
+```
+
 ### Zugriff
 
-Realm-Server erhalten auf `world_data` grundsätzlich nur die Rechte, die
-sie zum Lesen benötigen.
+Realmserver erhalten auf `world_data` grundsätzlich nur die Rechte, die sie zum Lesen benötigen.
 
-Im normalen Serverbetrieb sollte ein Realm-Server globale
-Definitionsdaten nicht verändern.
+Im normalen Serverbetrieb sollte ein Realmserver globale Definitionsdaten nicht verändern.
 
 Änderungen an `world_data` erfolgen kontrolliert über:
 
--   SQL-Migrationen
--   Deployment
--   Content-Updates
+* SQL-Migrationen
+* Deployment
+* Content-Updates
 
-------------------------------------------------------------------------
+---
 
-## 6. realm_state
+## 5. realm_state
 
 Datei für das Grundschema:
 
-``` text
-server/db/realm_state/realm_state.sql
+```text
+src/realm/db/realm_state/realm_state.sql
 ```
 
-Jeder unabhängige öffentliche Realm besitzt einen eigenen persistenten
-Realm-State.
+Jeder unabhängige öffentliche Realm besitzt eine eigene persistente Realm-Datenbank.
 
 Beispiele:
 
-``` text
+```text
 realm_state_de1
 realm_state_de2
 realm_state_en1
@@ -279,41 +253,248 @@ realm_state_en1
 
 ### Aufgabe
 
-Der Realm-State speichert alles, was in einer konkreten Welt tatsächlich
-passiert ist.
+Die Realm-Datenbank speichert sämtliche spielrelevanten persistenten Daten eines konkreten Realms.
 
-Grundsatz:
+Sie beantwortet damit zwei zentrale Fragen:
 
-> realm_state beschreibt, was in diesem Realm passiert ist.
+> Was gehört den Charakteren dieses Realms?
 
-### Enthält
+und:
+
+> Was ist in diesem Realm passiert?
+
+Die frühere Trennung zwischen persönlicher Character-Datenbank und Realm-State entfällt.
+
+### Enthält Charakterdaten
 
 Zum Beispiel:
 
--   Gilden
--   Gildenmitgliedschaften mit Realm-Bezug
--   Gildenstädte
--   politische Herrschaft
--   Realm-Wirtschaft
--   Auktionen mit Realm-Bezug
--   Weltfortschritt
--   Expansion-/Content-Fortschritt
--   persistente NPC-Zustände
--   persistente NPC-Positionen
--   Weltveränderungen
--   regionale Zustände
--   Eventzustände
--   Besitzverhältnisse
--   persistente Gebäude
--   weitere realmgebundene Daten
+* Charakter-Grunddaten
+* Account-Referenz
+* Name
+* Rasse
+* Geschlecht
+* Appearance-Werte
+* Klasse
+* Level
+* Erfahrung
+* Attribute
+* Inventar
+* Ausrüstung
+* Item-Instanzen
+* Skills
+* persönliche Questfortschritte
+* persönliche Rufwerte
+* persönliche NPC-Beziehungen
+* persönliche Freischaltungen
+* persönliche Reise-/Portal-Freischaltungen
+* persönliche Crafting-Fortschritte
+* Gold
+* weitere charaktergebundene Daten
 
-### Realm-Isolation
+### Enthält Realm-Daten
 
-Öffentlich getrennte Realms besitzen getrennte persistente Weltzustände.
+Zum Beispiel:
+
+* Gilden
+* Gildenmitgliedschaften
+* Gildenstädte
+* politische Herrschaft
+* Realm-Wirtschaft
+* Auktionen
+* Weltfortschritt
+* Expansion-/Content-Fortschritt
+* persistente NPC-Zustände
+* persistente NPC-Positionen
+* Weltveränderungen
+* regionale Zustände
+* Eventzustände
+* Besitzverhältnisse
+* persistente Gebäude
+* weitere realmgebundene Daten
+
+### Enthält außerdem realmbezogene Systeme
+
+Dazu können unter anderem gehören:
+
+* Crafting-Jobs
+* Crafting-Job-Items
+* Mail-System
+* Mail-Anhänge
+* Item-Recovery
+* Rückerstattungen
+* offene Spieleraufträge
+* Realm-Supportinformationen
+
+Diese Daten gehören bewusst in dieselbe Realm-Datenbank, weil sie eng mit Charakteren, Items und dem Zustand dieses Realms verbunden sind.
+
+---
+
+## 6. Charaktere gehören zu ihrem Realm
+
+Ein Charakter existiert ausschließlich innerhalb der Datenbank seines Realms.
 
 Beispiel:
 
-``` text
+```text
+realm_state_de1.characters
+→ Charaktere von DE-1
+
+realm_state_de2.characters
+→ Charaktere von DE-2
+```
+
+Ein Charakter von DE-1 wird nicht zusätzlich in einer globalen Character-Datenbank gespeichert.
+
+Dadurch können charakterbezogene Vorgänge innerhalb derselben Datenbank verarbeitet werden.
+
+Zum Beispiel:
+
+```text
+Charakter
+↓
+Inventar
+↓
+Item-Instanzen
+↓
+Crafting-Job
+↓
+Mail-Rückerstattung
+```
+
+Alle beteiligten Tabellen befinden sich innerhalb desselben Realm-Datenbankbereichs.
+
+---
+
+## 7. Vorteile für Transaktionen und Recovery
+
+Die Integration der Charakterdaten in die Realm-Datenbank vereinfacht Vorgänge, die mehrere spielbezogene Datensätze gleichzeitig betreffen.
+
+Besonders wichtig ist dies bei:
+
+* Crafting
+* Item-Übergaben
+* Goldzahlungen
+* Auktionen
+* Handel
+* Mail
+* Loot
+* Recovery
+* Rückerstattungen
+* Supportfällen
+
+Beispiel Crafting:
+
+```text
+character_id
+    ↓
+craft_job_id
+    ↓
+übergebene item_ids
+    ↓
+bezahltes Gold
+    ↓
+Coordinator-KI-Auftrag
+```
+
+Scheitert der externe KI-Auftrag endgültig, besitzt der Realm weiterhin alle notwendigen Informationen.
+
+Der Realm kann dann selbstständig:
+
+* den Crafting-Job ermitteln
+* den betroffenen Charakter ermitteln
+* die übergebenen Item-IDs ermitteln
+* das gezahlte Gold ermitteln
+* die Items über das Mail-System zurückgeben
+* Gold zurückerstatten
+* den Job kontrolliert beenden
+
+Der Coordinator benötigt dafür keinerlei Datenbankzugriff.
+
+---
+
+## 8. Crafting-Jobs und Item-Zuordnung
+
+Bei einem Crafting-Auftrag erstellt der Realm zunächst einen eigenen eindeutigen Jobdatensatz.
+
+Beispiel:
+
+```text
+craft_job_id = 4711
+character_id = 812
+```
+
+Wenn der Spieler Gegenstände oder Materialien an einen NPC übergibt, werden die konkreten Item-Instanz-IDs diesem Job zugeordnet.
+
+Beispiel:
+
+```text
+craft_job_items
+
+job_id 4711 → item_id 18441
+job_id 4711 → item_id 18442
+job_id 4711 → item_id 19107
+```
+
+Diese Zuordnung ist die maßgebliche Recovery-Information.
+
+Die Recovery darf nicht ausschließlich davon abhängen, dass ein Item korrekt mit einem Status wie:
+
+```text
+RESERVED
+```
+
+markiert wurde.
+
+Dadurch bleibt die Zuordnung auch dann nachvollziehbar, wenn beispielsweise nach einem Update ein Fehler in der Reservierungslogik auftritt.
+
+Zusätzlich werden rückerstattbare Kosten wie Gold eindeutig mit dem Job verknüpft.
+
+---
+
+## 9. Rückerstattung über das Mail-System
+
+Scheitert ein Crafting-Auftrag endgültig, werden abgegebene Gegenstände nicht direkt in das Charakterinventar zurückgelegt.
+
+Stattdessen verwendet der Realm das Mail-System.
+
+Dadurch funktioniert die Rückgabe auch dann, wenn:
+
+* der Spieler offline ist
+* das Inventar voll ist
+* der Charakter sich gerade an einem anderen Ort befindet
+
+Grundprinzip:
+
+```text
+Crafting-Job fehlgeschlagen
+        ↓
+Character-ID ermitteln
+        ↓
+zugehörige Item-IDs ermitteln
+        ↓
+Gold/Kosten ermitteln
+        ↓
+Mail mit Items erzeugen
+        ↓
+Gold zurückerstatten
+        ↓
+Job endgültig abschließen
+```
+
+Eine Rückerstattung darf nur einmal durchgeführt werden.
+
+Entsprechende Zustände müssen verhindern, dass bei Recovery oder wiederholter Verarbeitung Items oder Gold dupliziert werden.
+
+---
+
+## 10. Realm-Isolation
+
+Öffentlich getrennte Realms besitzen vollständig getrennte persistente Spiel- und Charakterzustände.
+
+Beispiel:
+
+```text
 DE-1
 → realm_state_de1
 
@@ -323,25 +504,65 @@ DE-2
 
 Eine Gildenstadt auf DE-1 existiert dadurch nicht automatisch auf DE-2.
 
-------------------------------------------------------------------------
+Ebenso existiert ein Charakter aus:
 
-## 7. Datenbankverbindungen und DB-Benutzer
+```text
+realm_state_de1
+```
 
-Jede Andora-Datenbank erhält eine vollständig eigene
-Verbindungskonfiguration, einen eigenen technischen MariaDB-Benutzer und
-einen eigenen Connection-Pool.
+nicht automatisch in:
 
-Grundsatz:
+```text
+realm_state_de2
+```
 
-> Eine Datenbank = eigene Verbindungskonfiguration + eigener technischer
-> DB-Benutzer + eigener Connection-Pool.
+Die Trennung umfasst damit sowohl:
 
-Dies gilt auch dann, wenn während der Entwicklung zunächst alle
-Datenbanken auf demselben MariaDB-Server liegen.
+* Weltzustand
+* Charakterzustand
+* Items
+* Inventare
+* Gilden
+* Wirtschaft
+* Crafting-Jobs
+* Mail
+* weitere persistente Realm-Daten
+
+---
+
+## 11. Charaktertransfers
+
+Da Charaktere direkt in der Realm-Datenbank gespeichert werden, bedeutet ein Realmtransfer technisch eine kontrollierte Migration von Charakterdaten zwischen zwei Realm-Datenbanken.
+
+Ein solcher Transfer darf nicht durch direkte Cross-DB-Abhängigkeiten im normalen Spielcode entstehen.
+
+Transfers werden als eigener kontrollierter Vorgang behandelt.
+
+Dabei müssen beispielsweise berücksichtigt werden:
+
+* Charakterdaten
+* Item-Instanzen
+* Inventar
+* Ausrüstung
+* persönliche Fortschritte
+* Skills
+* Queststände
+* Freischaltungen
+* realmgebundene Besitzverhältnisse
+* nicht übertragbare Daten
+* Fresh-Start-Regeln
+
+Die genaue Transferlogik wird separat definiert.
+
+---
+
+## 12. Datenbankverbindungen und DB-Benutzer
+
+Jeder Datenbankbereich erhält eine eigene Verbindungskonfiguration und einen eigenen technischen MariaDB-Benutzer.
 
 ### AUTH
 
-``` text
+```text
 AUTH_DB_HOST=
 AUTH_DB_PORT=3306
 AUTH_DB_USER=
@@ -349,23 +570,13 @@ AUTH_DB_PASSWORD=
 AUTH_DB_NAME=auth
 ```
 
-Diese Verbindungskonfiguration gehört ausschließlich zum
-Auth/API-Service. Webseite, Loginserver und Realm-/World-Server erhalten
-keine `AUTH_DB_*`-Konfiguration.
+Diese Verbindung gehört ausschließlich zum Auth/API-Service.
 
-### CHARACTER
-
-``` text
-CHARACTER_DB_HOST=
-CHARACTER_DB_PORT=3306
-CHARACTER_DB_USER=
-CHARACTER_DB_PASSWORD=
-CHARACTER_DB_NAME=character
-```
+Webseite, Loginserver, Realmserver und Coordinator erhalten keine `AUTH_DB_*`-Konfiguration.
 
 ### WORLD DATA
 
-``` text
+```text
 WORLD_DATA_DB_HOST=
 WORLD_DATA_DB_PORT=3306
 WORLD_DATA_DB_USER=
@@ -375,7 +586,7 @@ WORLD_DATA_DB_NAME=world_data
 
 ### REALM STATE
 
-``` text
+```text
 REALM_STATE_DB_HOST=
 REALM_STATE_DB_PORT=3306
 REALM_STATE_DB_USER=
@@ -383,108 +594,157 @@ REALM_STATE_DB_PASSWORD=
 REALM_STATE_DB_NAME=realm_state_de1
 ```
 
-### Warum diese Trennung?
+Eine separate:
 
-Heute dürfen alle vier Datenbanken auf demselben MariaDB-Server liegen:
-
-``` text
-MariaDB Server A
-├── auth
-├── character
-├── world_data
-└── realm_state_de1
+```text
+CHARACTER_DB_*
 ```
 
-Später können sie ohne grundlegenden Umbau auf unterschiedliche
-Datenbankserver verteilt werden:
+Konfiguration existiert nicht mehr.
 
-``` text
-DB-Server A → auth
-DB-Server B → character
-DB-Server C → world_data
-DB-Server D → realm_state_de1
-```
+---
 
-Damit können Last, Wartung und Sicherheitsgrenzen später unabhängig
-behandelt werden.
-
-### Rechte
-
-Jeder technische DB-Benutzer erhält ausschließlich Rechte auf seinen
-eigenen Datenbankbereich.
-
-``` text
-andora_auth       → nur auth
-andora_character  → nur character
-andora_world_data → nur world_data
-andora_realm_de1  → nur realm_state_de1
-```
-
-Für `world_data` soll der laufende Realm-/World-Server grundsätzlich nur
-die für den Betrieb erforderlichen Leserechte verwenden. Änderungen an
-statischen Weltdaten erfolgen kontrolliert über Migrationen, Deployment
-oder Content-Updates.
-
-Ein Realm-State-Benutzer erhält keinen Zugriff auf andere
-Realm-State-Datenbanken.
-
-### Keine Sammelverbindung
-
-Es gibt keine allgemeine `WORLD_DB_*`-Sammelkonfiguration für
-`character`, `world_data` und `realm_state`.
-
-Ebenso gibt es keinen Legacy-Fallback auf alte allgemeine
-`DB_*`-Variablen.
-
-Fehlt eine notwendige DB-Konfiguration, soll der betroffene Dienst mit
-einer klaren Fehlermeldung abbrechen, statt stillschweigend eine andere
-Datenbank zu verwenden.
-
-------------------------------------------------------------------------
-
-## 8. Mehrere technische World-Prozesse
-
-Ein Realm kann später aus mehreren technischen World-Server-Prozessen
-bestehen.
-
-Diese Prozesse gehören weiterhin zum selben Realm und dürfen denselben
-Realm-State verwenden.
+## 13. DB-Benutzer und Rechte
 
 Beispiel:
 
-``` text
-Realm DE-1
+```text
+andora_auth
+→ ausschließlich auth
 
-World-Prozess 1 ─┐
-World-Prozess 2 ─┼── realm_state_de1
-World-Prozess 3 ─┘
+andora_world_data
+→ world_data
+
+andora_realm_de1
+→ ausschließlich realm_state_de1
+
+andora_realm_de2
+→ ausschließlich realm_state_de2
 ```
 
-Das erzeugt keine neue Welt.
+Ein Realm-Benutzer erhält keinen Zugriff auf die Datenbank eines anderen Realms.
 
-Ein neuer öffentlicher Realm benötigt dagegen einen eigenen persistenten
-Realm-State.
+Beispiel:
 
-------------------------------------------------------------------------
+```text
+andora_realm_de1
+```
 
-## 9. SQL-Dateibaum
+darf nicht auf:
 
-Die bisherige zentrale `schema.sql` wird nicht dauerhaft
-weiterverwendet.
+```text
+realm_state_de2
+```
+
+zugreifen.
+
+Für `world_data` soll der laufende Realmserver grundsätzlich nur die für den Betrieb erforderlichen Leserechte verwenden.
+
+Änderungen an statischen Weltdaten erfolgen kontrolliert über:
+
+* Migrationen
+* Deployment
+* Content-Updates
+
+---
+
+## 14. Keine Sammelverbindung
+
+Es gibt keine allgemeine DB-Verbindung, die automatisch auf mehrere fachlich getrennte Datenbanken zugreifen kann.
+
+Insbesondere gibt es keine Legacy-Sammelkonfiguration wie:
+
+```text
+DB_*
+WORLD_DB_*
+```
+
+die stillschweigend `auth`, `world_data` oder mehrere Realm-Datenbanken miteinander verbindet.
+
+Fehlt eine notwendige Datenbankkonfiguration, soll der betreffende Dienst mit einer klaren Fehlermeldung abbrechen.
+
+Er darf nicht automatisch auf eine andere Datenbank ausweichen.
+
+---
+
+## 15. Coordinator besitzt keine Datenbankrechte
+
+Der Coordinator ist ausschließlich die zentrale Schnittstelle für KI-/Ollama-Anfragen.
+
+Er besitzt keinerlei direkten Datenbankzugriff.
+
+Insbesondere erhält er keine Credentials für:
+
+* `auth`
+* `world_data`
+* `realm_state_<realm>`
+
+Der Coordinator verwaltet seine eigenen KI-Jobs ausschließlich über seine dafür vorgesehenen lokalen Queue- und Job-Dateien.
+
+Er darf:
+
+* KI-Jobs entgegennehmen
+* Jobs priorisieren
+* Ollama ansprechen
+* Eingaben prüfen
+* Antworten prüfen
+* Korrekturversuche durchführen
+* Fehlerstatus an Realmserver zurückgeben
+
+Er darf nicht:
+
+* Charakterdaten verändern
+* Items erzeugen oder löschen
+* Gold verändern
+* Realm-Jobs abschließen
+* Crafting-Datenbankeinträge verändern
+* Mail erzeugen
+* Recovery direkt durchführen
+
+Grundsatz:
+
+> Der Coordinator verarbeitet KI.
+> Der Realm verwaltet das Spiel.
+
+---
+
+## 16. Mehrere technische Realm-Prozesse
+
+Ein Realm kann später aus mehreren technischen Serverprozessen bestehen.
+
+Diese Prozesse gehören weiterhin zum selben Realm und dürfen denselben Realm-State verwenden.
+
+Beispiel:
+
+```text
+Realm DE-1
+
+Realm-Prozess 1 ─┐
+Realm-Prozess 2 ─┼── realm_state_de1
+Realm-Prozess 3 ─┘
+```
+
+Das erzeugt keine neue Welt und keine getrennten Charakterdatenbanken.
+
+Ein neuer öffentlicher Realm benötigt dagegen eine eigene persistente Realm-Datenbank.
+
+---
+
+## 17. SQL-Dateibaum
+
+Die bisherige zentrale `schema.sql` wird nicht dauerhaft weiterverwendet.
 
 Der Datenbankbaum lautet:
 
-``` text
-server/
+```text
+src/api/
 └── db/
-    ├── auth/
-    │   ├── auth.sql
-    │   └── migrations/
-    │
-    ├── character/
-    │   ├── character.sql
-    │   └── migrations/
-    │
+    └── auth/
+        ├── auth.sql
+        └── migrations/
+
+src/realm/
+└── db/
     ├── world_data/
     │   ├── world_data.sql
     │   ├── migrations/
@@ -495,38 +755,52 @@ server/
         └── migrations/
 ```
 
-Beispiele für Migrationen:
+Der bisherige Bereich:
 
-``` text
-server/db/auth/migrations/
+```text
+src/realm/db/character/
+```
+
+entfällt.
+
+Charaktertabellen und deren Migrationen gehören künftig nach:
+
+```text
+src/realm/db/realm_state/
+```
+
+Beispiele:
+
+```text
+src/api/db/auth/migrations/
 ├── 001_accounts.sql
 ├── 002_sessions.sql
 └── 003_realms.sql
 
-server/db/character/migrations/
+src/realm/db/realm_state/migrations/
 ├── 001_characters.sql
 ├── 002_inventory.sql
-└── 003_skills.sql
-
-server/db/realm_state/migrations/
-├── 001_guilds.sql
-├── 002_world_state.sql
-└── 003_npc_state.sql
+├── 003_skills.sql
+├── 004_guilds.sql
+├── 005_world_state.sql
+├── 006_npc_state.sql
+├── 007_crafting_jobs.sql
+└── 008_mail.sql
 ```
 
-------------------------------------------------------------------------
+Die tatsächliche Nummerierung richtet sich nach dem vorhandenen Migrationsstand.
 
-## 10. Tabellen-Ownership
+Bereits angewendete Migrationen werden nicht nachträglich umnummeriert oder verändert.
+
+---
+
+## 18. Tabellen-Ownership
 
 Jede Tabelle gehört genau zu einem fachlichen Datenbankbereich.
 
-Die folgende Zuordnung zeigt vorhandene bzw. bereits konkret geplante
-Tabellen. Sie ist ausdrücklich **keine vollständige Liste aller
-zukünftigen Tabellen**. Weitere Tabellen werden mit der Implementierung
-der jeweiligen Systeme ergänzt und gemäß ihrer fachlichen Verantwortung
-zugeordnet.
+Die folgende Zuordnung ist keine vollständige Liste zukünftiger Tabellen.
 
-``` text
+```text
 accounts
 → auth
 
@@ -545,66 +819,116 @@ world_server_credentials
 world_server_heartbeats
 → auth
 
-characters
-→ character
-
 item_definitions
 → world_data
 
+monster_definitions
+→ world_data
+
+npc_definitions
+→ world_data
+
+characters
+→ realm_state_<realm>
+
+character_inventory
+→ realm_state_<realm>
+
+character_equipment
+→ realm_state_<realm>
+
+item_instances
+→ realm_state_<realm>
+
+character_skills
+→ realm_state_<realm>
+
+character_quests
+→ realm_state_<realm>
+
+craft_jobs
+→ realm_state_<realm>
+
+craft_job_items
+→ realm_state_<realm>
+
+mail
+→ realm_state_<realm>
+
+mail_attachments
+→ realm_state_<realm>
+
 guilds
-→ realm_state
+→ realm_state_<realm>
 
 guild_members
-→ realm_state
+→ realm_state_<realm>
 
 auctions
-→ realm_state
+→ realm_state_<realm>
 
 guild_cities
-→ realm_state
+→ realm_state_<realm>
 ```
 
-Eine Tabelle wird nicht aus Bequemlichkeit in eine andere Datenbank
-gelegt.
+Eine Tabelle wird nicht aus Bequemlichkeit in eine andere Datenbank gelegt.
 
-Wenn ein Dienst Informationen aus einem Bereich benötigt, auf den er
-keinen direkten Zugriff haben soll, erfolgt der Zugriff über eine
-definierte Server-/API-Schnittstelle.
+Wenn ein Dienst Informationen aus einem Bereich benötigt, auf den er keinen direkten Zugriff haben soll, erfolgt dies über eine definierte Server-/API-Schnittstelle.
 
-> Datenbankzugriff folgt der Verantwortung des Dienstes und nicht der
-> Bequemlichkeit des Codes.
+> Datenbankzugriff folgt der Verantwortung des Dienstes und nicht der Bequemlichkeit des Codes.
 
-------------------------------------------------------------------------
+---
 
-## 11. Keine Cross-DB-Abhängigkeiten ohne Prüfung
+## 19. Keine Cross-DB-Abhängigkeiten ohne Prüfung
 
 Neue Systeme müssen vor dem Anlegen einer Tabelle festlegen:
 
-1.  Wem gehören die Daten?
-2.  Sind sie accountgebunden?
-3.  Sind sie charaktergebunden?
-4.  Sind sie statische Weltdaten?
-5.  Sind sie Zustand eines konkreten Realms?
+1. Gehören die Daten zur Account-/Sicherheitsidentität?
+2. Sind es statische globale Weltdaten?
+3. Gehören sie zu einem konkreten Realm?
+4. Gehören sie zu einem Charakter dieses Realms?
+5. Müssen sie gemeinsam mit anderen Realm-Daten transaktional verarbeitet werden?
 
-Erst danach wird entschieden, in welche Datenbank die Tabelle gehört.
+Danach wird entschieden:
 
-------------------------------------------------------------------------
+```text
+Account/Sicherheit
+→ auth
 
-## 12. Migrationen und db_version
+statische Definition
+→ world_data
 
-Jede Andora-Datenbank besitzt eine eigene Migrationshistorie und eine
-eigene `db_version`-Tabelle:
+Charakter oder konkreter Spielzustand
+→ realm_state_<realm>
+```
 
-``` text
+Charaktergebundene Daten bilden keinen eigenen globalen Datenbankbereich mehr.
+
+---
+
+## 20. Migrationen und db_version
+
+Jede Andora-Datenbank besitzt eine eigene Migrationshistorie und eine eigene `db_version`-Tabelle.
+
+Damit existieren Migrationshistorien für:
+
+```text
 auth
-character
 world_data
 realm_state_<realm>
 ```
 
+Eine separate:
+
+```text
+character
+```
+
+Migrationshistorie existiert nicht mehr.
+
 Beispiel:
 
-``` sql
+```sql
 CREATE TABLE IF NOT EXISTS db_version (
     version INT NOT NULL PRIMARY KEY,
     migration VARCHAR(255) NOT NULL,
@@ -614,10 +938,9 @@ CREATE TABLE IF NOT EXISTS db_version (
 
 ### Automatische Startprüfung
 
-Beim Start prüft der für die jeweilige Datenbank zuständige Dienst den
-installierten Schema-Stand.
+Beim Start prüft der für die jeweilige Datenbank zuständige Dienst den installierten Schema-Stand.
 
-``` text
+```text
 Dienst startet
       ↓
 Datenbankverbindung herstellen
@@ -635,111 +958,165 @@ jede erfolgreiche Migration in db_version eintragen
 Dienst normal starten
 ```
 
-Schlägt eine notwendige Migration fehl, wird der Start des betroffenen
-Dienstes abgebrochen und der Fehler klar geloggt.
+Schlägt eine notwendige Migration fehl, wird der Start des betroffenen Dienstes abgebrochen und der Fehler klar geloggt.
 
 ### Zuständigkeit für auth
 
-Da ausschließlich der Auth/API-Service direkten Zugriff auf `auth`
-besitzt, ist ausschließlich dieser Dienst für Prüfung und Anwendung der
-`auth`-Migrationen verantwortlich.
+Da ausschließlich der Auth/API-Service direkten Zugriff auf `auth` besitzt, ist ausschließlich dieser Dienst für Prüfung und Anwendung der `auth`-Migrationen verantwortlich.
 
-Webseite, Loginserver und Realm-/World-Server führen keine Migrationen
-auf `auth` aus.
+Webseite, Loginserver, Realmserver und Coordinator führen keine Migrationen auf `auth` aus.
 
-Die Zuständigkeit für `character`, `world_data` und `realm_state` wird
-anhand der jeweiligen Dienstverantwortung separat festgelegt. Diese
-Datenbanken werden nicht automatisch dem Auth/API-Service zugeordnet.
+### Zuständigkeit für realm_state
 
-### Unveränderliche Migrationen
+Der zuständige Realmserver verwaltet die Migrationen seiner Realm-Datenbank.
 
-Bereits erfolgreich angewendete Migrationen werden niemals nachträglich
-verändert.
+Dies umfasst künftig auch Charakter-, Inventar-, Item-, Crafting- und Mailtabellen.
 
-Muss beispielsweise ein bereits durch `001_accounts.sql` angelegtes
-Schema später geändert werden, wird eine neue Migration erstellt, zum
+### Zuständigkeit für world_data
+
+Die Migrationen von `world_data` erfolgen kontrolliert gemäß Deployment-/Content-Update-Prozess.
+
+---
+
+## 21. Unveränderliche Migrationen
+
+Bereits erfolgreich angewendete Migrationen werden niemals nachträglich verändert.
+
+Muss ein bereits bestehendes Schema später geändert werden, wird eine neue Migration erstellt.
+
 Beispiel:
 
-``` text
+```text
 005_encrypt_account_email.sql
 ```
 
-### Regeln für Qwen/OpenCode
+Die Integration der früheren Character-Struktur in `realm_state` muss ebenfalls über neue Migrationen erfolgen, sofern entsprechende Tabellen bereits tatsächlich angelegt oder produktiv verwendet wurden.
 
-Qwen/OpenCode darf SQL-Migrationen erstellen und während der Entwicklung
-mit den dafür vorgesehenen eingeschränkten DB-Zugangsdaten anwenden.
+Bestehende angewendete Migrationen werden nicht einfach umgeschrieben.
+
+---
+
+## 22. Regeln für Qwen/OpenCode
+
+Qwen/OpenCode darf SQL-Migrationen erstellen und während der Entwicklung mit den dafür vorgesehenen eingeschränkten DB-Zugangsdaten anwenden.
 
 Dabei gelten folgende Regeln:
 
--   keine MariaDB-Admin-Credentials verwenden
--   keine DB-Benutzer selbst anlegen
--   keine Rechte selbst verändern
--   keine fremden Datenbanken verändern
--   keine Tabellen ohne Zuordnung zu einem DB-Bereich erstellen
--   keine neue zentrale `schema.sql` aufbauen
--   bereits angewendete Migrationen nicht nachträglich verändern
--   Migrationen nur mit dem vorgesehenen technischen DB-Benutzer
-    anwenden
+* keine MariaDB-Admin-Credentials verwenden
+* keine DB-Benutzer selbst anlegen
+* keine Rechte selbst verändern
+* keine fremden Datenbanken verändern
+* keine Tabellen ohne Zuordnung zu einem DB-Bereich erstellen
+* keine neue zentrale `schema.sql` aufbauen
+* bereits angewendete Migrationen nicht nachträglich verändern
+* Migrationen nur mit dem vorgesehenen technischen DB-Benutzer anwenden
+* keine separate Character-Datenbank neu einführen
+* Character-Tabellen gehören zum jeweiligen `realm_state_<realm>`
+* Coordinator erhält keine Datenbankverbindung
 
 Produktive Migrationen werden später gesondert geregelt.
 
-------------------------------------------------------------------------
+---
 
-## 13. Sicherheitsgrenzen
+## 23. Sicherheitsgrenzen
 
 ### Auth
 
-Nur der Auth/API-Service besitzt direkten Zugriff auf sensible
-Accountdaten und auf die `auth`-Datenbank.
+Nur der Auth/API-Service besitzt direkten Zugriff auf sensible Accountdaten und auf die `auth`-Datenbank.
 
-Webseite, Loginserver und Realm-/World-Server greifen für
-Auth-Funktionen ausschließlich über die Auth-API zu und besitzen eigene
-Service-Credentials mit minimal notwendigen Berechtigungen.
+Webseite, Loginserver und Realmserver greifen für Auth-Funktionen ausschließlich über die Auth-API zu und besitzen eigene Service-Credentials mit minimal notwendigen Berechtigungen.
 
-### Character
-
-Enthält persönliche Spielfortschritte, aber keine Passwörter oder
-E-Mail-Schlüssel.
+Der Coordinator besitzt ebenfalls keinen Zugriff auf `auth`.
 
 ### World Data
 
-Ist überwiegend lesend und enthält keine Account-Geheimnisse.
+`world_data` ist überwiegend lesend und enthält keine Account-Geheimnisse.
 
 ### Realm State
 
-Enthält nur den Zustand des jeweiligen Realms.
+`realm_state_<realm>` enthält:
 
-Dadurch führt die Kompromittierung eines Realm-Servers nicht automatisch
-zum Zugriff auf:
+* Charakterdaten
+* Items
+* Inventare
+* persönliche Fortschritte
+* Gilden
+* Wirtschaft
+* Crafting-Jobs
+* Mail
+* Weltzustand
+* weitere Daten dieses konkreten Realms
 
--   Passwörter
--   E-Mail-Adressen
--   andere Realm-Zustände
--   administrative Datenbankzugänge
+Ein Realmserver erhält ausschließlich Zugriff auf die für ihn vorgesehenen Realm-Datenbanken und notwendigen globalen Lesedaten.
 
-------------------------------------------------------------------------
+### Coordinator
 
-## 14. Leitsätze
+Der Coordinator besitzt keinerlei Datenbankrechte.
+
+Dadurch führt eine Kompromittierung des Coordinators nicht automatisch zu direktem Datenbankzugriff auf:
+
+* Accounts
+* Passwörter
+* E-Mail-Adressen
+* Charaktere
+* Items
+* Gold
+* Realmzustände
+
+Der Realm validiert weiterhin alle KI-Ergebnisse, bevor daraus spielmechanische Aktionen entstehen.
+
+---
+
+## 24. Backup- und Realm-Grenze
+
+Da Charakter- und Weltzustände gemeinsam in `realm_state_<realm>` gespeichert werden, bildet die Realm-Datenbank eine natürliche Backup-Einheit.
+
+Ein Backup von:
+
+```text
+realm_state_de1
+```
+
+enthält damit sowohl:
+
+* den Zustand der Welt von DE-1
+* die Charaktere von DE-1
+* deren Items und Inventare
+* deren Crafting-Jobs
+* deren Mail
+* weitere persistente Realm-Daten
+
+Dadurch wird verhindert, dass Character-Daten und Realmzustand aus unterschiedlichen Backup-Zeitpunkten wiederhergestellt werden und dadurch Inkonsistenzen entstehen.
+
+`auth` und `world_data` bleiben unabhängige Datenbankbereiche mit eigenen Backup- und Migrationsanforderungen.
+
+---
+
+## 25. Leitsätze
 
 > Auth weiß, wer du bist.
 
-> Character weiß, was deinem Charakter gehört.
-
 > World Data weiß, was in Andora existieren kann.
 
-> Realm State weiß, was in dieser Welt passiert ist.
+> Realm State weiß, wer und was in diesem Realm existiert und was dort passiert ist.
 
-> Jeder Realm-Server bekommt nur die Datenbankrechte, die er tatsächlich
-> benötigt.
+> Ein Charakter gehört vollständig zu seinem Realm.
 
-> Eine Datenbank ist kein Ablageort für beliebige Tabellen, sondern
-> besitzt eine klar definierte Verantwortung.
+> Charakterdaten und Realmzustand werden nicht künstlich auf getrennte Datenbanken verteilt.
 
-> Nur der Auth/API-Service besitzt direkten Zugriff auf die
-> Auth-Datenbank.
+> Jeder Realmserver bekommt nur die Datenbankrechte, die er tatsächlich benötigt.
 
-> Webseite, Loginserver und Realm-/World-Server verwenden für
-> Auth-Funktionen ausschließlich die Auth-API.
+> Ein Realmserver erhält keinen Zugriff auf die Realm-Datenbank eines anderen Realms.
+
+> Eine Datenbank ist kein Ablageort für beliebige Tabellen, sondern besitzt eine klar definierte Verantwortung.
+
+> Nur der Auth/API-Service besitzt direkten Zugriff auf die Auth-Datenbank.
+
+> Webseite, Loginserver und Realmserver verwenden für Auth-Funktionen ausschließlich die Auth-API.
+
+> Der Coordinator besitzt keine Datenbankrechte.
+
+> Der Coordinator verarbeitet KI. Der Realm verwaltet das Spiel.
 
 > Jede Andora-Datenbank besitzt ihre eigene `db_version`-Historie.
 

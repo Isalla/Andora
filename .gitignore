@@ -12,7 +12,11 @@ export_presets.cfg
 godot-midi-player.png
 icon.png
 TestScene.tscn
-server/config.env
-server/node_modules/
-server/build/
+src/realm/config.env
+src/realm/node_modules/
+src/realm/build/
 .tmp/
+references/
+.tmp_gotoolchain/
+src/api/authapi
+src/api/build/

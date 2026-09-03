@@ -56,7 +56,7 @@ optional `ANDORA_MONITOR_TOKEN` (Header `x-api-token` oder `?token=`).
   (POST `/api/control` mit `confirm: true`).
 - **Verlauf**: `GET /api/history` (In-Memory, max. 360 Punkte à 10 s).
 - **Config**: `GET /api/config` + `POST /api/config` — nur Whitelist-Keys von
-  `server/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`, `TICK_MS`,
+  `src/realm/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`, `TICK_MS`,
   `AOFB_RADIUS`, `RENDER_CAP_DEFAULT`, alle `OLLAMA_*` außer
   Secrets); `DB_*` und Passwörter sind **nicht** sichtbar und nicht
   änderbar. Werte werden serverseitig validiert (Port-Bereiche, Tick 16-1000
@@ -73,8 +73,8 @@ optional `ANDORA_MONITOR_TOKEN` (Header `x-api-token` oder `?token=`).
   - `lib/systemctl.js` (start/stop/restart via `sudo -n`, is-active ohne sudo)
   - `lib/envconfig.js` (lesen/validieren/schreiben von `config.env`)
   - `public/index.html` (Dashboard)
-- `server/src/metrics.ts` — Tick-Statistik + CPU/Heap/RSS
-- `server/src/events.ts` — Event-Loop-Lag-Messung
+- `src/realm/src/metrics.ts` — Tick-Statistik + CPU/Heap/RSS
+- `src/realm/src/events.ts` — Event-Loop-Lag-Messung
 - `deploy/` — Vorlagen (NUR Vorlagen, nicht installiert):
   - `deploy/systemd/andora-server.service`, `andora-monitor.service`
   - `deploy/conf/monitor.conf` (EnvironmentFile des Panels)
@@ -82,18 +82,18 @@ optional `ANDORA_MONITOR_TOKEN` (Header `x-api-token` oder `?token=`).
   - `deploy/README.md` (Installation, Rechte, systemd-Befehle, Verifikation, Rollback)
 
 ### Geändert
-- `server/src/health.ts` — `/health` + `/status` + `/players`
-- `server/src/world.ts` — Tick-Dauer-Messung (`recordTick`)
-- `server/src/types.ts` — `Player.pingMs`, `Player.zoneId`
-- `server/src/handlers/hello.ts` — neue Felder initialisieren
-- `server/src/handlers/heartbeat.ts` — liest optionales `ping_ms`
+- `src/realm/src/health.ts` — `/health` + `/status` + `/players`
+- `src/realm/src/world.ts` — Tick-Dauer-Messung (`recordTick`)
+- `src/realm/src/types.ts` — `Player.pingMs`, `Player.zoneId`
+- `src/realm/src/handlers/hello.ts` — neue Felder initialisieren
+- `src/realm/src/handlers/heartbeat.ts` — liest optionales `ping_ms`
 - `readme.md` — Abschnitt „Monitoring & Admin-Panel"
 - `.gitignore` — `.tmp/`
 
 ## Start (lokale Entwicklung, ohne systemd)
 
 ```bash
-cd server && npm run dev          # Gameserver (3001 WS, 3002 Health/Status)
+cd src/realm && npm run dev      # Gameserver (3001 WS, 3002 Health/Status)
 cd monitor && node server.js      # Panel auf 127.0.0.1:3003
 ```
 

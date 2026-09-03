@@ -1,6 +1,8 @@
-// db/pool.ts — Gemeinsamer Pool-Helper fuer die vier getrennten Andora-DBs.
-// Jede DB (auth, character, world_data, realm_state) besitzt eigene Konfiguration
+// db/pool.ts — Gemeinsamer Pool-Helper fuer die drei getrennten Andora-DBs.
+// Jede DB (character, world_data, realm_state) besitzt eigene Konfiguration
 // und wird ueber diesen Helper zu genau EINEM eigenen Connection-Pool verbunden.
+// Die auth-DB ist KEIN Teil dieses Servers: kein Pool, keine AUTH_DB_*-Config
+// (der Auth-/API-Service ist einziger direkter auth-DB-Zugriff, src/api).
 // Kein Pool wird von mehreren DB-Bereichen gemeinsam verwendet.
 // Fehlt eine notwendige DB_*-Konfiguration, wird mit klarer Fehlermeldung
 // abgebrochen; es wird niemals stillschweigend eine andere Datenbank verwendet.

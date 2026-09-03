@@ -4,7 +4,7 @@ Diese Dateien sind **Vorlagen**. Sie werden manuell auf dem Produktionsserver
 installiert. Auf dem Entwicklungsrechner wurde **nichts** installiert.
 
 > Produktions-Root-Beispiel (anpassen!): `/opt/andora`
-> - `/opt/andora/server`   = das komplette `server/`-Verzeichnis (inkl. `build/`, `config.env`)
+> - `/opt/andora/server`   = das komplette `src/realm/`-Verzeichnis (inkl. `build/`, `config.env`)
 > - `/opt/andora/monitor`  = das komplette `monitor/`-Verzeichnis
 > - Das Repository selbst bleibt auf dem Dev-Rechner; nur Build-Artefakte landen bei Produktion.
 
@@ -14,7 +14,7 @@ installiert. Auf dem Entwicklungsrechner wurde **nichts** installiert.
 
 | Datei in diesem Projekt | Produktionsziel |
 |---|---|
-| `server/` (inkl. `build/`, `config.env`) | `/opt/andora/server/` |
+| `src/realm/` (inkl. `build/`, `config.env`) | `/opt/andora/server/` |
 | `monitor/` | `/opt/andora/monitor/` |
 | `deploy/systemd/andora-server.service` | `/etc/systemd/system/andora-server.service` |
 | `deploy/systemd/andora-monitor.service` | `/etc/systemd/system/andora-monitor.service` |

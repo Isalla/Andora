@@ -29,8 +29,8 @@ const projectRoot = path.resolve(__dirname, '..');
 
 module.exports = {
   projectRoot,
-  serverConfigPath: path.join(projectRoot, 'server', 'config.env'),
-  serverDir: path.join(projectRoot, 'server'),
+  serverConfigPath: path.join(projectRoot, 'src', 'realm', 'config.env'),
+  serverDir: path.join(projectRoot, 'src', 'realm'),
   gameServerUrl: envStr('ANDORA_GAME_SERVER_URL', 'http://127.0.0.1:3002'),
   gameServerService: envStr('ANDORA_SERVICE_NAME', 'andora-server.service'),
   bindHost: envStr('ANDORA_MONITOR_BIND', '127.0.0.1'),

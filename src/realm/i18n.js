@@ -7,7 +7,7 @@ const LANGS = ["en", "de"];
 const tables = {};
 
 function loadAll() {
-  const dir = path.join(__dirname, "..", "i18n");
+  const dir = path.join(__dirname, "..", "..", "i18n");
   for (const lang of LANGS) {
     try {
       const txt = fs.readFileSync(path.join(dir, lang + ".json"), "utf8");

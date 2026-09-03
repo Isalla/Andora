@@ -1,15 +1,13 @@
 -- 001_accounts.sql — auth: grundlegende Account-Tabelle der Auth-Datenbank
+-- Kein "USE <db>": der Runner verbindet bereits mit der konfigurierten
+-- auth-DB; Migrations-Dateien enthalten nur SQL-Anweisungen.
 -- Passwort-Hashing ist fuer Argon2id vorgesehen (password_hash VARCHAR(255)).
 -- E-Mail-Adressen werden NICHT im Klartext gespeichert:
 --   email_encrypted   = verschluesselte E-Mail (Schluessel getrennt von der DB)
 --   email_lookup_hash = nicht reversibler Lookup-Hash (SHA-256, BINARY(32))
 -- Sessions, Login-Tokens, Recovery-Tokens, Realm- und World-Server-Daten
 -- werden NICHT in dieser Migration angelegt, sondern später in eigenen
--- Migrationen.
--- Sollen mit den eingeschaerften auth-DB-Zugangsdaten (andora_auth)
--- angewendet werden.
-USE auth;
-
+-- Migrationen (002+).
 CREATE TABLE IF NOT EXISTS accounts (
   id INT AUTO_INCREMENT PRIMARY KEY,
   username VARCHAR(32) NOT NULL UNIQUE,
