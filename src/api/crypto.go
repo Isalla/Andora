@@ -42,63 +42,83 @@ func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-// --- e-mail encryption (AES-256-GCM) ---
+// --- AES-256-GCM core ---
 //
 // The key is a 32-byte, hex-encoded value from the service config
 // (ENCRYPTION_KEY). It is stored inside config.env (outside git), never
 // in the DB and never returned by the API. Ciphertext is
-// base64url(nonce || tag || ciphertext); the nonce for each record is
-// freshly generated.
-func decryptEmail(keyHex, b64 string) (string, error) {
+// nonce || tag || ciphertext with a freshly generated nonce per record.
+// The same core encrypts e-mails AND the TOTP secret.
+func aesGCMEncrypt(keyHex string, plain []byte) ([]byte, error) {
 	key, err := hex.DecodeString(keyHex)
 	if err != nil || len(key) != 32 {
-		return "", fmt.Errorf("bad encryption key")
-	}
-	enc, err := base64.RawURLEncoding.DecodeString(b64)
-	if err != nil {
-		return "", fmt.Errorf("bad e-mail ciphertext")
-	}
-	if len(enc) < 12+16 {
-		return "", fmt.Errorf("e-mail ciphertext too short")
+		return nil, fmt.Errorf("bad encryption key")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("init cipher: %w", err)
+		return nil, fmt.Errorf("init cipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("init gcm: %w", err)
+		return nil, fmt.Errorf("init gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("nonce: %w", err)
+	}
+	ct := gcm.Seal(nil, nonce, plain, nil)
+	out := make([]byte, 12+len(ct))
+	copy(out, nonce)
+	copy(out[12:], ct)
+	return out, nil
+}
+
+// aesGCMDecrypt decrypts nonce || tag || ciphertext produced by
+// aesGCMEncrypt.
+func aesGCMDecrypt(keyHex string, enc []byte) ([]byte, error) {
+	key, err := hex.DecodeString(keyHex)
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("bad encryption key")
+	}
+	if len(enc) < 12+16 {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("init cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("init gcm: %w", err)
 	}
 	nonce, rest := enc[:12], enc[12:]
 	plain, err := gcm.Open(nil, nonce, rest, nil)
 	if err != nil {
-		return "", fmt.Errorf("decrypt: %w", err)
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+	return plain, nil
+}
+
+// --- e-mail encryption (base64url of the AES-GCM core) ---
+
+func decryptEmail(keyHex, b64 string) (string, error) {
+	enc, err := base64.RawURLEncoding.DecodeString(b64)
+	if err != nil {
+		return "", fmt.Errorf("bad e-mail ciphertext")
+	}
+	plain, err := aesGCMDecrypt(keyHex, enc)
+	if err != nil {
+		return "", err
 	}
 	return string(plain), nil
 }
 
 func encryptEmail(keyHex, email string) (string, error) {
-	key, err := hex.DecodeString(keyHex)
-	if err != nil || len(key) != 32 {
-		return "", fmt.Errorf("bad encryption key")
-	}
-	block, err := aes.NewCipher(key)
+	enc, err := aesGCMEncrypt(keyHex, []byte(email))
 	if err != nil {
-		return "", fmt.Errorf("init cipher: %w", err)
+		return "", err
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", fmt.Errorf("init gcm: %w", err)
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return "", fmt.Errorf("nonce: %w", err)
-	}
-	ct := gcm.Seal(nil, nonce, []byte(email), nil)
-	out := make([]byte, 12+len(ct))
-	copy(out, nonce)
-	copy(out[12:], ct)
-	return base64.RawURLEncoding.EncodeToString(out), nil
+	return base64.RawURLEncoding.EncodeToString(enc), nil
 }
 
 // hmacEqual is a constant-time string compare.

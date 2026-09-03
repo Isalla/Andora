@@ -831,6 +831,40 @@ REQUEST_CANCELLED
 
 Eine fehlerhafte KI-Antwort darf nicht ungeprüft in Gameplay umgesetzt werden.
 
+## Fehlerhafte oder leere Anfragen in der Queue
+
+Eine fehlerhafte, ungültige oder leere KI-Anfrage darf die Verarbeitung der AI-Queue niemals dauerhaft blockieren.
+
+Wenn der AI-Service bzw. Coordinator feststellt, dass eine Anfrage nicht verarbeitet werden kann, muss der betroffene Job selbstständig als fehlgeschlagen behandelt und aus der aktiven Queue entfernt werden. Anschließend wird automatisch mit der nächsten Anfrage fortgefahren.
+
+Dies gilt insbesondere bei:
+
+* leeren Anfragen
+* ungültigen oder unvollständigen Jobdaten
+* nicht mehr auflösbaren Jobreferenzen
+* beschädigten Jobdateien
+* Anfragen, die auch nach den vorgesehenen Validierungs- oder Retry-Versuchen nicht verarbeitet werden können
+
+```text
+Job laden
+    ↓
+gültig und verarbeitbar?
+├── JA   → normal verarbeiten
+└── NEIN → Job als fehlgeschlagen behandeln
+           ↓
+           aus aktiver Queue entfernen
+           ↓
+           Fehlergrund protokollieren
+           ↓
+           nächsten Job verarbeiten
+```
+
+Falls eine Rückmeldung an den Gameserver noch möglich ist, erhält dieser einen passenden Fehlerstatus. Bestehende Recovery-Regeln bleiben davon unberührt.
+
+Der AI-Service darf wegen eines einzelnen fehlerhaften oder leeren Jobs nicht pausieren und auf manuellen Eingriff warten.
+
+> **Ein einzelner defekter KI-Job darf niemals die nachfolgenden KI-Anfragen blockieren.**
+
 ---
 
 # 26. Logging und Monitoring
@@ -920,6 +954,8 @@ Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
 > **NPCs dürfen nur auf Wissen reagieren, das sie tatsächlich besitzen.**
 
 > **KI-Anfragen dürfen den World-Tick niemals blockieren.**
+
+> **Fehlerhafte oder leere KI-Jobs dürfen die AI-Queue niemals blockieren; sie werden nach den Fehler- und Recovery-Regeln selbstständig behandelt und die Verarbeitung wird mit dem nächsten Job fortgesetzt.**
 
 > **Das Spiel muss auch ohne Ollama funktionieren.**
 

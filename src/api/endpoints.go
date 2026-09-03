@@ -160,7 +160,9 @@ type passwordChangeRequest struct {
 	NewPassword string `json:"new_password"`
 }
 
-// handlePasswordChange swaps the password after verifying the old one.
+// handlePasswordChange swaps the password after verifying the old one and
+// revokes ALL sessions + trusted-device tokens of the account in the same
+// transaction (security event password_changed).
 func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permAccountPassword)
 	if !ok {
@@ -193,7 +195,11 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "password hash failed")
 		return
 	}
-	if err := s.store.UpdatePassword(context.Background(), req.AccountID, hash); err != nil {
+	if err := s.store.ChangePasswordRevokeAll(context.Background(), req.AccountID, hash); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "account not found")
+			return
+		}
 		dbError(w, err, "password change failed")
 		return
 	}

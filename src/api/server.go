@@ -97,6 +97,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/handoff/validate", s.handleHandoffValidate)
 	mux.HandleFunc("/world/authenticate", s.handleWorldAuthenticate)
 	mux.HandleFunc("/world/heartbeat", s.handleWorldHeartbeat)
+	mux.HandleFunc("/twofactor/status", s.handleTwofactorStatus)
+	mux.HandleFunc("/twofactor/setup", s.handleTwofactorSetup)
+	mux.HandleFunc("/twofactor/enable", s.handleTwofactorEnable)
+	mux.HandleFunc("/twofactor/disable", s.handleTwofactorDisable)
+	mux.HandleFunc("/twofactor/reset", s.handleTwofactorReset)
+	mux.HandleFunc("/devices/list", s.handleDevicesList)
+	mux.HandleFunc("/devices/revoke", s.handleDevicesRevoke)
+	mux.HandleFunc("/security/events", s.handleSecurityEvents)
 	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux)))
 }
 

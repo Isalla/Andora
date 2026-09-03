@@ -68,6 +68,33 @@ type Recovery struct {
 	UsedAt    *time.Time
 }
 
+// TrustedDevice is a confirmed device bound to an account. The raw
+// device token itself is never stored; only its SHA-256 hash is.
+type TrustedDevice struct {
+	ID          int
+	AccountID   int
+	TokenHash   string
+	Label       string
+	ConfirmedAt time.Time
+	CreatedAt   time.Time
+}
+
+// RecoveryCode is a single-use 2FA recovery code (hashed in the DB).
+type RecoveryCode struct {
+	TokenHash string
+	AccountID int
+	CreatedAt time.Time
+	UsedAt    *time.Time
+}
+
+// SecurityEvent is one record in the security event log.
+type SecurityEvent struct {
+	ID        int
+	EventType string
+	AccountID *int
+	CreatedAt time.Time
+}
+
 // AuthStore is the abstraction over the auth-database operations the
 // service performs. The production implementation is sQLStore; tests
 // use a fake, so endpoint behaviour is testable without a database.
@@ -92,6 +119,67 @@ type AuthStore interface {
 	ValidateRecovery(ctx context.Context, rawToken string) (*Recovery, error)
 	RecoverPassword(ctx context.Context, accountID int, newPasswordHash string, rawRecoveryToken string) error
 	UseHandoff(ctx context.Context, rawToken string) error
+
+	// --- TOTP-2FA / trusted devices / recovery codes / security events ---
+
+	SetTwoFactorEnabled(ctx context.Context, accountID int, enabled bool) error
+	SaveTwoFactorSecret(ctx context.Context, accountID int, encryptedSecret []byte) error
+	ClearTwoFactorSecret(ctx context.Context, accountID int) error
+	SetLastTOTP(ctx context.Context, accountID int, counter int, at time.Time) error
+
+	// ChangePasswordRevokeAll swaps the password hash, revokes ALL
+	// sessions and ALL trusted-device tokens in one transaction and
+	// records the security event.
+	ChangePasswordRevokeAll(ctx context.Context, accountID int, newPasswordHash string) error
+
+	CountTrustedDevices(ctx context.Context, accountID int) (int, error)
+	AddTrustedDevice(ctx context.Context, accountID int, rawToken, label string) (TrustedDevice, error)
+	HasTrustedDevice(ctx context.Context, accountID int, rawToken string) (bool, error)
+	RevokeTrustedDevice(ctx context.Context, accountID int, rawToken string) error
+	ListTrustedDevices(ctx context.Context, accountID int) ([]TrustedDevice, error)
+	RevokeAllTrustedDevices(ctx context.Context, accountID int) error
+
+	SaveRecoveryCodes(ctx context.Context, accountID int, codes []string) error
+	UseRecoveryCode(ctx context.Context, accountID int, rawCode string) error
+	ClearRecoveryCodes(ctx context.Context, accountID int) error
+	CountRecoveryCodes(ctx context.Context, accountID int) (int, error)
+
+	// RevokeAllSessions drops every live session for the account (used
+	// by the 2FA reset path).
+	RevokeAllSessions(ctx context.Context, accountID int) error
+
+	RecordSecurityEvent(ctx context.Context, eventType string, accountID *int) error
+	ListSecurityEvents(ctx context.Context, accountID int) ([]SecurityEvent, error)
+}
+
+// ErrMaxDevices reports that the 3-device limit is reached; it is the
+// service-level signal for the 409 max_devices_reached response.
+var ErrMaxDevices = fmt.Errorf("max trusted devices reached")
+
+// maxTrustedDevices is the service-level limit of confirmed devices per
+// account. It is enforced in AddTrustedDevice (not as a DB constraint)
+// because revocation must happen BEFORE a new confirmation when the
+// limit is reached.
+const maxTrustedDevices = 3
+
+// Security event types (closed set; migration 011). Account-scoped
+// events only; there is no mail engine behind them.
+const (
+	eventDeviceConfirmed   = "device_confirmed"
+	eventDeviceRevoked     = "device_revoked"
+	eventTwoFactorEnabled  = "two_factor_enabled"
+	eventTwoFactorDisabled = "two_factor_disabled"
+	eventTwoFactorReset    = "two_factor_reset"
+	eventPasswordChanged   = "password_changed"
+	eventRecoveryCodeUsed  = "recovery_code_used"
+)
+
+// hashRecoveryCode is the SHA-256 of the normalized recovery code
+// (upper case, separators + whitespace stripped). It is the value
+// persisted in recovery_codes.token_hash; cosmetic variants of the same
+// code hash identically.
+func hashRecoveryCode(rawCode string) string {
+	return sha256Hex([]byte(normalizeRecoveryCode(rawCode)))
 }
 
 // sQLStore is the production AuthStore on top of the auth database.
@@ -271,6 +359,25 @@ func atoiPos(s string) (int, error) {
 
 // --- account ---
 
+// accountColumns is the select list every account fetch shares: the
+// login fields plus the TOTP-2FA state (migration 008).
+const accountColumns = `id, username, password_hash, ban_until,
+	two_factor_enabled, two_factor_secret, last_totp_counter, last_totp_at`
+
+// scanAccount maps one row into an Account (nil on ErrNoRows).
+func scanAccount(row *sql.Row) (*Account, error) {
+	acc := &Account{}
+	err := row.Scan(&acc.ID, &acc.Username, &acc.PasswordHash, &acc.BanUntil,
+		&acc.TwoFactorEnabled, &acc.TwoFactorSecret, &acc.LastTOTPCounter, &acc.LastTOTPAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return acc, nil
+}
+
 // FetchAccount returns the minimal account data needed for a login
 // check, looked up by username (unique) or by the non-reversible
 // email lookup hash (unique, 32 raw bytes).
@@ -279,13 +386,9 @@ func (s *sQLStore) FetchAccount(ctx context.Context, column string, value interf
 		return nil, fmt.Errorf("unsupported lookup column %q", column)
 	}
 	row := s.db.QueryRowContext(ctx,
-		"SELECT id, username, password_hash, ban_until FROM accounts WHERE "+column+" = ?",
+		"SELECT "+accountColumns+" FROM accounts WHERE "+column+" = ?",
 		value)
-	acc := &Account{}
-	err := row.Scan(&acc.ID, &acc.Username, &acc.PasswordHash, &acc.BanUntil)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	acc, err := scanAccount(row)
 	if err != nil {
 		return nil, fmt.Errorf("lookup account: %w", err)
 	}
@@ -294,12 +397,8 @@ func (s *sQLStore) FetchAccount(ctx context.Context, column string, value interf
 
 func (s *sQLStore) FetchAccountByID(ctx context.Context, id int) (*Account, error) {
 	row := s.db.QueryRowContext(ctx,
-		"SELECT id, username, password_hash, ban_until FROM accounts WHERE id = ?", id)
-	acc := &Account{}
-	err := row.Scan(&acc.ID, &acc.Username, &acc.PasswordHash, &acc.BanUntil)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+		"SELECT "+accountColumns+" FROM accounts WHERE id = ?", id)
+	acc, err := scanAccount(row)
 	if err != nil {
 		return nil, fmt.Errorf("lookup account by id: %w", err)
 	}
@@ -613,6 +712,294 @@ func (s *sQLStore) RecoverPassword(ctx context.Context, accountID int, newPasswo
 		return fmt.Errorf("commit recovery: %w", err)
 	}
 	return nil
+}
+
+// --- TOTP-2FA / trusted devices / recovery codes / security events ---
+
+func (s *sQLStore) SetTwoFactorEnabled(ctx context.Context, accountID int, enabled bool) error {
+	b := 0
+	if enabled {
+		b = 1
+	}
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_enabled = ? WHERE id = ?", b, accountID); err != nil {
+		return fmt.Errorf("set two_factor_enabled: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) SaveTwoFactorSecret(ctx context.Context, accountID int, encryptedSecret []byte) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_secret = ?, last_totp_counter = NULL, last_totp_at = NULL WHERE id = ?",
+		encryptedSecret, accountID); err != nil {
+		return fmt.Errorf("save two_factor_secret: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) ClearTwoFactorSecret(ctx context.Context, accountID int) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_secret = NULL, last_totp_counter = NULL, last_totp_at = NULL WHERE id = ?",
+		accountID); err != nil {
+		return fmt.Errorf("clear two_factor_secret: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) SetLastTOTP(ctx context.Context, accountID int, counter int, at time.Time) error {
+	if _, err := s.db.ExecContext(ctx,
+		"UPDATE accounts SET last_totp_counter = ?, last_totp_at = ? WHERE id = ?",
+		counter, at, accountID); err != nil {
+		return fmt.Errorf("set last_totp: %w", err)
+	}
+	return nil
+}
+
+// ChangePasswordRevokeAll performs the full revocation policy in one
+// transaction: new password hash, revoke all sessions, revoke all
+// trusted devices, and record the security event (password_changed).
+// A rollback aborts the entire change.
+func (s *sQLStore) ChangePasswordRevokeAll(ctx context.Context, accountID int, newPasswordHash string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin change password: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET password_hash = ? WHERE id = ?", newPasswordHash, accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("set password: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM sessions WHERE account_id = ?", accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("revoke sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM trusted_devices WHERE account_id = ?", accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("revoke trusted devices: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO security_events (event_type, account_id, created_at) VALUES (?, ?, NOW())",
+		eventPasswordChanged, accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("record security event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit change password: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) CountTrustedDevices(ctx context.Context, accountID int) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ?", accountID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count trusted devices: %w", err)
+	}
+	return n, nil
+}
+
+// RevokeAllSessions drops every live session of the account.
+func (s *sQLStore) RevokeAllSessions(ctx context.Context, accountID int) error {
+	if _, err := s.db.ExecContext(ctx,
+		"DELETE FROM sessions WHERE account_id = ?", accountID); err != nil {
+		return fmt.Errorf("revoke all sessions: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) AddTrustedDevice(ctx context.Context, accountID int, rawToken, label string) (TrustedDevice, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TrustedDevice{}, fmt.Errorf("begin add trusted device: %w", err)
+	}
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ?", accountID).Scan(&n); err != nil {
+		_ = tx.Rollback()
+		return TrustedDevice{}, fmt.Errorf("count trusted devices: %w", err)
+	}
+	if n >= maxTrustedDevices {
+		_ = tx.Rollback()
+		return TrustedDevice{}, ErrMaxDevices
+	}
+	now := time.Now()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO trusted_devices (account_id, token_hash, label, confirmed_at, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		accountID, tokenHash(rawToken), label, now, now); err != nil {
+		_ = tx.Rollback()
+		return TrustedDevice{}, fmt.Errorf("insert trusted device: %w", err)
+	}
+	var id int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT id FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
+		accountID, tokenHash(rawToken)).Scan(&id); err != nil {
+		_ = tx.Rollback()
+		return TrustedDevice{}, fmt.Errorf("lookup trusted device: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO security_events (event_type, account_id, created_at) VALUES (?, ?, NOW())",
+		eventDeviceConfirmed, accountID); err != nil {
+		_ = tx.Rollback()
+		return TrustedDevice{}, fmt.Errorf("record security event: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return TrustedDevice{}, fmt.Errorf("commit add trusted device: %w", err)
+	}
+	return TrustedDevice{ID: id, AccountID: accountID, TokenHash: tokenHash(rawToken), Label: label, ConfirmedAt: now, CreatedAt: now}, nil
+}
+
+func (s *sQLStore) HasTrustedDevice(ctx context.Context, accountID int, rawToken string) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
+		accountID, tokenHash(rawToken)).Scan(&n); err != nil {
+		return false, fmt.Errorf("lookup trusted device: %w", err)
+	}
+	return n > 0, nil
+}
+
+func (s *sQLStore) RevokeTrustedDevice(ctx context.Context, accountID int, rawToken string) error {
+	res, err := s.db.ExecContext(ctx,
+		"DELETE FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
+		accountID, tokenHash(rawToken))
+	if err != nil {
+		return fmt.Errorf("revoke trusted device: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke trusted device: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	if err := s.RecordSecurityEvent(ctx, eventDeviceRevoked, &accountID); err != nil {
+		return fmt.Errorf("record security event: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) ListTrustedDevices(ctx context.Context, accountID int) ([]TrustedDevice, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, account_id, token_hash, label, confirmed_at, created_at
+		 FROM trusted_devices WHERE account_id = ? ORDER BY id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list trusted devices: %w", err)
+	}
+	defer rows.Close()
+	out := []TrustedDevice{}
+	for rows.Next() {
+		var d TrustedDevice
+		if err := rows.Scan(&d.ID, &d.AccountID, &d.TokenHash, &d.Label, &d.ConfirmedAt, &d.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan trusted device: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *sQLStore) RevokeAllTrustedDevices(ctx context.Context, accountID int) error {
+	if _, err := s.db.ExecContext(ctx,
+		"DELETE FROM trusted_devices WHERE account_id = ?", accountID); err != nil {
+		return fmt.Errorf("revoke all trusted devices: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) SaveRecoveryCodes(ctx context.Context, accountID int, codes []string) error {
+	if len(codes) == 0 {
+		return nil
+	}
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin save recovery codes: %w", err)
+	}
+	for _, c := range codes {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO recovery_codes (token_hash, account_id, created_at)
+			 VALUES (?, ?, ?)`,
+			hashRecoveryCode(c), accountID, now); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("insert recovery code: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit save recovery codes: %w", err)
+	}
+	return nil
+}
+
+// UseRecoveryCode marks the presented recovery code used (single-use).
+// Returns sql.ErrNoRows if the code is unknown or already consumed.
+func (s *sQLStore) UseRecoveryCode(ctx context.Context, accountID int, rawCode string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE recovery_codes SET used_at = NOW()
+		 WHERE account_id = ? AND token_hash = ? AND used_at IS NULL`,
+		accountID, hashRecoveryCode(rawCode))
+	if err != nil {
+		return fmt.Errorf("use recovery code: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("use recovery code: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	if err := s.RecordSecurityEvent(ctx, eventRecoveryCodeUsed, &accountID); err != nil {
+		return fmt.Errorf("record security event: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) ClearRecoveryCodes(ctx context.Context, accountID int) error {
+	if _, err := s.db.ExecContext(ctx,
+		"DELETE FROM recovery_codes WHERE account_id = ?", accountID); err != nil {
+		return fmt.Errorf("clear recovery codes: %w", err)
+	}
+	return nil
+}
+
+// CountRecoveryCodes returns how many (unused) recovery codes the
+// account still has.
+func (s *sQLStore) CountRecoveryCodes(ctx context.Context, accountID int) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM recovery_codes WHERE account_id = ? AND used_at IS NULL", accountID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count recovery codes: %w", err)
+	}
+	return n, nil
+}
+
+func (s *sQLStore) RecordSecurityEvent(ctx context.Context, eventType string, accountID *int) error {
+	if _, err := s.db.ExecContext(ctx,
+		"INSERT INTO security_events (event_type, account_id, created_at) VALUES (?, ?, NOW())",
+		eventType, accountID); err != nil {
+		return fmt.Errorf("record security event: %w", err)
+	}
+	return nil
+}
+
+func (s *sQLStore) ListSecurityEvents(ctx context.Context, accountID int) ([]SecurityEvent, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT id, event_type, account_id, created_at FROM security_events WHERE account_id = ? ORDER BY id DESC",
+		accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list security events: %w", err)
+	}
+	defer rows.Close()
+	out := []SecurityEvent{}
+	for rows.Next() {
+		var e SecurityEvent
+		if err := rows.Scan(&e.ID, &e.EventType, &e.AccountID, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan security event: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // --- helpers ---

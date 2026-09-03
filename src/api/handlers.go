@@ -12,11 +12,24 @@ import (
 // verifyResponse is the minimal result of a verify. On success the API
 // also creates the login session and reports it. No sensitive account
 // data (password hash, email, lookup hash, ban, ...) is ever returned.
+//
+// Two-factor extensions:
+//   - device_token:   presented to be recognized as a confirmed device
+//     (password-only login is granted for confirmed devices)
+//   - totp_code:      the 6-digit TOTP for unconfirmed devices
+//   - recovery_code:  single-use emergency code (never confirms a device)
+//   - device_label / trust_device: confirm the presenting device (max 3)
+//
+// Failure shapes stay distinct-by-design:
+//   - {valid:false}                          -> missing account / ban / wrong password / bad or replayed recovery-code
+//   - {valid:false, two_factor_required}     -> TOTP missing, wrong, expired or replayed
 type verifyResponse struct {
-	Valid     bool   `json:"valid"`
-	AccountID int    `json:"account_id,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	ExpiresAt string `json:"expires_at,omitempty"`
+	Valid             bool   `json:"valid"`
+	AccountID         int    `json:"account_id,omitempty"`
+	SessionID         string `json:"session_id,omitempty"`
+	ExpiresAt         string `json:"expires_at,omitempty"`
+	DeviceToken       string `json:"device_token,omitempty"`
+	TwoFactorRequired bool   `json:"two_factor_required,omitempty"`
 }
 
 // handleHealth reports liveness without exposing configuration or
@@ -38,6 +51,11 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
 		EmailLookupHash string `json:"email_lookup_hash"`
+		DeviceToken     string `json:"device_token"`
+		TOTPCode        string `json:"totp_code"`
+		RecoveryCode    string `json:"recovery_code"`
+		DeviceLabel     string `json:"device_label"`
+		TrustDevice     bool   `json:"trust_device"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -81,6 +99,91 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		fail()
 		return
 	}
+
+	// --- device recognition ---
+	//
+	// A confirmed device unlocks password-only login; an unknown device
+	// triggers the second factor below.
+	deviceConfirmed := false
+	if req.DeviceToken != "" {
+		has, err := s.store.HasTrustedDevice(ctx, acc.ID, req.DeviceToken)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "device lookup failed")
+			return
+		}
+		deviceConfirmed = has
+	}
+
+	// --- second factor (only when 2FA is on and the device is unknown) ---
+	//
+	// The second factor is a single-use recovery code OR the 6-digit
+	// TOTP. A recovery code deliberately does NOT confirm the device.
+	if acc.TwoFactorEnabled && !deviceConfirmed {
+		need := func() {
+			writeJSON(w, http.StatusOK,
+				verifyResponse{Valid: false, TwoFactorRequired: true})
+		}
+		if req.RecoveryCode != "" {
+			// Single-use recovery code: invalid or already used -> same
+			// indistinguishable fail shape as a bad password.
+			if err := s.store.UseRecoveryCode(ctx, acc.ID, req.RecoveryCode); err != nil {
+				fail()
+				return
+			}
+		} else {
+			var rawSecret []byte
+			if acc.TwoFactorSecret != nil {
+				plain, err := aesGCMDecrypt(s.cfg.EncryptionKey, acc.TwoFactorSecret)
+				if err != nil {
+					need()
+					return
+				}
+				rawSecret = plain
+			}
+			if len(rawSecret) == 0 {
+				need()
+				return
+			}
+			counter, ok := evalTOTPCode(rawSecret, req.TOTPCode, now)
+			if !ok {
+				need()
+				return
+			}
+			if acc.LastTOTPCounter != nil && counter <= int64(*acc.LastTOTPCounter) {
+				// replayed / stale code
+				need()
+				return
+			}
+			if err := s.store.SetLastTOTP(ctx, acc.ID, int(counter), now); err != nil {
+				writeError(w, http.StatusInternalServerError, "totp state update failed")
+				return
+			}
+		}
+	}
+
+	// --- (optional) device confirmation on this login ---
+	var confirmedDevice string
+	if req.TrustDevice && !deviceConfirmed && req.DeviceToken != "" {
+		label := trimSpace(req.DeviceLabel)
+		if label == "" {
+			label = "device"
+		}
+		if len(label) > 64 {
+			label = label[:64]
+		}
+		if _, err := s.store.AddTrustedDevice(ctx, acc.ID, req.DeviceToken, label); err != nil {
+			if err == ErrMaxDevices {
+				writeJSON(w, http.StatusConflict,
+					map[string]string{"error": "max_devices_reached"})
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "device confirm failed")
+			return
+		}
+		deviceConfirmed = true
+		confirmedDevice = req.DeviceToken
+	}
+
 	rawID, sess, err := s.store.CreateSession(ctx, acc.ID, s.cfg.SessionTTL)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -96,9 +199,10 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, verifyResponse{
-		Valid:     true,
-		AccountID: acc.ID,
-		SessionID: rawID,
-		ExpiresAt: sess.ExpiresAt.Format(time.RFC3339),
+		Valid:       true,
+		AccountID:   acc.ID,
+		SessionID:   rawID,
+		ExpiresAt:   sess.ExpiresAt.Format(time.RFC3339),
+		DeviceToken: confirmedDevice,
 	})
 }

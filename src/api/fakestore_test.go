@@ -24,20 +24,31 @@ type fakeStore struct {
 	worlds     map[int]*WorldServer
 	perms      map[int]map[string]bool
 	lastLogin  map[int]*time.Time
+	// TOTP-2FA / devices / recovery codes / security events.
+	trustedDevices map[int]map[string]TrustedDevice
+	recoveryCodes  map[int]map[string]*RecoveryCode
+	securityEvents map[int][]SecurityEvent
+	nextDeviceID   int
+	nextEventID    int
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		accounts:   map[int]*Account{},
-		nextID:     1,
-		byName:     map[string]int{},
-		byEmail:    map[string]int{},
-		sessions:   map[string]Session{},
-		handoffs:   map[string]*Handoff{},
-		recoveries: map[string]*Recovery{},
-		worlds:     map[int]*WorldServer{},
-		perms:      map[int]map[string]bool{},
-		lastLogin:  map[int]*time.Time{},
+		accounts:       map[int]*Account{},
+		nextID:         1,
+		byName:         map[string]int{},
+		byEmail:        map[string]int{},
+		sessions:       map[string]Session{},
+		handoffs:       map[string]*Handoff{},
+		recoveries:     map[string]*Recovery{},
+		worlds:         map[int]*WorldServer{},
+		perms:          map[int]map[string]bool{},
+		lastLogin:      map[int]*time.Time{},
+		trustedDevices: map[int]map[string]TrustedDevice{},
+		recoveryCodes:  map[int]map[string]*RecoveryCode{},
+		securityEvents: map[int][]SecurityEvent{},
+		nextDeviceID:   1,
+		nextEventID:    1,
 	}
 }
 
@@ -300,4 +311,262 @@ func (f *fakeStore) RecoverPassword(_ context.Context, accountID int, newPasswor
 	now := time.Now()
 	rec.UsedAt = &now
 	return nil
+}
+
+// --- TOTP-2FA / trusted devices / recovery codes / security events ---
+
+func (f *fakeStore) SetTwoFactorEnabled(_ context.Context, accountID int, enabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	acc.TwoFactorEnabled = enabled
+	return nil
+}
+
+func (f *fakeStore) SaveTwoFactorSecret(_ context.Context, accountID int, encryptedSecret []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	s := make([]byte, len(encryptedSecret))
+	copy(s, encryptedSecret)
+	acc.TwoFactorSecret = s
+	acc.LastTOTPCounter = nil
+	acc.LastTOTPAt = nil
+	return nil
+}
+
+func (f *fakeStore) ClearTwoFactorSecret(_ context.Context, accountID int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	acc.TwoFactorSecret = nil
+	acc.LastTOTPCounter = nil
+	acc.LastTOTPAt = nil
+	return nil
+}
+
+func (f *fakeStore) SetLastTOTP(_ context.Context, accountID int, counter int, at time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	acc.LastTOTPCounter = &counter
+	ts := at
+	acc.LastTOTPAt = &ts
+	return nil
+}
+
+// ChangePasswordRevokeAll mirrors the SQL transaction: new password,
+// all sessions revoked, all trusted devices revoked, security event.
+func (f *fakeStore) ChangePasswordRevokeAll(_ context.Context, accountID int, newPasswordHash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	acc.PasswordHash = newPasswordHash
+	for h, s := range f.sessions {
+		if s.AccountID == accountID {
+			delete(f.sessions, h)
+		}
+	}
+	delete(f.trustedDevices, accountID)
+	f.recordEventLocked(accountID, eventPasswordChanged)
+	return nil
+}
+
+func (f *fakeStore) CountTrustedDevices(_ context.Context, accountID int) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.trustedDevices[accountID]), nil
+}
+
+func (f *fakeStore) AddTrustedDevice(_ context.Context, accountID int, rawToken, label string) (TrustedDevice, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.accounts[accountID] == nil {
+		return TrustedDevice{}, sql.ErrNoRows
+	}
+	if len(f.trustedDevices[accountID]) >= maxTrustedDevices {
+		return TrustedDevice{}, ErrMaxDevices
+	}
+	now := time.Now()
+	d := TrustedDevice{
+		ID:          f.nextDeviceID,
+		AccountID:   accountID,
+		TokenHash:   tokenHash(rawToken),
+		Label:       label,
+		ConfirmedAt: now,
+		CreatedAt:   now,
+	}
+	f.nextDeviceID++
+	if f.trustedDevices[accountID] == nil {
+		f.trustedDevices[accountID] = map[string]TrustedDevice{}
+	}
+	f.trustedDevices[accountID][d.TokenHash] = d
+	f.recordEventLocked(accountID, eventDeviceConfirmed)
+	return d, nil
+}
+
+func (f *fakeStore) HasTrustedDevice(_ context.Context, accountID int, rawToken string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.trustedDevices[accountID][tokenHash(rawToken)]
+	return ok, nil
+}
+
+func (f *fakeStore) RevokeTrustedDevice(_ context.Context, accountID int, rawToken string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	devs := f.trustedDevices[accountID]
+	h := tokenHash(rawToken)
+	if devs == nil {
+		return sql.ErrNoRows
+	}
+	if _, ok := devs[h]; !ok {
+		return sql.ErrNoRows
+	}
+	delete(devs, h)
+	f.recordEventLocked(accountID, eventDeviceRevoked)
+	return nil
+}
+
+func (f *fakeStore) ListTrustedDevices(_ context.Context, accountID int) ([]TrustedDevice, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	devs := f.trustedDevices[accountID]
+	out := make([]TrustedDevice, 0, len(devs))
+	for _, d := range devs {
+		c := d
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (f *fakeStore) RevokeAllTrustedDevices(_ context.Context, accountID int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.trustedDevices, accountID)
+	return nil
+}
+
+func (f *fakeStore) SaveRecoveryCodes(_ context.Context, accountID int, codes []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.accounts[accountID] == nil {
+		return sql.ErrNoRows
+	}
+	store := f.recoveryCodes[accountID]
+	if store == nil {
+		store = map[string]*RecoveryCode{}
+		f.recoveryCodes[accountID] = store
+	}
+	now := time.Now()
+	for _, c := range codes {
+		// Normalized hash ensures cosmetic variants collide, matching
+		// the SQL STORE.
+		h := hashRecoveryCode(c)
+		rc := &RecoveryCode{TokenHash: h, AccountID: accountID, CreatedAt: now}
+		store[h] = rc
+	}
+	return nil
+}
+
+func (f *fakeStore) UseRecoveryCode(_ context.Context, accountID int, rawCode string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	store := f.recoveryCodes[accountID]
+	h := hashRecoveryCode(rawCode)
+	rc, ok := store[h]
+	if !ok || rc.UsedAt != nil {
+		return sql.ErrNoRows
+	}
+	now := time.Now()
+	rc.UsedAt = &now
+	f.recordEventLocked(accountID, eventRecoveryCodeUsed)
+	return nil
+}
+
+func (f *fakeStore) ClearRecoveryCodes(_ context.Context, accountID int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.recoveryCodes, accountID)
+	return nil
+}
+
+// CountRecoveryCodes returns how many (unused) recovery codes the
+// account still has.
+func (f *fakeStore) CountRecoveryCodes(_ context.Context, accountID int) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, rc := range f.recoveryCodes[accountID] {
+		if rc.UsedAt == nil {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// RevokeAllSessions drops every live session of the account.
+func (f *fakeStore) RevokeAllSessions(_ context.Context, accountID int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.accounts[accountID] == nil {
+		return sql.ErrNoRows
+	}
+	for h, s := range f.sessions {
+		if s.AccountID == accountID {
+			delete(f.sessions, h)
+		}
+	}
+	return nil
+}
+
+// recordEventLocked appends a security event. Caller must hold f.mu.
+func (f *fakeStore) recordEventLocked(accountID int, eventType string) {
+	now := time.Now()
+	aid := accountID
+	e := SecurityEvent{ID: f.nextEventID, EventType: eventType, AccountID: &aid, CreatedAt: now}
+	f.nextEventID++
+	f.securityEvents[accountID] = append(f.securityEvents[accountID], e)
+}
+
+func (f *fakeStore) RecordSecurityEvent(_ context.Context, eventType string, accountID *int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	aid := 0
+	if accountID != nil {
+		aid = *accountID
+	}
+	e := SecurityEvent{ID: f.nextEventID, EventType: eventType, AccountID: accountID, CreatedAt: time.Now()}
+	f.nextEventID++
+	f.securityEvents[aid] = append(f.securityEvents[aid], e)
+	return nil
+}
+
+func (f *fakeStore) ListSecurityEvents(_ context.Context, accountID int) ([]SecurityEvent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	evs := f.securityEvents[accountID]
+	out := make([]SecurityEvent, len(evs))
+	copy(out, evs)
+	// newest first, like the SQL ORDER BY id DESC
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
 }

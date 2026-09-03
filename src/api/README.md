@@ -48,9 +48,9 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
 
 | Method | Path | Permission | Ergebnis (kurz) |
 |---|---|---|---|
-| POST | `/auth/verify` | `account.authenticate` | `{valid, account_id, session_id, expires_at}` — nur bei Erfolg wird die Session angelegt und `last_login_at` gesetzt; alle Ablehnungen (kein Account, Ban, falsches PW) sind unverwechselbar `{valid:false}` |
+| POST | `/auth/verify` | `account.authenticate` | `{valid, account_id, session_id, expires_at, device_token?}` — nur bei Erfolg wird die Session angelegt und `last_login_at` gesetzt; alle Ablehnungen (kein Account, Ban, falsches PW, verbrauchter Recovery-Code) sind unverwechselbar `{valid:false}`. Optional: `device_token` (bestätigtes Gerät → nur PW nötig), `totp_code`/`recovery_code` (2. Faktor bei unbekanntem Gerät, → `{valid:false, two_factor_required:true}` wenn fehlt/falsch/Replay), `trust_device`+`device_label` bestätigt das Gerät (max 3, sonst 409 `max_devices_reached`) |
 | POST | `/account/register` | `account.register` | 201 `{account_id}` — Username `3–32 [A-Za-z0-9_]`, PW `8–72`, E-Mail konservativ validiert; Duplikat (Username oder E-Mail-Hash) → 409; frischer Account wird `NEW_ACCOUNT_BAN_SECONDS` gebannt |
-| POST | `/account/password/change` | `account.password_change` | `{changed}` — altes PW muss verifizieren; kein Account → 404 |
+| POST | `/account/password/change` | `account.password_change` | `{changed}` — altes PW muss verifizieren; kein Account → 404. Revokiert in einer Transaktion alle Sessions + trusted devices (Event `password_changed`) |
 | POST | `/account/recovery/request` | `account.recovery` | `{recovery_token, expires_at}` — einmalig gültiger Token, `RECOVERY_TTL_MINUTES` |
 | POST | `/account/recovery/confirm` | `account.recovery` | `{recovered}` — setztes neues PW, klärt den Ban und verbraucht den Token in einer Transaktion |
 | POST | `/account/permissions` | `account.permissions` | `{permissions: [...]}` — pro Account freigegebene Berechtigungen (geschlossene Menge) |
@@ -62,6 +62,14 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
 | POST | `/handoff/validate` | `handoff.validate` | `{valid, account_id, realm_id}` — validiert **und** verbraucht das Token (zweiter Aufruf → `{valid:false}`) |
 | POST | `/world/authenticate` | `world.authenticate` | `{valid, realm_id, name}` — constant-time Abgleich des World-Server-Secrets |
 | POST | `/world/heartbeat` | `world.heartbeat` | `{recorded}` — erneut authentifiziert und schreibt `last_heartbeat`, `status` (online/offline), `version`, `current_players` |
+| POST | `/twofactor/status` | `account.two_factor` | `{enabled, recovery_codes_available}` — 2FA-Zustand ohne geheime Daten |
+| POST | `/twofactor/setup` | `account.two_factor` | `{enabled, provisioning_uri, recovery_codes[10]}` — aktiviert 2FA, speichert den verschlüsselten TOTP-Secret, erzeugt 10 einmalige Recovery-Codes; bereits aktiviert → 409 |
+| POST | `/twofactor/enable` | `account.two_factor` | `{enabled}` — schaltet 2FA an, behält Secret/Codes |
+| POST | `/twofactor/disable` | `account.two_factor` | `{enabled:false}` — löscht Secret + Codes + trusted devices, **Sessions bleiben** |
+| POST | `/twofactor/reset` | `account.two_factor` | `{enabled, provisioning_uri, recovery_codes[10]}` — neues Secret + Codes, revokiert Sessions und trusted devices |
+| POST | `/devices/list` | `device.list` | `{devices:[{id,label,confirmed_at}]}` — keine token_hash/Secrets |
+| POST | `/devices/revoke` | `device.revoke` | `{revoked}` — widerruft ein bestätigtes Gerät; unbekannt → 404 |
+| POST | `/security/events` | `security.events` | `{events:[{id,event_type,created_at}]}` — Sicherheits-Log des Accounts (neueste zuerst) |
 | GET | `/status` | — (offen) | `{status, uptime}` |
 | GET | `/health` | — (offen) | `{status}` |
 
@@ -114,4 +122,7 @@ als neue Nummer. Ohne laufende DB **kein** Start.
 `go test ./...` — DB-freie Integrationstests über eine `AuthStore`-Fake
 (alle Endpoints, Statuscodes, Einmalnutzung von Handoff/Recovery,
 Session-Expire) plus Argon-/Config-/Signatur-Tests (`verify_test.go`).
+`twofactor_test.go` deckt TOTP-2FA + trusted devices ab: korrekter/falscher/
+Replay-TOTP, Geräte-Bestätigung/Widerruf, Max-3-Limit (409), einmalige
+Recovery-Codes, disable/reset und Passwortänderung (Revocation-Policy).
 Die echte DB wird nicht für Tests benötigt.
