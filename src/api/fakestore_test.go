@@ -387,10 +387,22 @@ func (f *fakeStore) ChangePasswordRevokeAll(_ context.Context, accountID int, ne
 	return nil
 }
 
+// countActiveDevicesLocked counts not-yet-expired devices. Caller must
+// hold f.mu.
+func (f *fakeStore) countActiveDevicesLocked(accountID int, now time.Time) int {
+	n := 0
+	for _, d := range f.trustedDevices[accountID] {
+		if trustedDeviceActive(d.LastUsedAt, now) {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeStore) CountTrustedDevices(_ context.Context, accountID int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.trustedDevices[accountID]), nil
+	return f.countActiveDevicesLocked(accountID, time.Now()), nil
 }
 
 func (f *fakeStore) AddTrustedDevice(_ context.Context, accountID int, rawToken, label string) (TrustedDevice, error) {
@@ -399,10 +411,18 @@ func (f *fakeStore) AddTrustedDevice(_ context.Context, accountID int, rawToken,
 	if f.accounts[accountID] == nil {
 		return TrustedDevice{}, sql.ErrNoRows
 	}
-	if len(f.trustedDevices[accountID]) >= maxTrustedDevices {
+	now := time.Now()
+	// Mirror the SQL transaction: purge expired rows (their unique
+	// token_hash key would otherwise collide on re-presentation) and
+	// count only active devices against the limit.
+	for h, d := range f.trustedDevices[accountID] {
+		if !trustedDeviceActive(d.LastUsedAt, now) {
+			delete(f.trustedDevices[accountID], h)
+		}
+	}
+	if f.countActiveDevicesLocked(accountID, now) >= maxTrustedDevices {
 		return TrustedDevice{}, ErrMaxDevices
 	}
-	now := time.Now()
 	d := TrustedDevice{
 		ID:          f.nextDeviceID,
 		AccountID:   accountID,
@@ -410,6 +430,7 @@ func (f *fakeStore) AddTrustedDevice(_ context.Context, accountID int, rawToken,
 		Label:       label,
 		ConfirmedAt: now,
 		CreatedAt:   now,
+		LastUsedAt:  now,
 	}
 	f.nextDeviceID++
 	if f.trustedDevices[accountID] == nil {
@@ -423,8 +444,23 @@ func (f *fakeStore) AddTrustedDevice(_ context.Context, accountID int, rawToken,
 func (f *fakeStore) HasTrustedDevice(_ context.Context, accountID int, rawToken string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, ok := f.trustedDevices[accountID][tokenHash(rawToken)]
-	return ok, nil
+	d, ok := f.trustedDevices[accountID][tokenHash(rawToken)]
+	return ok && trustedDeviceActive(d.LastUsedAt, time.Now()), nil
+}
+
+func (f *fakeStore) TouchTrustedDevice(_ context.Context, accountID int, rawToken string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	devs := f.trustedDevices[accountID]
+	h := tokenHash(rawToken)
+	d, ok := devs[h]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	now := time.Now()
+	d.LastUsedAt = now
+	devs[h] = d
+	return nil
 }
 
 func (f *fakeStore) RevokeTrustedDevice(_ context.Context, accountID int, rawToken string) error {

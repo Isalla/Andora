@@ -198,6 +198,11 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "last_login update failed")
 		return
 	}
+	// Refresh the 30-day inactivity window of the presenting confirmed
+	// device. Best effort: a failed touch never fails the login itself.
+	if deviceConfirmed && req.DeviceToken != "" {
+		_ = s.store.TouchTrustedDevice(ctx, acc.ID, req.DeviceToken)
+	}
 	writeJSON(w, http.StatusOK, verifyResponse{
 		Valid:       true,
 		AccountID:   acc.ID,

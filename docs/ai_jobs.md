@@ -47,3 +47,26 @@ Eine Session darf nicht erst dann komprimiert werden, wenn das Kontextlimit bere
 
 Ziel:
 Für weitere Tool-Calls, Codeänderungen, Tests und Abschlussberichte müssen jederzeit ausreichend freie Tokens verbleiben.
+
+GO-TOOLCHAIN / TEMPORÄRE AUSLEGER
+
+Die Go-Toolchain des Projekts liegt in `.tmp/go` unterhalb des Projektroots:
+
+- Toolchain-Binary: `/home/pi/Projekt/pimmo/.tmp/go/go-toolchain/bin/go` (aktuell go1.27.1, linux/arm64)
+- Mod-Cache: `/home/pi/Projekt/pimmo/.tmp/go-mod-cache`
+- Build-Cache: `/home/pi/Projekt/pimmo/.tmp/go-build-cache`
+
+Jeder NEUE Coding-Auftrag (gofmt, vet, build, test, Downloads temporärer Toolchains) MUSS diese Toolchain unter `.tmp/` verwenden.
+
+Regeln:
+- `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt.
+- Temporäre Toolchains, Downloads und temporäre Artefakte landen ausschließlich in `/home/pi/Projekt/pimmo/.tmp/`
+  (z. B. `.tmp/go` für eine neu geladene Toolchain).
+- Das Operating System des Projekts lässt sich über `/home/pi/Projekt/pimmo/.tmp/os-release`
+  prüfen (aktuell Debian GNU/Linux 13 (trixie), ARM64). Diese Datei ersetzt das systemweite
+  Auslesen aus `/etc/os-release`.
+- Entwicklungs-/Testsystem: Die Test-Binärdateien werden auf einem ARM64-System gebaut
+  (arm64, z. B. `go1.x.x.linux-arm64`).
+- Produktions-Binärdateien: Für die Produktion fallen ARM64 und AMD64 an
+  (CROSS-COMPILIATION von der ARM64-Entwicklungsumgebung nach AMD64, z. B. via
+  `GOARCH=amd64 GOOS=linux go build ...`).

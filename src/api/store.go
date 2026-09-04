@@ -70,6 +70,8 @@ type Recovery struct {
 
 // TrustedDevice is a confirmed device bound to an account. The raw
 // device token itself is never stored; only its SHA-256 hash is.
+// LastUsedAt is the last successful login this device presented; it
+// carries the 30-day inactivity expiry (see trustedDeviceInactivity).
 type TrustedDevice struct {
 	ID          int
 	AccountID   int
@@ -77,6 +79,7 @@ type TrustedDevice struct {
 	Label       string
 	ConfirmedAt time.Time
 	CreatedAt   time.Time
+	LastUsedAt  time.Time
 }
 
 // RecoveryCode is a single-use 2FA recovery code (hashed in the DB).
@@ -135,6 +138,7 @@ type AuthStore interface {
 	CountTrustedDevices(ctx context.Context, accountID int) (int, error)
 	AddTrustedDevice(ctx context.Context, accountID int, rawToken, label string) (TrustedDevice, error)
 	HasTrustedDevice(ctx context.Context, accountID int, rawToken string) (bool, error)
+	TouchTrustedDevice(ctx context.Context, accountID int, rawToken string) error
 	RevokeTrustedDevice(ctx context.Context, accountID int, rawToken string) error
 	ListTrustedDevices(ctx context.Context, accountID int) ([]TrustedDevice, error)
 	RevokeAllTrustedDevices(ctx context.Context, accountID int) error
@@ -159,8 +163,21 @@ var ErrMaxDevices = fmt.Errorf("max trusted devices reached")
 // maxTrustedDevices is the service-level limit of confirmed devices per
 // account. It is enforced in AddTrustedDevice (not as a DB constraint)
 // because revocation must happen BEFORE a new confirmation when the
-// limit is reached.
+// limit is reached. The limit only counts ACTIVE devices: an expired
+// device frees its slot before the next confirmation.
 const maxTrustedDevices = 3
+
+// trustedDeviceInactivity is the 30-day window after the last
+// successful login with a confirmed device. The expiry lives in the
+// trusted_devices table itself (last_used_at) and never in accounts.
+const trustedDeviceInactivity = 30 * 24 * time.Hour
+
+// trustedDeviceActive reports whether a confirmed device is still
+// valid, i.e. its last usage is younger than trustedDeviceInactivity.
+// Exactly 30 days is still active; one nanosecond beyond is expired.
+func trustedDeviceActive(lastUsed, now time.Time) bool {
+	return !now.After(lastUsed.Add(trustedDeviceInactivity))
+}
 
 // Security event types (closed set; migration 011). Account-scoped
 // events only; there is no mail engine behind them.
@@ -791,10 +808,13 @@ func (s *sQLStore) ChangePasswordRevokeAll(ctx context.Context, accountID int, n
 	return nil
 }
 
+// CountTrustedDevices counts only ACTIVE (not yet expired) devices so
+// an expired one frees its slot in the 3-device limit.
 func (s *sQLStore) CountTrustedDevices(ctx context.Context, accountID int) (int, error) {
 	var n int
 	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ?", accountID).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM trusted_devices
+		 WHERE account_id = ? AND last_used_at >= NOW() - INTERVAL 30 DAY`, accountID).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count trusted devices: %w", err)
 	}
 	return n, nil
@@ -814,9 +834,20 @@ func (s *sQLStore) AddTrustedDevice(ctx context.Context, accountID int, rawToken
 	if err != nil {
 		return TrustedDevice{}, fmt.Errorf("begin add trusted device: %w", err)
 	}
+	// Expired devices no longer count against the limit and their rows
+	// are purged here (within the same transaction) so a re-presented
+	// token after expiry cannot collide with the unique token_hash key
+	// left by an expired row.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM trusted_devices
+		 WHERE account_id = ? AND last_used_at < NOW() - INTERVAL 30 DAY`, accountID); err != nil {
+		_ = tx.Rollback()
+		return TrustedDevice{}, fmt.Errorf("purge expired devices: %w", err)
+	}
 	var n int
 	if err := tx.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ?", accountID).Scan(&n); err != nil {
+		`SELECT COUNT(*) FROM trusted_devices
+		 WHERE account_id = ? AND last_used_at >= NOW() - INTERVAL 30 DAY`, accountID).Scan(&n); err != nil {
 		_ = tx.Rollback()
 		return TrustedDevice{}, fmt.Errorf("count trusted devices: %w", err)
 	}
@@ -826,9 +857,9 @@ func (s *sQLStore) AddTrustedDevice(ctx context.Context, accountID int, rawToken
 	}
 	now := time.Now()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO trusted_devices (account_id, token_hash, label, confirmed_at, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		accountID, tokenHash(rawToken), label, now, now); err != nil {
+		`INSERT INTO trusted_devices (account_id, token_hash, label, confirmed_at, created_at, last_used_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		accountID, tokenHash(rawToken), label, now, now, now); err != nil {
 		_ = tx.Rollback()
 		return TrustedDevice{}, fmt.Errorf("insert trusted device: %w", err)
 	}
@@ -848,17 +879,49 @@ func (s *sQLStore) AddTrustedDevice(ctx context.Context, accountID int, rawToken
 	if err := tx.Commit(); err != nil {
 		return TrustedDevice{}, fmt.Errorf("commit add trusted device: %w", err)
 	}
-	return TrustedDevice{ID: id, AccountID: accountID, TokenHash: tokenHash(rawToken), Label: label, ConfirmedAt: now, CreatedAt: now}, nil
+	return TrustedDevice{
+		ID:          id,
+		AccountID:   accountID,
+		TokenHash:   tokenHash(rawToken),
+		Label:       label,
+		ConfirmedAt: now,
+		CreatedAt:   now,
+		LastUsedAt:  now,
+	}, nil
 }
 
+// HasTrustedDevice reports whether a CONFIRMED AND ACTIVE device
+// matches the presented token. An expired device (last used more than
+// 30 days ago) is not recognized, so it does not bypass 2FA.
 func (s *sQLStore) HasTrustedDevice(ctx context.Context, accountID int, rawToken string) (bool, error) {
-	var n int
-	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
-		accountID, tokenHash(rawToken)).Scan(&n); err != nil {
+	var lastUsed time.Time
+	err := s.db.QueryRowContext(ctx,
+		"SELECT last_used_at FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
+		accountID, tokenHash(rawToken)).Scan(&lastUsed)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
 		return false, fmt.Errorf("lookup trusted device: %w", err)
 	}
-	return n > 0, nil
+	return trustedDeviceActive(lastUsed, time.Now()), nil
+}
+
+// TouchTrustedDevice updates last_used_at of a confirmed device after a
+// successful login with that device. Returns sql.ErrNoRows when the
+// device is unknown for the account.
+func (s *sQLStore) TouchTrustedDevice(ctx context.Context, accountID int, rawToken string) error {
+	res, err := s.db.ExecContext(ctx,
+		"UPDATE trusted_devices SET last_used_at = NOW() WHERE account_id = ? AND token_hash = ?",
+		accountID, tokenHash(rawToken))
+	if err != nil {
+		return fmt.Errorf("touch trusted device: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("touch trusted device: %w", err)
+	}
+	return errWrapNoRows(n)
 }
 
 func (s *sQLStore) RevokeTrustedDevice(ctx context.Context, accountID int, rawToken string) error {
@@ -883,7 +946,7 @@ func (s *sQLStore) RevokeTrustedDevice(ctx context.Context, accountID int, rawTo
 
 func (s *sQLStore) ListTrustedDevices(ctx context.Context, accountID int) ([]TrustedDevice, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, account_id, token_hash, label, confirmed_at, created_at
+		`SELECT id, account_id, token_hash, label, confirmed_at, created_at, last_used_at
 		 FROM trusted_devices WHERE account_id = ? ORDER BY id`, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list trusted devices: %w", err)
@@ -892,7 +955,7 @@ func (s *sQLStore) ListTrustedDevices(ctx context.Context, accountID int) ([]Tru
 	out := []TrustedDevice{}
 	for rows.Next() {
 		var d TrustedDevice
-		if err := rows.Scan(&d.ID, &d.AccountID, &d.TokenHash, &d.Label, &d.ConfirmedAt, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.AccountID, &d.TokenHash, &d.Label, &d.ConfirmedAt, &d.CreatedAt, &d.LastUsedAt); err != nil {
 			return nil, fmt.Errorf("scan trusted device: %w", err)
 		}
 		out = append(out, d)

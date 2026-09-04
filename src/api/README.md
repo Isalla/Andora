@@ -48,7 +48,7 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
 
 | Method | Path | Permission | Ergebnis (kurz) |
 |---|---|---|---|
-| POST | `/auth/verify` | `account.authenticate` | `{valid, account_id, session_id, expires_at, device_token?}` — nur bei Erfolg wird die Session angelegt und `last_login_at` gesetzt; alle Ablehnungen (kein Account, Ban, falsches PW, verbrauchter Recovery-Code) sind unverwechselbar `{valid:false}`. Optional: `device_token` (bestätigtes Gerät → nur PW nötig), `totp_code`/`recovery_code` (2. Faktor bei unbekanntem Gerät, → `{valid:false, two_factor_required:true}` wenn fehlt/falsch/Replay), `trust_device`+`device_label` bestätigt das Gerät (max 3, sonst 409 `max_devices_reached`) |
+| POST | `/auth/verify` | `account.authenticate` | `{valid, account_id, session_id, expires_at, device_token?}` — nur bei Erfolg wird die Session angelegt und `last_login_at` gesetzt; alle Ablehnungen (kein Account, Ban, falsches PW, verbrauchter Recovery-Code) sind unverwechselbar `{valid:false}`. Optional: `device_token` (bestätigtes Gerät → nur PW nötig), `totp_code`/`recovery_code` (2. Faktor bei unbekanntem Gerät, → `{valid:false, two_factor_required:true}` wenn fehlt/falsch/Replay),   `trust_device`+`device_label` bestätigt das Gerät (max 3, sonst 409 `max_devices_reached`; nach 30 Tagen Inaktivität verfällt das Gerät und der 2FA-Bypass entfällt) |
 | POST | `/account/register` | `account.register` | 201 `{account_id}` — Username `3–32 [A-Za-z0-9_]`, PW `8–72`, E-Mail konservativ validiert; Duplikat (Username oder E-Mail-Hash) → 409; frischer Account wird `NEW_ACCOUNT_BAN_SECONDS` gebannt |
 | POST | `/account/password/change` | `account.password_change` | `{changed}` — altes PW muss verifizieren; kein Account → 404. Revokiert in einer Transaktion alle Sessions + trusted devices (Event `password_changed`) |
 | POST | `/account/recovery/request` | `account.recovery` | `{recovery_token, expires_at}` — einmalig gültiger Token, `RECOVERY_TTL_MINUTES` |
@@ -91,6 +91,15 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
   `IP+Pfad`, danach nach `ServiceId+Pfad` (Burst `RATE_LIMIT_BURST`,
   `RATE_LIMIT_PER_MIN`/Minute, 429 + `Retry-After`). `X-Forwarded-For`
   wird **bewusst nicht** vertraut (Spoofing).
+- **Trusted-Device-Verfall (30 Tage Inaktivität)**: Die Gültigkeitslogik
+  lebt ausschließlich in `trusted_devices.last_used_at` (kein Ablauf-
+  Feld in `accounts`; der Account verfällt dadurch nicht). Jeder
+  erfolgreiche Login mit einem erkannten Gerät aktualisiert
+  `last_used_at`; nach 30 Tagen Inaktivität wird das Gerät nicht mehr
+  erkannt (der 2FA-Bypass entfällt und das Gerät verlangt erneut den
+  zweiten Faktor) und befreit beim nächsten Geräte-Flow seinen Platz im
+  3er-Limit. Bestätigte Geräte erhalten bei der Bestätigung
+  `last_used_at = confirmed_at`.
 - **Password-Hash**: Argon2id (`x/crypto`), Parameter im Format des
   Hashes selbst, Salt pro Hash zufällig (`HashPasswordSalt`).
 - **World-Server-Credentials**: als Secret in `world_servers.credential`
@@ -125,4 +134,8 @@ Session-Expire) plus Argon-/Config-/Signatur-Tests (`verify_test.go`).
 `twofactor_test.go` deckt TOTP-2FA + trusted devices ab: korrekter/falscher/
 Replay-TOTP, Geräte-Bestätigung/Widerruf, Max-3-Limit (409), einmalige
 Recovery-Codes, disable/reset und Passwortänderung (Revocation-Policy).
-Die echte DB wird nicht für Tests benötigt.
+`trusted_expiry_test.go` deckt den 30-Tage-Inaktivitätsverfall ab:
+Grenzenwert des Gültigkeits-Checkers, Verfall unterbindet den 2FA-Bypass
+(Account bleibt per TOTP einlogbar), `last_used_at`-Refresh bei Login,
+Slot-Befreiung im 3er-Limit nach Ablauf und Re-Bestätigung desselben
+Tokens. Die echte DB wird nicht für Tests benötigt.
