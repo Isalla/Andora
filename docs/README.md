@@ -15,7 +15,7 @@
 ## Kategorien
 
 ### 1. KI-Backend & Dev-Prozess
-- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen.
+- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt, OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation).
 - **ai-handoff-qwen3-coder.md** – Arbeitsvorgaben für das Coding: Bestandsanalyse zuerst, Modularität (1 Datei = 1 Verantwortung), Godot 3.5/TS-strict-Netzwerkregeln, i18n, Performance-Ziele (10 Hz), konkrete Tasks.
 - **ai_system.md** – Zentrale KI-Architektur von Andora (Interpreter-Prinzip, Kontexte, asynchrone Verarbeitung, spezialisierte KI-Module).
 - **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, dateibasierte Queue, Recovery, Crafting-Zuordnung.
