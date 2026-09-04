@@ -16,6 +16,10 @@ export interface Player {
   hp: number;
   maxHp: number;
   lang: string;
+  /** Auth-API-Account (0 = unbekannt/Dev ohne Auth-API). */
+  accountId: number;
+  /** Login-Session ('' = keine); Basis fuer Elternkontroll-Polling. */
+  sessionId: string;
   entities: Set<string>;        // IDs, die dieser Spieler gerade sieht
   lastActivity: number;
   pendingMove: { dx: number; dy: number } | null;

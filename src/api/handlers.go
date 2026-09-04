@@ -23,6 +23,7 @@ import (
 // Failure shapes stay distinct-by-design:
 //   - {valid:false}                          -> missing account / ban / wrong password / bad or replayed recovery-code
 //   - {valid:false, two_factor_required}     -> TOTP missing, wrong, expired or replayed
+//   - {valid:false, parental_blocked}        -> today's supervised play budget is exhausted
 type verifyResponse struct {
 	Valid             bool   `json:"valid"`
 	AccountID         int    `json:"account_id,omitempty"`
@@ -30,6 +31,7 @@ type verifyResponse struct {
 	ExpiresAt         string `json:"expires_at,omitempty"`
 	DeviceToken       string `json:"device_token,omitempty"`
 	TwoFactorRequired bool   `json:"two_factor_required,omitempty"`
+	ParentalBlocked   bool   `json:"parental_blocked,omitempty"`
 }
 
 // handleHealth reports liveness without exposing configuration or
@@ -182,6 +184,19 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		}
 		deviceConfirmed = true
 		confirmedDevice = req.DeviceToken
+	}
+
+	// --- parental control: no new login while today's supervised
+	// budget is exhausted (pure read, no session yet: a fresh login
+	// never starts the grace buffer).
+	pst, err := s.computeParentalState(ctx, acc, false, false, time.Now())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "parental lookup failed")
+		return
+	}
+	if pst.Enabled && pst.Blocked {
+		writeJSON(w, http.StatusOK, verifyResponse{Valid: false, ParentalBlocked: true})
+		return
 	}
 
 	rawID, sess, err := s.store.CreateSession(ctx, acc.ID, s.cfg.SessionTTL)

@@ -57,9 +57,9 @@ Der Gameserver kontrolliert:
 
 # 3. Aufgabenverteilung
 
-## TypeScript
+## Realm-Server (Rust)
 
-TypeScript ist für die Spielmechanik und Autorität verantwortlich.
+Der Realm-Server (Rust) ist für die Spielmechanik und Autorität verantwortlich.
 
 Dazu gehören:
 
@@ -914,10 +914,10 @@ Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
                        └──────┬───────┘
                               │
                               ▼
-                    ┌─────────────────┐
-                    │ Andora Server   │
-                    │   TypeScript    │
-                    └───────┬─────────┘
+                    ┌──────────────────┐
+                    │ Andora Server    │
+                    │   (Rust)         │
+                    └───────┬──────────┘
                             │
               ┌─────────────┼─────────────┐
               │             │             │
@@ -959,6 +959,6 @@ Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
 
 > **Das Spiel muss auch ohne Ollama funktionieren.**
 
-> **Spielmechanik liegt in TypeScript, Inhalte und Prompt-Fragmente liegen in Lua, Persistenz liegt in MariaDB und die KI übernimmt Sprache, Interpretation und kontrollierte Improvisation.**
+> **Spielmechanik liegt im Realm-Server (Rust), Inhalte und Prompt-Fragmente liegen in Lua, Persistenz liegt in MariaDB und die KI übernimmt Sprache, Interpretation und kontrollierte Improvisation.**
 
 > **Die i18n-Sprache des Spielers bestimmt auch die Sprache der KI-Ausgabe.**

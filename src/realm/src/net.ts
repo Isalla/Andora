@@ -8,6 +8,7 @@ import { handleHello } from './handlers/hello';
 import { handleHeartbeat } from './handlers/heartbeat';
 import { handleMove } from './handlers/move';
 import { handleChat } from './handlers/chat';
+import { handleParentalMessage, detachParental } from './parental';
 import type { NetMsg } from './types';
 
 let wss: WebSocket.Server;
@@ -30,6 +31,11 @@ export function initWebSocket(): WebSocket.Server {
         case C2S.HEARTBEAT:  handleHeartbeat(ws, msg); break;
         case C2S.MOVE:       handleMove(ws, msg); break;
         case C2S.CHAT:       handleChat(ws, msg); break;
+        case C2S.PARENTAL: {
+          const me = bySocket.get(ws);
+          if (me) handleParentalMessage(me, msg).catch(e => console.error('PARENTAL', e));
+          break;
+        }
         // M5: C2S.ATTACK  → handlers/battle.ts (noch stub-free)
         // M6: C2S.NPC_TALK → handlers/npc.ts
         // M8: C2S.AUCTION_* → handlers/auction.ts
@@ -41,6 +47,8 @@ export function initWebSocket(): WebSocket.Server {
     ws.on('close', async () => {
       const me = bySocket.get(ws);
       if (!me) return;
+      // Elternkontrolle: temporaere Sitzungs-Freischaltungen verfallen.
+      detachParental(me.id);
       await savePosition(me.id, me.x, me.y);
       const despawn = JSON.stringify({ seq: 0, type: 3 /* S2C.DESPAWN */, data: { id: me.id } });
       for (const q of players.values()) {

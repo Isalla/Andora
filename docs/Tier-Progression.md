@@ -550,7 +550,7 @@ Der aktuelle Charakter-Maximallevel von Andora beträgt **40**.
 
 Spätere Erweiterungen können das Maximallevel erhöhen und neue Tiers hinzufügen.
 
-Deshalb sollen Tiergrenzen nicht unnötig fest im TypeScript-Code verteilt werden.
+Deshalb sollen Tiergrenzen nicht unnötig fest im Realm-Server-Code (Rust) verteilt werden.
 
 Sie sollen später über geeignete Definitionen beziehungsweise Konfigurationen beschrieben werden können.
 
@@ -587,7 +587,7 @@ Lua beschreibt:
 * Klassenziele
 * Basic-Belohnungen
 
-TypeScript:
+Realm-Server (Rust):
 
 * prüft die Voraussetzungen
 * verarbeitet den Fortschritt

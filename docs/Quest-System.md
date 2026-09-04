@@ -42,9 +42,9 @@ Lua verändert jedoch nicht direkt den persistenten Spielzustand.
 
 ---
 
-## TypeScript – ausführender Teil
+## Realm-Server (Rust) – ausführender Teil
 
-TypeScript ist die Autorität des Quest-Systems.
+Der Realm-Server (Rust) ist die Autorität des Quest-Systems.
 
 Der Server:
 
@@ -64,7 +64,7 @@ Der Server:
 
 Lua beschreibt eine Bedingung.
 
-**TypeScript entscheidet, ob sie tatsächlich erfüllt ist.**
+**Der Realm-Server (Rust) entscheidet, ob sie tatsächlich erfüllt ist.**
 
 ---
 
@@ -128,7 +128,7 @@ Dazu können gehören:
 
 # 3. Grundregel
 
-> **Lua beschreibt die Aufgabe. TypeScript prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
+> **Lua beschreibt die Aufgabe. Der Realm-Server (Rust) prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
 
 ---
 
@@ -203,7 +203,7 @@ item       = borin_letter_001
 target_npc = elara
 ```
 
-Dadurch kann TypeScript eindeutig feststellen, ob das tatsächliche Ziel erfüllt wurde.
+Dadurch kann der Realm-Server (Rust) eindeutig feststellen, ob das tatsächliche Ziel erfüllt wurde.
 
 ---
 
@@ -255,7 +255,7 @@ Nicht jede Quest ist jederzeit für jeden Spieler sichtbar.
 
 Lua kann Bedingungen definieren, unter denen eine Quest verfügbar sein kann.
 
-TypeScript prüft anschließend den tatsächlichen Spieler- und Weltzustand.
+Der Realm-Server (Rust) prüft anschließend den tatsächlichen Spieler- und Weltzustand.
 
 Mögliche Voraussetzungen:
 
@@ -277,7 +277,7 @@ Mögliche Voraussetzungen:
 
 Grundregel:
 
-> **Lua definiert, wann eine Quest verfügbar sein kann. TypeScript entscheidet anhand des aktuellen Welt- und Spielerzustands, ob sie tatsächlich verfügbar ist.**
+> **Lua definiert, wann eine Quest verfügbar sein kann. Der Realm-Server (Rust) entscheidet anhand des aktuellen Welt- und Spielerzustands, ob sie tatsächlich verfügbar ist.**
 
 ---
 
@@ -300,7 +300,7 @@ Beziehung >= 60
 
 Die Beziehung selbst wird nicht von Lua erfunden.
 
-TypeScript liest den tatsächlichen Beziehungszustand des Charakters.
+Der Realm-Server (Rust) liest den tatsächlichen Beziehungszustand des Charakters.
 
 ---
 
@@ -674,7 +674,7 @@ QuestFailed
 
 Eine Lua-Quest kann definieren, dass unter bestimmten Bedingungen eine Szene ausgelöst werden darf.
 
-TypeScript prüft die Bedingungen und übergibt die Kontrolle anschließend an das Scene-System.
+Der Realm-Server (Rust) prüft die Bedingungen und übergibt die Kontrolle anschließend an das Scene-System.
 
 ---
 
@@ -700,13 +700,13 @@ Alle Belohnungen werden serverseitig validiert und vergeben.
 
 Lua darf beschreiben, welche Belohnung vorgesehen ist.
 
-TypeScript führt die tatsächliche Vergabe aus.
+Der Realm-Server (Rust) führt die tatsächliche Vergabe aus.
 
 ---
 
 # 24. i18n
 
-Spieler sichtbare Questtexte werden nicht fest in TypeScript oder Godot eingebaut.
+Spieler sichtbare Questtexte werden nicht fest im Realm-Server (Rust) oder in Godot eingebaut.
 
 Lua verwendet dafür i18n-Keys.
 
@@ -751,7 +751,7 @@ Das Quest-System verbindet Inhalte mit der lebenden Welt, ohne Lua oder den Clie
 
 > **Lua beschreibt die Quest.**
 
-> **TypeScript führt und prüft die Quest.**
+> **Der Realm-Server (Rust) führt und prüft die Quest.**
 
 > **MariaDB speichert den individuellen dynamischen Zustand.**
 

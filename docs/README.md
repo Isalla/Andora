@@ -2,31 +2,32 @@
 
 **ZWECK:** Zentraler Einstiegspunkt für KI-/Coding-Aufgaben. Zuerst diese Übersicht lesen, danach nur die für die Aufgabe relevanten Dokumente öffnen. Keine Dokumente anfangen, bevor die passende Kategorie unten identifiziert ist.
 
-**PFLICHT VOR JEDEM CODING-AUFTAG:** [ai_jobs.md](./ai_jobs.md) (Autonomie-/Kontextreserve-Regeln) und bei langen Aufträgen [ai-handoff-qwen3-coder.md](./ai-handoff-qwen3-coder.md) lesen.
+**PFLICHT VOR JEDEM CODING-AUFTAG:** [ai_jobs.md](./ai_jobs.md) (Autonomie-/Kontextreserve-Regeln) lesen. Projektinformationen beziehen neue KI-Sessions ausschließlich aus den aktuellen Dokumenten dieser Übersicht (`docs/`) und, soweit Fachliteratur relevant ist, aus [references/README.md](../references/README.md) – nicht aus `.tmp/ai-context` oder sonstigen Übergabedokumenten.
 
 ## Einstieg
 
 | Schritt | Datei | Warum |
 |---|---|---|
 | 1. Projektübergreifend | [project_overview.md](./project_overview.md) | Grundidee, Plattformen, Server-Autorität, alle Kernsysteme in übergeordneter Form |
-| 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.5, Node/TS, MariaDB, WebSocket), Verzeichnis-, exp1_/exp2_-Präfix- und Deployment-Regeln |
+| 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.5, fünf Serverdienste: Go-API/Auth, Login, Realm/Rust, Coordinator, Voice; MariaDB, WebSocket), Zielplattformen (linux-amd64/arm64), Verzeichnis- und exp1_/exp2_-Präfix-Regeln |
 | 3. KI-Grundregel | [ai_system.md](./ai_system.md) | Zentrale KI-Architektur: Server ist Autorität, AI-/Narrative-Context, spezialisierte KI-Systeme, Budget, Fallbacks |
 
 ## Kategorien
 
 ### 1. KI-Backend & Dev-Prozess
 - **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt, OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation).
-- **ai-handoff-qwen3-coder.md** – Arbeitsvorgaben für das Coding: Bestandsanalyse zuerst, Modularität (1 Datei = 1 Verantwortung), Godot 3.5/TS-strict-Netzwerkregeln, i18n, Performance-Ziele (10 Hz), konkrete Tasks.
 - **ai_system.md** – Zentrale KI-Architektur von Andora (Interpreter-Prinzip, Kontexte, asynchrone Verarbeitung, spezialisierte KI-Module).
 - **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, dateibasierte Queue, Recovery, Crafting-Zuordnung.
-- **monitoring_web_panel.md** – Implementierungs-Doku des Admin-/Monitoring-Web-Panel: Prozesse, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte.
+- **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **derzeit als lokales Panel umgesetzt (Übergangsstand)**, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.
+- **Deployment_Betriebsarchitektur.md** – Verbindliche Betriebs-/Deployment-Architektur: fünf getrennte Serverdienste (eigenständig betreibbar, linux-amd64 + linux-arm64), zentrales Admin-/Deployment-Panel, Andora-Agent pro Server (mTLS, ohne Remote-Shell), Nicht-Root-Benutzer `andora`, `andora-updater` (signierte Manifeste, Prüfsummen, Healthchecks, Rollback, inkl. Agent), automatisierte Realm-Updates (Wartungsmodus → Shutdown → Backup → Update → Migration → Healthcheck → Freigabe) und parallele Realm-Versionen (Live, Classic, Test, Event).
 
 ### 2. Architektur, Auth & Datenbank
 - **architecture.md** – Technische Gesamtarchitektur (siehe Einstieg).
+- **Deployment_Betriebsarchitektur.md** – Betriebs-/Deployment-Architektur der fünf Serverdienste (Panel, Agent, mTLS, Updater, Realm-Updates; siehe auch Kategorie 1).
 - **Auth_API_Architektur.md** – Go-Auth-/API-Sicherheitsservice: Service-Auth, Berechtigungen, Datenminimierung, Secrets, Auth-DB-Migrationen.
-- **Login_Realm_Architektur.md** – Account-, Login- und Realm-Architektur: Account-DB, World-Server-Auth, Realm-Auswahl, Charakter-Transfer, Fresh-Start-Sperre.
-- **Datenbank_Architektur.md** – MariaDB-Aufteilung (auth, world_data, realm_state), Realm-Isolation, Charaktertransfer, Crafting-Jobs, DB-Benutzer/Verbindungen.
-- **parental_control.md** – Elternkontrolle: accountgebunden, serverseitig, 30-Min-Warnung, Tagesausnahmen/Ferien, Datenstruktur.
+- **Login_Realm_Architektur.md** – Account-, Login- und Realm-Architektur: Account-DB, World-Server-Auth, Realm-Auswahl, Realm-Versionen, Charakter-Transfer, Fresh-Start-Sperre.
+- **Datenbank_Architektur.md** – MariaDB-Aufteilung (auth, realm_state_<realm> mit statischen + dynamischen Realm-Daten; keine zentrale world_data), Realm-Isolation, Realm-Versionen, Charaktertransfer, Crafting-Jobs, DB-Benutzer/Verbindungen.
+- **parental_control.md** – Elternkontrolle: accountgebunden, serverseitig, 30-Min-Warnung, Tagesausnahmen/Ferien, optionale Eltern-E-Mail mit Änderungsbenachrichtigungen (ohne PINs/Geheimnisse), BLOCKED/Puffer (15 Min. So–Do, 30 Min. Fr–Sa, kein Re-Login im Puffer), temporäre Session-Ausnahmen (Ingame-Elternpanel: +1 h einmal pro Kalendertag, temporäre Mechanismus-Freischaltungen), Berechtigungen in Sonderzeiträumen, Voice-Berechtigung und elterliche Voice-Sperre (Spieler-Voice; getrennt von NPC/KI-Sprachinteraktion), Datenstruktur.
 - **Temporäre_Dateien.md** – Dev-Konvention: temporäre Dateien nur in `.tmp/` des Projekts, atomare Schreibvorgänge, Queue-/Recovery-Dateien.
 
 ### 3. Worldbuilding, Lore & Rassen
@@ -69,13 +70,15 @@
 - **[Auktionshaus und Marktplatz](./Auktionshaus%20und%20Marktplatz)** (Achtung: keine `.md`-Endung) – Design des Auktionshauses/Marktplatzes: Kaufgesuche, (Teil-)Erfüllung, AH-Guthaben, asynchroner/Offline-Handel.
 
 ### 7. Quests & Story
-- **Quest-System.md** – Quest-Architektur: Lua-/TS-/MariaDB-Aufteilung, Questzustände, eventbasierter Fortschritt, dynamische Verfügbarkeit, Klassen-/Gruppenquests.
+- **Quest-System.md** – Quest-Architektur: Lua-/Realm-Server-(Rust)-/MariaDB-Aufteilung, Questzustände, eventbasierter Fortschritt, dynamische Verfügbarkeit, Klassen-/Gruppenquests.
 - **quests_stories.md** – Quest-/Story-Inhalt: Hauptgeschichte, Questdefinitionen, strukturierte Ziele (Kill/Collect/Talk/…), Fortschritt, Belohnungen, KI-/Scene-Integration.
 
 ### 8. NPC, KI-Dialog & Szenen
 - **Ki-NPC.md** – Doku/Aufgabe für dynamisches NPC-, Informations- und Beziehungssystem: NPCs als Einmal-Personen, Beziehungs-/Wissens-/Nachrichten-/Reisesystem, Raid-Übergang, Ollama-Aufgabe, Fehlerfälle.
 - **cutscene_system.md** – Architektur für Cutscenes/Dynamic Scenes: Auslösung (Trigger, Gebietstrigger, Quest/Boss/World-Event), Scene-States (PENDING/RUNNING/PAUSED/FINISHED), alte vs. aktuelle Architektur.
 - **communication-voice-npc-commands.md** – Kommunikations-/Voice-spezifikation: Chat-Kanäle (Say/Nähe/Lokal/Gruppe/Gilde), Voice-Regeln, private NPC-/Söldnerbefehle, Companion Push-to-Talk.
+- **voice_system.md** – Zentrale Voice-Doku: fasst alle festgelegten Voice-Regeln zusammen (Trennung von Spieler-Voicechat und sprachbasierte Spiel-/KI-Steuerung, serverseitige maximale Rechte, Deaktivierung erlaubter Funktionen, serverseitige Speicherung/Geräteunabhängigkeit, nur Übertragung für aktivierte+erlaubte Kanäle, Kanal-Mechanik, private Begleiter-/Söldnerbefehle + Companion-PTT, SPI-Kette, Voice unter Elternkontrolle); verweist auf communication-voice-npc-commands.md (Kanäle, Companion-Details), chat_system.md (Rechte/Logging) und parental_control.md.
+- **chat_system.md** – Chat- und Kommunikationsregeln: serverseitige Speicherung der Kommunikationsrechte und Voice-Kanäle (Server definiert maximale Rechte, Spieler kann erlaubte Funktionen deaktivieren, Voice-Streams nur für aktivierte+erlaubte Kanäle, bei Gerätewechsel erhalten), Chatfilter + Public-Chat/Voice-Deaktivierung unter Elternkontrolle, Private Nachrichten nur mit Freundesliste & Systemnachrichten, Spieler-Voice nur mit elterlicher Freigabe, Chat-Logging (nur interne Account-IDs, keine Namen/E-Mails, ID-Auflösung für berechtigtes Verwaltungs-/Moderationssystem) – offene Bereiche als „nicht definiert“ markiert.
 
 ### 9. Platzhalter
 - **Housing.md** – Nur Status „Geplant“ (späterer Abschnitt): erst Welt, NPCs, Items, Quests, Combat, Persistenz.
@@ -86,8 +89,9 @@
 - **Items:** item_properties.md + inventory_system.md + Crafting.md (Quality-System dreht sich um dieselben Stufen).
 - **Quests:** Quest-System.md (Architektur) + quests_stories.md (Inhalt).
 - **Rassen & Fraktionen:** Rassen-Fraktionen.md (Rahmen) + Rasse_*.md / exp*_Rasse_*.md (Details) + Politik-Herrschaftssystem.md (PvP-Phase).
-- **Auth/DB:** Auth_API_Architektur.md + Login_Realm_Architektur.md + Datenbank_Architektur.md + parental_control.md.
+- **Auth/DB:** Auth_API_Architektur.md + Login_Realm_Architektur.md + Datenbank_Architektur.md + Deployment_Betriebsarchitektur.md + parental_control.md.
 - **PvP/Kampf:** Kampfsystem.md + Boss-System.md + Arena.md (+ ai_cutscene_system.md) + Dungeon-Finder.md + Event-Matchmaking.md.
+- **Kommunikation:** voice_system.md (Zentraldokumentation: Voice-Mechanik, Rechte, Speicherung, Deaktivierung; verweist auf Kanal-/PTT-/Companion-Details, Elternkontrolle, Chat-Logging) + chat_system.md (Chat-/Voice-Regeln, Logging) + communication-voice-npc-commands.md (Kanäle, Voice-Mechanik, NPC-Sprachbefehle) + parental_control.md (Chat-/Voice-Gates unter Elternkontrolle).
 - **Expansionen:** exp1_Rasse_Luzilla.md + exp1_Unterwelt.md (Exp 1) und exp2_Rasse_Mandalonier.md + exp2_* (Exp 2) jeweils zusammen.
 
 ## Inhaltliche Überlappungen / mögliche Konflikte

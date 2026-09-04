@@ -154,6 +154,35 @@ type AuthStore interface {
 
 	RecordSecurityEvent(ctx context.Context, eventType string, accountID *int) error
 	ListSecurityEvents(ctx context.Context, accountID int) ([]SecurityEvent, error)
+
+	// --- parental control (migration 013) ---
+	//
+	// The account row only carries the parental_control_enabled flag;
+	// the full rule set lives in the parental_* tables. Day limits use
+	// minutes with the convention 0 = unlimited (weekly rules, special
+	// periods and exception overrides alike).
+
+	FetchParentalControls(ctx context.Context, accountID int) (*ParentalControls, error)
+	CreateParentalControl(ctx context.Context, ctl *ParentalControls) error
+	UpdateParentalControls(ctx context.Context, ctl *ParentalControls) error
+	SetParentPinHash(ctx context.Context, accountID int, hash string) error
+	SetParentEmailEnc(ctx context.Context, accountID int, enc []byte) error
+	SetParentalEnabled(ctx context.Context, accountID int, enabled bool) error
+	DeleteParentalControls(ctx context.Context, accountID int) error
+	ListParentalPeriods(ctx context.Context, accountID int) ([]ParentalPeriod, error)
+	AddParentalPeriod(ctx context.Context, p *ParentalPeriod) (int, error)
+	DeleteParentalPeriod(ctx context.Context, accountID, id int) error
+	FetchParentalException(ctx context.Context, accountID int, date time.Time) (*ParentalException, error)
+	SaveParentalException(ctx context.Context, e *ParentalException) (int, error)
+	DeleteParentalException(ctx context.Context, accountID int, date time.Time) error
+	GetActiveParentalPeriod(ctx context.Context, accountID int, date time.Time) (*ParentalPeriod, error)
+	FetchParentalUsage(ctx context.Context, accountID int, date time.Time) (ParentalDailyUsage, error)
+	AddParentalUsageSeconds(ctx context.Context, accountID int, date time.Time, seconds int, lastPolled time.Time, dayLimit int) error
+	SetParentalBufferStart(ctx context.Context, accountID int, date time.Time, t time.Time) error
+	UseParentalExtension(ctx context.Context, accountID int, date time.Time, t time.Time) error
+	CreateParentalNotification(ctx context.Context, n *ParentalNotification) (int, error)
+	ListPendingParentalNotifications(ctx context.Context, accountID int) ([]ParentalNotification, error)
+	MarkParentalNotificationsDelivered(ctx context.Context, accountID int, ids []int, t time.Time) ([]ParentalNotification, error)
 }
 
 // ErrMaxDevices reports that the 3-device limit is reached; it is the
@@ -379,13 +408,15 @@ func atoiPos(s string) (int, error) {
 // accountColumns is the select list every account fetch shares: the
 // login fields plus the TOTP-2FA state (migration 008).
 const accountColumns = `id, username, password_hash, ban_until,
-	two_factor_enabled, two_factor_secret, last_totp_counter, last_totp_at`
+	two_factor_enabled, two_factor_secret, last_totp_counter, last_totp_at,
+	parental_control_enabled`
 
 // scanAccount maps one row into an Account (nil on ErrNoRows).
 func scanAccount(row *sql.Row) (*Account, error) {
 	acc := &Account{}
 	err := row.Scan(&acc.ID, &acc.Username, &acc.PasswordHash, &acc.BanUntil,
-		&acc.TwoFactorEnabled, &acc.TwoFactorSecret, &acc.LastTOTPCounter, &acc.LastTOTPAt)
+		&acc.TwoFactorEnabled, &acc.TwoFactorSecret, &acc.LastTOTPCounter, &acc.LastTOTPAt,
+		&acc.ParentalEnabled)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

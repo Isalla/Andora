@@ -45,5 +45,11 @@
   "auction_listing": "{name} eingestellt: {price}",
   "auction_bid": "Neuer Bieter: {amount}",
   "auction_sold": "Verkauft an {name} für {price}",
-  "auction_expired": "Auktion abgelaufen, Ware zurückgegeben"
+  "auction_expired": "Auktion abgelaufen, Ware zurückgegeben",
+  "parental_time_left": "Verbleibende Spielzeit heute: {time}",
+  "parental_blocked": "Deine erlaubte Spielzeit ist aufgebraucht.",
+  "parental_buffer": "Deine Sitzung läuft aus. Bis zum Ende des Puffers: {time}",
+  "parental_locked_chat": "Chat ist durch die Elternkontrolle gesperrt.",
+  "parental_locked_voice": "Voice ist durch die Elternkontrolle gesperrt.",
+  "parental_extension_used": "Die +1h-Verlängerung wurde heute bereits genutzt."
 }

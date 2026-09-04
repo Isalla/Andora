@@ -15,8 +15,9 @@ Der Schwerpunkt liegt nicht nur auf klassischen MMORPG-Systemen wie Quests, Craf
 **Name:** Andora
 **Genre:** 2D Fantasy MMORPG
 **Client:** Godot Engine 3.5
-**Server:** Node.js 20 / TypeScript
-**Datenbank:** MariaDB
+**Server:** fünf getrennte Andora-Serverdienste (API/Auth in Go, Login, Realm in Rust, Coordinator, Voice)
+**Datenbank:** MariaDB (auth, realm_state_<realm>; keine zentrale world_data)
+**Zielplattformen:** linux-amd64 und linux-arm64 (Debian/Linux)
 **Content/Scripting:** Lua
 **KI:** Ollama / lokale Sprachmodelle
 
@@ -33,7 +34,7 @@ Der Raspberry Pi ist die primäre Referenz für die Leistungsanforderungen des C
 
 Die Webversion soll dieselbe Spielwelt und dieselben serverseitigen Systeme verwenden. Gameplay- und Weltlogik dürfen deshalb nicht von einer bestimmten Clientplattform abhängig sein.
 
-Der Gameserver läuft unabhängig von den Clientplattformen auf einem x86-Linux-System.
+Die Andora-Serverdienste laufen unabhängig von den Clientplattformen auf Debian-/Linux-Servern. Sie können eigenständig auf unterschiedlichen Servern betrieben werden. Die Zielarchitekturen sind mindestens `linux-amd64` und `linux-arm64`. Die Serverdienste, ihre Trennung und der Betrieb sind in `architecture.md`, `Auth_API_Architektur.md`, `Login_Realm_Architektur.md` und `Deployment_Betriebsarchitektur.md` beschrieben.
 
 Pi und Web sind unterschiedliche Zugänge zu derselben persistenten Andora-Welt.
 
@@ -238,7 +239,7 @@ Die KI besitzt keine direkte Kontrolle über die Spielwelt.
 
 > **Die KI erzählt mit den Fakten der Welt – sie bestimmt die Fakten der Welt nicht.**
 
-Gameplayentscheidungen werden vom TypeScript-Server validiert.
+Gameplayentscheidungen werden vom Realm-Server (Rust) validiert.
 
 ---
 
@@ -393,7 +394,7 @@ Es kann beispielsweise verwendet werden für:
 * besondere NPC-Ereignisse
 * Story-Momente
 
-TypeScript kontrolliert die Mechanik.
+Der Realm-Server (Rust) kontrolliert die Mechanik.
 
 Lua definiert das Drehbuch.
 
@@ -457,7 +458,7 @@ Gebietsbetritt kann serverseitige Ereignisse, Quests oder Dynamic Scenes auslös
 Andora trennt Engine, Inhalte, Persistenz und KI.
 
 ```text id="q7s9k0"
-TypeScript
+Realm-Server (Rust)
 → Engine, Regeln und Autorität
 
 Lua

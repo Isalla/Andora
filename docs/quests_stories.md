@@ -18,7 +18,7 @@ Quests besitzen eine klare Trennung zwischen:
 Lua
 → Questdefinition und Inhalt
 
-TypeScript
+Realm-Server (Rust)
 → Questmechanik und Validierung
 
 MariaDB
@@ -95,7 +95,7 @@ Die Werte sind lediglich ein Beispiel für die Struktur.
 
 Lua beschreibt die Quest.
 
-Der TypeScript-Server entscheidet, ob die Bedingungen tatsächlich erfüllt wurden.
+Der Realm-Server (Rust) entscheidet, ob die Bedingungen tatsächlich erfüllt wurden.
 
 ---
 
@@ -653,7 +653,7 @@ Das Quest-System orchestriert Ziele, dupliziert aber nicht die Mechanik anderer 
 
 # 28. Architekturregel
 
-> **Lua beschreibt die Aufgabe. TypeScript prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
+> **Lua beschreibt die Aufgabe. Der Realm-Server (Rust) prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
 
 AI/Ollama kann die Geschichte und Gespräche lebendiger machen, besitzt aber keine Autorität über Questzustände.
 

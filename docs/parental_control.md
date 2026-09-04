@@ -40,6 +40,48 @@ Die Eltern-PIN dient nur zur Autorisierung von Änderungen. Sie ersetzt nicht di
 
 ---
 
+## Optionale Eltern-E-Mail
+
+Die Angabe einer Eltern-E-Mail ist **optional**.
+
+Eine Elternkontrolle kann ohne E-Mail eingerichtet und betrieben werden; die Eltern-E-Mail ist keine Voraussetzung für den Elternzugang.
+
+Die Eltern-E-Mail gehört zur separaten Elternkontrolle und nicht zum normalen Account des Kindes. Sie wird unabhängig von den Accountdaten des Kindes gespeichert.
+
+### Benachrichtigungen
+
+Ist eine Eltern-E-Mail hinterlegt, werden die Eltern über Änderungen an den Einstellungen der Elternkontrolle informiert.
+
+Auch bei sicherheitskritischen Änderungen wird eine Benachrichtigung versendet. Dazu zählen insbesondere:
+
+* eine Änderung der Eltern-PIN,
+* eine Änderung der Eltern-E-Mail,
+* das Entfernen der Eltern-E-Mail,
+* das vollständige Entfernen der Elternkontrolle.
+
+Wird die Eltern-E-Mail geändert oder entfernt, erhält die bisherige E-Mail-Adresse eine Benachrichtigung.
+
+Wird die Elternkontrolle vollständig entfernt, erhält die bisher hinterlegte Eltern-E-Mail eine letzte Benachrichtigung.
+
+### Inhalt der Benachrichtigung
+
+Eine Änderungsbenachrichtigung soll nachvollziehbar machen, was geändert wurde. Sie enthält insbesondere:
+
+* welche Einstellung geändert wurde,
+* den alten Wert,
+* den neuen Wert,
+* den Zeitpunkt der Änderung.
+
+Bei einer Änderung der Eltern-PIN enthält die Benachrichtigung keine PIN.
+
+### Keine Geheimnisse per E-Mail
+
+Per E-Mail dürfen keine PINs, Tokens oder andere Geheimnisse versendet werden.
+
+Die Eltern-E-Mail dient ausschließlich der Information über Änderungen an der Elternkontrolle.
+
+---
+
 ## Accountbindung
 
 Ein Account erhält einen serverseitigen Status, ob eine Elternkontrolle aktiv ist.
@@ -122,6 +164,51 @@ Eine Verlängerung darf jedoch niemals allein durch den Client vorgenommen werde
 
 ---
 
+## BLOCKED und Beginn eines Puffers
+
+Ist der aktuelle Tag bereits beim Login BLOCKED, wird der Spieleinstieg verweigert.
+
+Wird ein bereits eingeloggter Spieler durch eine Änderung der Elternregeln auf BLOCKED gesetzt, beginnt der reguläre Puffer.
+
+Für den Puffer gelten die bereits definierten 15 Minuten Sonntag–Donnerstag bzw. 30 Minuten Freitag–Samstag.
+
+Der Puffer ist ausschließlich eine Auslaufzeit der bereits bestehenden Sitzung.
+
+Endet die Sitzung während des Puffers – beispielsweise durch freiwilliges Beenden, Client-Absturz, Disconnect oder Verbindungsverlust –, ist kein erneuter Login während dieses Puffers möglich.
+
+Nach Ablauf des Puffers erfolgt der erzwungene Logout, falls die Sitzung noch besteht.
+
+Diese Regel zum fehlenden Re-Login gilt entsprechend auch beim normalen Ende eines TIME_WINDOW.
+
+Ein Logout oder Disconnect während des Puffers darf niemals einen neuen Puffer oder zusätzliche Spielzeit erzeugen.
+
+Der Puffer gehört zur bestehenden Sitzung und stellt keine zusätzliche Loginberechtigung dar. Wird die bestehende Sitzung während des Puffers beendet oder unterbrochen, ist kein erneuter Spieleinstieg möglich. Insbesondere darf ein Reconnect keinen neuen Puffer starten oder die verbleibende Spielzeit zurücksetzen.
+
+---
+
+## Temporäre Session-Ausnahmen
+
+Das Ingame-Elternpanel ist bewusst eingeschränkt und ersetzt nicht das vollständige Elternpanel.
+
+Nach Eingabe des Eltern-PINs dürfen Eltern dort:
+
+* die aktuelle Spielzeit einmal pro Kalendertag um genau eine Stunde verlängern,
+* einzelne durch die Elternkontrolle regelbare Mechanismen temporär freischalten.
+
+Die einstündige Verlängerung:
+
+* kann pro Account nur einmal pro Kalendertag verwendet werden,
+* wird serverseitig gespeichert,
+* richtet sich nach der für die Elternkontrolle maßgeblichen Realm-/Server-Zeitzone,
+* kann nicht durch Logout, Reconnect, Client-Neustart oder Gerätewechsel erneut verfügbar gemacht werden,
+* verändert keine permanenten Wochen- oder Sonderregeln.
+
+Das Ingame-Elternpanel darf keine permanenten Zeitpläne oder sonstigen dauerhaften Elternregeln verändern.
+
+Temporäre Mechanismus-Freischaltungen gelten nur für die aktuelle Sitzung und verfallen mit deren Ende.
+
+---
+
 ## Tagesausnahmen
 
 Eltern können für einzelne Tage eine Ausnahme festlegen.
@@ -197,6 +284,17 @@ Eine Tagesausnahme hat damit die höchste Priorität.
 
 ---
 
+## Berechtigungen in Sonderzeiträumen
+
+Sonderzeiträume dürfen grundsätzlich alle Mechanismen abweichend festlegen, die überhaupt durch die Elternkontrolle regelbar sind.
+
+* Sie dürfen keine Funktionen verändern, die nicht Bestandteil der Elternkontrolle sind.
+* Während eines aktiven Sonderzeitraums gelten dessen Zeit- und Berechtigungsregeln anstelle der entsprechenden normalen Regeln.
+* Nach Ende des Sonderzeitraums gelten automatisch wieder die normalen Regeln.
+* Da aktive Sonderzeiträume nicht überlappen dürfen, ist keine zusätzliche Prioritätslogik zwischen mehreren gleichzeitig aktiven Sonderzeiträumen erforderlich.
+
+---
+
 ## Serverseitige Durchsetzung
 
 Der Client darf niemals selbst entscheiden, ob die Elternkontrolle aktiv ist oder wie viel Zeit noch verfügbar ist.
@@ -252,6 +350,7 @@ Separate Elternkontrolle:
 ```text
 parental_controls
 - account_id
+- parent_email (optional)
 - monday_minutes
 - tuesday_minutes
 - wednesday_minutes
@@ -327,7 +426,6 @@ Mögliche zusätzliche Regeln sind:
 * Chat-Einschränkungen,
 * private Nachrichten,
 * Freundesanfragen,
-* Voice-Chat,
 * Handel,
 * Auktionshaus,
 * Gildenbeitritt,
@@ -337,6 +435,20 @@ Mögliche zusätzliche Regeln sind:
 Diese Funktionen gehören noch nicht zwingend zur ersten Implementierung.
 
 Die Architektur soll jedoch verhindern, dass solche Regeln später ausschließlich clientseitig umgesetzt werden müssen.
+
+---
+
+## Voice in der Elternkontrolle
+
+Das Voice-System selbst gehört nicht zum aktuellen Releaseumfang und wird erst später implementiert.
+
+Die Voice-Berechtigung ist jedoch bereits heute Bestandteil der Elternkontrolle.
+
+Die Elternkontrolle muss daher bereits für die Berechtigung von Spieler-Voice vorsehen.
+
+* Die elterliche Voice-Sperre betrifft die Sprachkommunikation zwischen Spielern (Spieler-zu-Spieler-Voice).
+* Sprachinteraktion mit NPCs/KI sowie Sprachbefehle für Begleiter/Söldner sind davon getrennt und bleiben grundsätzlich verfügbar.
+* Die Details des späteren Voice-Systems stehen in [voice_system.md](./voice_system.md).
 
 ---
 

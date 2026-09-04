@@ -4,7 +4,7 @@
 // {seq, type, data}. JSON hier ist OK, da Payloads klein sind (Positions-Pakete ~60 Byte).
 
 export const C2S = {
-  HELLO: 1,        // {token, char_id, lang}
+  HELLO: 1,        // {session_id, char_id, lang}
   MOVE: 2,         // {dir:[x,y], seq}
   ATTACK: 3,       // {target_id, skill_id}
   PICKUP: 4,       // {item_id}
@@ -14,6 +14,7 @@ export const C2S = {
   AUCTION_BID: 8,  // {auction_id, amount}
   AUCTION_BUY: 9,  // {auction_id}
   HEARTBEAT: 10,
+  PARENTAL: 11,  // {action, pin}  (In-Game-Elternpanel: extend/unlock_chat/unlock_voice)
 }
 
 export const S2C = {
@@ -29,6 +30,9 @@ export const S2C = {
   LEVELUP: 10,  // {level, hp, mana}
   SYNC: 11,     // {ack_seq}            (Server bestätigt letzten Client-seq)
   PERFGO: 12,   // {level}              (0=volle Qual., 1=ohne Particles, 2=minimal)
+  PARENTAL_STATUS: 13,  // {remaining_seconds, blocked, buffer_until, warning, chat_allowed, voice_allowed, extended_used_today}
+  PARENTAL_BLOCKED: 14, // {reason}     (blocked / buffer_expired -> Logout)
+  PARENTAL_RESULT: 15,  // {ok, reason?, unlocked?, remaining_seconds?} (Antwort aufs Elternpanel)
 }
 
 // Renderer-Auswahl auf dem Client, wenn RENDER_CAP überschritten:

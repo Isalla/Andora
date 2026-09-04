@@ -6,6 +6,7 @@ import { initWorldDataDb, closeWorldDataDb } from './db/worldData';
 import { initRealmStateDb, closeRealmStateDb } from './db/realmState';
 import { setupHealth } from './health';
 import { initWebSocket } from './net';
+import { startParentalPoller, stopParentalPoller } from './parental';
 import { worldTick } from './world';
 
 async function main(): Promise<void> {
@@ -21,11 +22,14 @@ async function main(): Promise<void> {
   await initRealmStateDb();
   setupHealth();
   initWebSocket();
+  // Elternkontrolle: Status-Polling pro beaufsichtigtem Spieler (~10 s).
+  startParentalPoller();
 
   const tick = setInterval(worldTick, config.tickInterval);
 
   const shutdown = async (sig: string) => {
     console.log(sig, '-> shutting down');
+    stopParentalPoller();
     clearInterval(tick);
     await closeCharacterDb();
     await closeWorldDataDb();

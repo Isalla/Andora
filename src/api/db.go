@@ -23,4 +23,7 @@ type Account struct {
 	TwoFactorSecret  []byte
 	LastTOTPCounter  *int
 	LastTOTPAt       *time.Time
+	// Parental control flag (migration 013): true if the account is
+	// supervised. The full rule set lives in the parental_* tables.
+	ParentalEnabled bool
 }

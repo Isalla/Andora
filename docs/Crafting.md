@@ -82,7 +82,7 @@ So bleibt ein 104,8 % Legendary außergewöhnlich wertvoll, ohne im PvP plötzli
 
 Und ganz wichtig für die spätere Implementierung:
 
-Lua darf Crafting- und Eventregeln definieren. Der TypeScript-Server erzwingt jedoch das absolute 110-%-Hardcap unabhängig von den Contentdaten
+Lua darf Crafting- und Eventregeln definieren. Der Realm-Server (Rust) erzwingt jedoch das absolute 110-%-Hardcap unabhängig von den Contentdaten
 
 
 

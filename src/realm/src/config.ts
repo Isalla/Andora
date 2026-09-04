@@ -9,13 +9,16 @@
 // Die AUTH-DB gehoert NICHT zu diesem Server: Der Realm-/World-Server besitzt
 // keine AUTH_DB_*-Zugangsdaten und keinen direkten auth-DB-Zugriff. Fuer
 // Auth-Funktionen (Handoff-/Session-Validierung, Account-Permissionen,
-// World-Server-Authentifizierung, Heartbeat) verwendet er ausschliesslich die
-// Auth-API des separaten Auth-/API-Services (Berechtigung: handoff.validate,
-// session.validate, account.permissions; z. B. docs/Auth_API_Architektur.md
-// Abschnitt 8/10, docs/Login_Realm_Architektur.md Abschnitt 6/7). Diese
-// Auth-/API-Schnittstelle wird spaeter in einem eigenen Auth-API-Modul
-// abgebildet; dieses Config bzw. der Realm-/World-Server liefert und speichert
-// keinerlei AUTH-Zugangsdaten.
+// World-Server-Authentifizierung, Heartbeat, Elternkontrolle) verwendet er
+// ausschliesslich die Auth-API des separaten Auth-/API-Services
+// (Berechtigung u. a.: handoff.validate, session.validate,
+// account.permissions, parental.status, parental.pin; z. B.
+// docs/Auth_API_Architektur.md Abschnitt 8/10,
+// docs/Login_Realm_Architektur.md Abschnitt 6/7). Die Schnittstelle bildet
+// das Auth-API-Modul authapi.ts ab; dieses Config bzw. der
+// Realm-/World-Server liefert und speichert keinerlei AUTH-Zugangsdaten.
+// Ist AUTHAPI_URL leer, ist die Auth-Anbindung (inkl. Elternkontrolle)
+// bewusst deaktiviert (Entwicklung/Testprototyp).
 import fs from 'fs';
 import path from 'path';
 
@@ -78,6 +81,13 @@ export const config = {
     topK: Number(env['OLLAMA_TOP_K'] || 64),
     temperatureQuality: Number(env['OLLAMA_TEMP_QUALITY'] || 1.0),
     fallback: env['OLLAMA_FALLBACK'] === '1'
+  },
+  // Auth-API des separaten Auth-/API-Services (eigene Service-Credential
+  // dieses Realms; leere URL = Auth-Anbindung deaktiviert).
+  authApi: {
+    url: (env['AUTHAPI_URL'] || '').replace(/\/$/, ''),
+    serviceId: env['AUTHAPI_SERVICE_ID'] || '',
+    secret: env['AUTHAPI_SERVICE_SECRET'] || ''
   },
   // character-DB: persoenliche Charakterdaten und Fortschritt (eigene Verbindung)
   characterDb: dbConfig('CHARACTER_DB', 'character'),

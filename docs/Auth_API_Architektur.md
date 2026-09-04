@@ -276,15 +276,14 @@ Die Andora-Datenbanken bleiben fachlich getrennt:
 
 ``` text
 auth
-character
-world_data
 realm_state_<realm>
 ```
 
+Eine separate `character`- oder `world_data`-Datenbank existiert nicht mehr; statische Weltdefinitionen und Charakterdaten liegen in der jeweiligen `realm_state_<realm>`-Datenbank.
+
 Die Auth-API ist keine allgemeine Andora-Datenbank-API.
 
-Für `character`, `world_data` und `realm_state` wird separat festgelegt,
-welcher Dienst direkten Zugriff benötigt.
+Für `realm_state_<realm>` wird separat festgelegt, welcher Dienst direkten Zugriff benötigt. Es ist ausschließlich der für den jeweiligen Realm zuständige Realm-Server.
 
 ## 16. Sicherheitsziel
 

@@ -1,5 +1,7 @@
 Andora – Kommunikation, Voice & NPC-Sprachbefehle
 
+Hinweis: Die serverseitigen Voice-Rechte, die Deaktivierung erlaubter Funktionen und die Übertragungsregeln sind zentral in [voice_system.md](./voice_system.md) dokumentiert. Diese Doku führt die Voice-Mechaniken, die Chat-Kanäle und die privaten NPC-/Söldner-Sprachbefehle weiter als Fachdetails.
+
 Chat-Kanäle
 
 Say – sehr kurze Reichweite um den Spieler.
@@ -81,7 +83,7 @@ NPC-KI und Lua
 
 Auch die heute besprochene Lua-Idee gehört unbedingt dazu:
 
-TypeScript = Engine + Autorität
+Realm-Server (Rust) = Engine + Autorität
 Lua        = Gameplay + NPC-/KI-Definitionen
 MariaDB    = persistenter Weltzustand
 Ollama     = Sprache, Persönlichkeit und Interpretation

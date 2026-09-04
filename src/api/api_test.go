@@ -21,6 +21,7 @@ func testServer(t *testing.T) *Server {
 		permSessionCreate, permSessionValidate, permSessionRevoke,
 		permRealmList, permHandoffCreate, permHandoffValidate,
 		permWorldAuthenticate, permWorldHeartbeat,
+		permParentalManage, permParentalPin, permParentalStatus, permParentalNotify,
 	}
 	cfg := &Config{
 		Port:   8080,

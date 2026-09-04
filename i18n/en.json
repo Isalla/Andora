@@ -45,5 +45,11 @@
   "auction_listing": "{name} listed: {price}",
   "auction_bid": "New bid: {amount}",
   "auction_sold": "Sold to {name} for {price}",
-  "auction_expired": "Auction expired, item returned"
+  "auction_expired": "Auction expired, item returned",
+  "parental_time_left": "Time left today: {time}",
+  "parental_blocked": "Your allowed playtime is used up.",
+  "parental_buffer": "Your session is expiring. Buffer remaining: {time}",
+  "parental_locked_chat": "Chat is locked by parental control.",
+  "parental_locked_voice": "Voice is locked by parental control.",
+  "parental_extension_used": "The +1h extension has already been used today."
 }

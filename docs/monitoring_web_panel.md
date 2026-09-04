@@ -1,8 +1,26 @@
-# Monitoring-/Admin-Web-Panel für den Andora-Server (implementiert)
+# Monitoring-/Admin-Web-Panel für den Andora-Server
+
+## Status
+
+**Übergangs-/Legacy-Status:** Das unten beschriebene lokale Panel auf dem Gameserver-Host ist der **derzeit umgesetzte Stand** und wird von der neuen Betriebsarchitektur abgelöst.
+
+**Zielarchitektur:** Das Admin- und Deployment-Panel wird zentralisiert. Auf jedem verwalteten Andora-Server läuft ein eigener **Andora-Agent**. Die Kommunikation zwischen Panel und Agenten erfolgt über einen dedizierten Port mit **mTLS**, ohne generische Remote-Shell. Alle Andora-Komponenten laufen unter dem dedizierten Nicht-Root-Benutzer `andora`. Updates übernimmt der **`andora-updater`** (signierte Manifeste, Prüfsummen, Healthchecks, Rollback) für alle Dienste inklusive des Agenten selbst. Realm-Updates laufen automatisiert im Wartungsmodus ab.
+
+Die verbindliche Beschreibung der Zielarchitektur steht in:
+
+```text
+docs/Deployment_Betriebsarchitektur.md
+```
+
+Der folgende Abschnitt beschreibt den bisherigen lokalen Panel-Stand (Übergang).
+
+---
+
+## Lokales Panel (derzeit umgesetzt, Übergangsstand)
 
 Eine Web-Oberfläche auf dem **selben Host** wie der Gameserver, ausschließlich
 für den Admin (Spieler haben KEINEN Zugriff). Sie dient der Überwachung und
-Steuerung des Servers.
+Steuerung des Servers und soll durch das zentrale Panel-/Agent-Modell der Zielarchitektur abgelöst werden.
 
 ## Getrennte Prozesse
 
@@ -115,3 +133,8 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
    Multi-Instanzen ggf. pro-Instanz-Accounting ergänzen.
 6. **systemd/Sudo**: Einmalig auf dem Produktionsserver installieren
    (siehe `deploy/README.md`). Auf dem Dev-Rechner bleibt alles, wie es ist.
+7. **Ablösung durch Zielarchitektur**: Dieses lokale Panel ist ein Übergang.
+   Die Zielarchitektur (zentrales Panel, Andora-Agent pro Server, mTLS,
+   `andora`-Nicht-Root-Benutzer, `andora-updater`, signierte Manifeste und
+   automatisierte Realm-Updates) ist verbindlich in
+   `docs/Deployment_Betriebsarchitektur.md` dokumentiert.

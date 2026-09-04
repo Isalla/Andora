@@ -287,6 +287,8 @@ Diese können sich spielerisch unterschiedlich entwickeln.
 
 Beispielsweise könnte `DE-1` bereits weit in EXP1 fortgeschritten sein, während ein später gestarteter Realm noch einen wesentlich niedrigeren Weltfortschritt besitzt.
 
+Realm-Versionen können parallel existieren, beispielsweise als `Live`, `Classic`, `Test` oder `Event`. Jede Realm-Version besitzt ihre eigene statische Inhaltsversion und ist eigenständig aktualisierbar (siehe `Deployment_Betriebsarchitektur.md`). Die Realm-Auswahl zeigt dem Spieler den jeweiligen Realm inklusive seiner Inhaltsversion.
+
 ## World-Server
 
 Ein World-Server ist dagegen eine technische Instanz, welche einen Realm ausführt.
@@ -346,14 +348,14 @@ Wenn einem Spieler eine höhere Latenz egal ist, darf er trotzdem den entspreche
 
 # 10. Character-Daten
 
-Persistente Charakterdaten werden von den eigentlichen Realm-Zuständen getrennt.
+Persistente Charakterdaten gehören zur Realm-Datenbank des jeweiligen Realms (`realm_state_<realm>`).
 
-Dafür kann eine zentrale Character-Datenbank bzw. ein eigener Character-Service verwendet werden.
+Eine separate zentrale Character-Datenbank bzw. ein eigener Character-Service wird nicht verwendet.
 
 Beispiel:
 
 ```text
-Character-DB
+realm_state_de1
 
 characters
 inventory
@@ -368,17 +370,17 @@ appearance
 
 Ein Charakter besitzt eine eindeutige `character_id` und gehört einem Account.
 
-Die endgültige technische Aufteilung einzelner Character-Systeme wird erst beim jeweiligen System festgelegt.
+Ein Charakter existiert ausschließlich in der Datenbank des Realms, auf dem er spielt. Die endgültige technische Aufteilung einzelner Character-Systeme wird erst beim jeweiligen System festgelegt.
 
 ---
 
 # 11. Charakter und Realm
 
-Charakterdaten werden nicht unnötig direkt in die World-State-Datenbank eingebettet.
+Charakterdaten liegen direkt in der Realm-Datenbank ihres Realms (`realm_state_<realm>`).
 
-Dadurch bleibt ein späterer Realmtransfer technisch möglich.
+Dadurch können realmbezogene Vorgänge innerhalb derselben Datenbank verarbeitet werden. Ein späterer Realmtransfer bleibt als kontrollierte Migration zwischen zwei Realm-Datenbanken technisch möglich (siehe Abschnitt 12).
 
-Ein Realm besitzt jedoch seinen eigenen persistenten Weltzustand.
+Ein Realm besitzt seinen eigenen persistenten Weltzustand und seine eigene statische Inhaltsversion.
 
 Ein Charakter kann deshalb nicht beliebig zwischen völlig unterschiedlich entwickelten Realms springen.
 
@@ -400,9 +402,9 @@ Der Wechsel zwischen eigenständigen Realms ist deshalb ein kontrollierter **Cha
 
 # 12. Character-Transfer
 
-Ein Charaktertransfer bedeutet nicht zwingend, dass sämtliche Character-Daten physisch zwischen zwei komplett getrennten Datenbanken kopiert werden müssen.
+Da Charakterdaten in der Realm-Datenbank ihres Realms liegen (`realm_state_<realm>`), ist ein Realmtransfer eine kontrollierte Migration von Charakterdaten zwischen zwei Realm-Datenbanken.
 
-Da persistente Character-Daten zentral verwaltet werden können, kann der Transfer vor allem die kontrollierte Realm-Zuordnung des Charakters verändern.
+Ein solcher Transfer darf nicht durch direkte Cross-DB-Abhängigkeiten im normalen Spielcode entstehen. Er wird als eigener, kontrollierter Vorgang behandelt.
 
 Dabei muss später definiert werden, welche Daten übertragbar sind.
 
@@ -486,14 +488,14 @@ realisiert werden, ohne die Serverlogik umzuschreiben.
 
 ---
 
-# 14. Statische World-Daten
+# 14. Statische Weltdefinitionen
 
-Grundlegende Definitionen der Spielwelt werden von den individuellen Realm-Zuständen getrennt.
+Grundlegende Definitionen der Spielwelt liegen nicht zentral, sondern realmbezogen in der Realm-Datenbank (`realm_state_<realm>`) als statische Inhaltsversion des jeweiligen Realms.
 
-Eine zentrale World-Data-Schicht kann beispielsweise enthalten:
+Eine Realm-Inhaltsversion kann beispielsweise enthalten:
 
 ```text
-world_data
+realm_state_de1 (statische Inhaltsversion)
 
 ├── Monsterdefinitionen
 ├── Itemdefinitionen
@@ -506,9 +508,11 @@ world_data
 └── weitere grundlegende Weltdaten
 ```
 
-Diese Daten beschreiben die grundlegenden Regeln und Inhalte von Andora.
+Diese Daten beschreiben die grundlegenden Regeln und Inhalte dieser Realm-Version.
 
-> **World-Data beschreibt, was in Andora existieren kann.**
+> **Die statische Inhaltsversion beschreibt, was in diesem Realm existieren kann.**
+
+Da sich die Inhaltsdefinitionen in der Realm-Datenbank befinden, können verschiedene Realm-Versionen (z. B. `Live`, `Classic`, `Test` oder `Event`) parallel unterschiedliche Inhalte besitzen und eigenständig aktualisiert werden.
 
 ---
 
@@ -534,24 +538,25 @@ realm_state
 └── weitere dynamische Zustände
 ```
 
-Damit können sich zwei Realms trotz identischer grundlegender World-Daten vollkommen unterschiedlich entwickeln.
+Damit können sich zwei Realms trotz identischer oder unterschiedlicher statischer Definitionen vollkommen unterschiedlich entwickeln.
 
 Beispiel:
 
 ```text
-world_data
-      │
-      ├───────────────┐
-      ▼               ▼
-Realm DE-1         Realm DE-5
-EXP1 weit          frisch gestartet
-alte Gilden        neue Gilden
-Gildenstädte       noch keine Städte
-entwickelte        junge
-Wirtschaft         Wirtschaft
+realm_state_de1              realm_state_de5
+(eigene statische            (eigene statische
+ Definitionen +              Definitionen +
+ eigener dynamischer         eigener dynamischer
+ Zustand)                    Zustand)
+
+EXP1 weit                    frisch gestartet
+alte Gilden                  neue Gilden
+Gildenstädte                 noch keine Städte
+entwickelte                  junge
+Wirtschaft                   Wirtschaft
 ```
 
-> **World-Data sagt, was existieren kann.**
+> **Die statische Inhaltsversion sagt, was in dieser Realm-Version existieren kann.**
 
 > **Realm-State sagt, was in dieser konkreten Welt tatsächlich passiert ist.**
 
@@ -700,13 +705,13 @@ Charakter betritt Andora
 
 > **Ein Realm ist eine eigenständige persistente Welt.**
 
-> **World-Data beschreibt, was existieren kann. Realm-State beschreibt, was tatsächlich passiert ist.**
+> **Die statische Inhaltsversion eines Realms beschreibt, was existieren kann. Realm-State beschreibt, was tatsächlich passiert ist.**
 
 > **World-Server führen einen Realm technisch aus; sie definieren nicht dessen dauerhafte Identität.**
 
 > **Neue Realms beginnen als echte neue Welten und können durch eine Fresh-Start-Sperre vor dem unmittelbaren Import alter Machtstrukturen geschützt werden.**
 
-> **Charakterdaten und Realm-Zustand werden so getrennt, dass spätere kontrollierte Charaktertransfers möglich bleiben.**
+> **Charakterdaten gehören zur Realm-Datenbank ihres Realms; spätere kontrollierte Charaktertransfers bleiben als Migration zwischen Realm-Datenbanken möglich.**
 
 > **Sprache, Region und Latenz informieren den Spieler – die Wahl des Realms trifft der Spieler selbst.**
 
@@ -774,10 +779,10 @@ Account/Auth-Service:
 - Sessions
 - Authentifizierungsdaten
 
-Character-Service:
+Realm-Server (World-Server des Realms):
 - account_id
 - character_id
-- Charakterdaten
+- Charakterdaten (in realm_state_<realm>)
 
 World-Server:
 - account_id

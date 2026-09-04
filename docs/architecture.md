@@ -2,20 +2,27 @@
 
 ## Aufbau
 - **Client**: Godot 3.5, GLES2, Ziel = Raspberry Pi 4 (4GB/8GB)
-- **Server**: Node.js 20 + TypeScript auf x86 (Ryzen 9 5900X, Debian 13)
-- **DB**: MariaDB 10 (Accounts, Charaktere, Inventar, Quests, Gilden, Auktionshaus)
-- **Netz**: WebSocket, später vieleicht nicht jetzt ( binäre Pakete (ID + Felder)), 10 Hz Server-Tick
+- **Serverdienst (fünf getrennte Andora-Dienste; dezentral auf unterschiedlichen Servern betreibbar):**
+  - `API/Auth` – Go-Service, einziger Dienst mit direktem Auth-DB-Zugriff
+  - `Login` – separater Login-Service
+  - `Realm` – Realm-/World-Server in Rust (Autorität: Combat, Loot, AH, NPC-AI via Coordinator/Ollama)
+  - `Coordinator` – zentrale KI-Queue/Ollama-Schnittstelle
+  - `Voice` – Voice-Server (späterer Release; Teil der fünf-Dienste-Zielarchitektur)
+- **Zielplattformen**: mindestens `linux-amd64` und `linux-arm64` (Debian/Linux); Realm-Server als Rust-Binary
+- **DB**: MariaDB 10 (Auth-DB `auth`, Realm-DB `realm_state_<realm>` mit statischen + dynamischen Realm-Daten; keine zentrale `world_data`)
+- **Netz**: WebSocket, spätere binäre Pakete (ID + Felder), 10 Hz Server-Tick
 - **Client-Schutz**: RENDER_CAP (48/64 Entities), auto perf_mode, Chunk-Texture-Batching
 
 ## Verzeichnisse
 - `shared/`   – Protokoll + Definitionsdaten (Client UND Server lesen)
 - `i18n/`     – Sprache-JSONs (de, en, ...), beide Seiten teilen
-- `src/realm/`      – Node/TS-Server (Realm-/World-Server, Autorität: Combat, Loot, AH, NPC-AI via Ollama)
-- `src/api/`        – Go-API-/Security-Service (einziger Service mit Auth-DB-Zugriff)
+- `src/realm/`      – Realm-/World-Server (Autorität: Combat, Loot, AH, NPC-AI via Coordinator/Ollama). Zielsprache Rust; der bestehende Node.js/TypeScript-Code unter `src/realm/` ist der Übergangsstand und wird schrittweise nach Rust migriert.
+- `src/api/`        – Go-API-/Auth-Service (einziger Service mit Auth-DB-Zugriff; Zielplattformen arm64 + amd64)
 - `src/login/`      – separater Login-Server (Struktur vorgesehen, kein Code vorhanden)
 - `src/coordinator/`– separater Coordinator-Service (Struktur vorgesehen, kein Code vorhanden)
-- `monitor`
-- `deploy`
+- `src/voice/`      – Voice-Service (noch nicht angelegt, geplant)
+- `monitor`         – lokales Monitoring-/Admin-Panel (Übergangs-/Legacy-Status, siehe `monitoring_web_panel.md`)
+- `deploy`          – Deployment-Vorlagen (Legacy-Status; Zielarchitektur in `Deployment_Betriebsarchitektur.md`)
 - `docs`
 
 ## Skalierung
@@ -30,34 +37,13 @@
 ## Expansion
 - Dateien mit Präfix exp1_, exp2_ usw. gehören zu geplanten Erweiterungen und sind keine Anforderungen an das Grundspiel. Sie dürfen nur implementiert werden, wenn die entsprechende Expansion ausdrücklich als aktueller Entwicklungsumfang festgelegt wurde.
 
-## Ergänze die bestehende Andora-Dokumentation um die Zielplattformen für den API-Service.
+## Betrieb & Deployment
+Die Zielbetriebsarchitektur (zentrales Admin-/Deployment-Panel, Andora-Agent auf jedem verwalteten Server, mTLS, `andora`-Nicht-Root-Benutzer, `andora-updater` mit signierten Manifests, Checksummen, Healthchecks und Rollback sowie der automatisierte Realm-Update-Ablauf) ist bindend in:
 
-Prüfe zuerst die vorhandenen relevanten Dokumente, insbesondere:
-- docs/architecture.md
-- deploy/README.md
-- vorhandene API-Dokumentation unter src/api/
+```text
+docs/Deployment_Betriebsarchitektur.md
+```
 
-Dokumentiere an der fachlich passenden Stelle:
+beschrieben. Realm-Versionen und die Realm-Datenhaltung (statische + dynamische Daten pro Realm, keine zentrale `world_data`) sind in `docs/Datenbank_Architektur.md` definiert.
 
-Der Andora API-/Security-Service wird in Go entwickelt und muss beim späteren produktionsreifen Build für zwei Linux-Zielplattformen bereitgestellt werden:
-
-- Linux ARM64 (`GOOS=linux`, `GOARCH=arm64`)
-  - insbesondere für Raspberry Pi 64-Bit
-- Linux x86-64 (`GOOS=linux`, `GOARCH=amd64`)
-  - für klassische x86-64 Server/VMs
-
-Beide Binaries müssen aus demselben Quellstand erzeugt werden und funktional identisch sein.
-
-Ziel ist, den API-Service zunächst auch auf ARM64/Raspberry-Pi-Hardware testen und betreiben zu können. Sollte deren Leistung später nicht ausreichen, muss derselbe Service ohne Architekturänderung auf einen x86-64-Linux-Server verschoben werden können.
-
-Diese Vorgabe ist eine dauerhafte Deployment-/Release-Anforderung und soll Qwen bei der späteren Fertigstellung des Produkts eindeutig erkennen lassen, dass beide Plattformen gebaut und getestet werden müssen.
-
-Noch keine Release-Binaries erstellen, sofern dies nicht Bestandteil der aktuell laufenden Aufgabe ist.
-
-Ändere nur die fachlich passenden Dokumentationsstellen und vermeide doppelte oder widersprüchliche Dokumentation.
-
-Am Ende kurz auf Deutsch berichten, welche Datei(en) und Abschnitte ergänzt wurden.
-
-Keinen Git-Commit erstellen.
-
-
+> Jeder Andora-Dienst kann auf einem eigenen Debian-/Linux-Server betrieben werden. Die Zielarchitekturen sind mindestens `linux-amd64` und `linux-arm64`.

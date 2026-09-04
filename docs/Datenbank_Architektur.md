@@ -10,7 +10,8 @@ Die Trennung dient dazu:
 * sensible Accountdaten von Realm-Servern fernzuhalten
 * Realm-Zustände vollständig voneinander zu isolieren
 * Charakter- und Spieldaten eines Realms gemeinsam zu verwalten
-* statische Weltdaten zentral bereitzustellen
+* die vollständigen statischen Definitionen und die dynamischen Zustände eines Realms gemeinsam bereitzustellen
+* Realm-Versionen parallel und eigenständig aktualisierbar zu halten
 * Transaktionen innerhalb eines Realms möglichst einfach und zuverlässig zu halten
 * spätere Erweiterungen und Migrationen übersichtlich zu halten
 * Datenbankrechte nach dem Prinzip der minimal notwendigen Berechtigung zu vergeben
@@ -36,36 +37,33 @@ MariaDB
 ├── auth
 │   └── Accounts, Login, Sessions, Realm-/Server-Registrierung
 │
-├── world_data
-│   └── statische globale Weltdaten
-│
 ├── realm_state_de1
-│   └── Charaktere + vollständiger persistenter Zustand von DE-1
+│   └── statische Weltdefinitionen + Charaktere + vollständiger persistenter Zustand von DE-1
 │
 ├── realm_state_de2
-│   └── Charaktere + vollständiger persistenter Zustand von DE-2
+│   └── statische Weltdefinitionen + Charaktere + vollständiger persistenter Zustand von DE-2
 │
 └── realm_state_en1
-    └── Charaktere + vollständiger persistenter Zustand von EN-1
+    └── statische Weltdefinitionen + Charaktere + vollständiger persistenter Zustand von EN-1
 ```
 
 Beispiel:
 
 ```text
 auth
-world_data
 realm_state_de1
 realm_state_de2
 realm_state_en1
 ```
 
-Die frühere separate Datenbank
+Die früheren separaten Datenbanken:
 
 ```text
 character
+world_data
 ```
 
-entfällt.
+entfallen. Statische Weltdefinitionen und Charakterdaten sind in die jeweilige `realm_state_<realm>`-Datenbank integriert.
 
 ---
 
@@ -158,23 +156,17 @@ definiert.
 
 ---
 
-## 4. world_data
+## 4. Statische Weltdefinitionen (in realm_state)
 
-Datei:
+Eine zentrale `world_data`-Datenbank existiert nicht mehr.
 
-```text
-src/realm/db/world_data/world_data.sql
-```
-
-### Aufgabe
-
-`world_data` enthält statische bzw. versionierte Definitionen der Spielwelt.
+Die statischen bzw. versionierten Definitionen der Spielwelt liegen realmbezogen in der Realm-Datenbank `realm_state_<realm>` des jeweiligen Realms.
 
 Grundsatz:
 
-> `world_data` beschreibt, was in Andora existieren kann.
+> Die statische Inhaltsversion eines Realms beschreibt, was in diesem Realm existieren kann.
 
-### Enthält
+### Enthält (je Realm)
 
 Zum Beispiel:
 
@@ -190,46 +182,38 @@ Zum Beispiel:
 * Händler-Grunddaten
 * Crafting-Grunddaten
 * Weltobjektdefinitionen
-* weitere globale Definitionsdaten
+* weitere Realm-/Inhaltsversion-definierende Daten
 
 ### Wichtig
 
-`world_data` enthält weder Charakterzustände noch den aktuellen Zustand eines Realms.
+Die statischen Definitionen eines Realms beschreiben, was in dieser Realm-Inhaltsversion existieren kann. Sie sind von den dynamischen Zuständen desselben Realms zu unterscheiden.
 
 Beispiel:
 
 ```text
-world_data:
-NPC Borin existiert als NPC-Definition.
+realm_state_de1 (statisch):
+NPC Borin existiert als NPC-Definition in der Inhaltsversion von DE-1.
 
-realm_state_de1:
+realm_state_de1 (dynamisch):
 Borin befindet sich gerade in Dorf A.
 
-realm_state_de2:
+realm_state_de2 (dynamisch):
 Borin befindet sich gerade auf dem Weg nach Stadt B.
 ```
 
 Ebenso:
 
 ```text
-world_data:
-Definition eines seltenen Eisenschwertes.
+realm_state_de1 (statisch):
+Definition eines seltenen Eisenschwertes der Inhaltsversion von DE-1.
 
-realm_state_de1:
+realm_state_de1 (dynamisch):
 Konkrete Item-Instanz dieses Schwertes gehört Charakter 4711.
 ```
 
-### Zugriff
+### Zugriff und Änderung
 
-Realmserver erhalten auf `world_data` grundsätzlich nur die Rechte, die sie zum Lesen benötigen.
-
-Im normalen Serverbetrieb sollte ein Realmserver globale Definitionsdaten nicht verändern.
-
-Änderungen an `world_data` erfolgen kontrolliert über:
-
-* SQL-Migrationen
-* Deployment
-* Content-Updates
+Änderungen an den statischen Definitionen eines Realms erfolgen kontrolliert über Realm-Updates, die den Realm in den Wartungsmodus versetzen (siehe `Deployment_Betriebsarchitektur.md`), sowie über SQL-Migrationen und Content-Updates der jeweiligen Realm-Datenbank. Andere Realms werden davon nicht betroffen.
 
 ---
 
@@ -253,17 +237,35 @@ realm_state_en1
 
 ### Aufgabe
 
-Die Realm-Datenbank speichert sämtliche spielrelevanten persistenten Daten eines konkreten Realms.
+Die Realm-Datenbank speichert sämtliche spielrelevanten persistenten Daten eines konkreten Realms, einschließlich seiner statischen Inhaltsversion.
 
-Sie beantwortet damit zwei zentrale Fragen:
+Sie beantwortet damit drei zentrale Fragen:
+
+> Was kann in dieser Realm-Version existieren?
 
 > Was gehört den Charakteren dieses Realms?
 
-und:
-
 > Was ist in diesem Realm passiert?
 
-Die frühere Trennung zwischen persönlicher Character-Datenbank und Realm-State entfällt.
+Die früheren Trennungen zwischen persönlicher Character-Datenbank, zentraler `world_data`-Datenbank und Realm-State entfallen. Jeder Realm besitzt seinen vollständigen statischen und dynamischen Datenstand selbst.
+
+### Enthält statische Weltdefinitionen
+
+Zum Beispiel:
+
+* Itemdefinitionen
+* Waffen- und Rüstungsdefinitionen
+* Monsterdefinitionen
+* NPC-Grunddefinitionen
+* Loot-Tabellen
+* Regionen
+* Dungeons
+* Ressourcen
+* Spawnregeln
+* Händler-Grunddaten
+* Crafting-Grunddaten
+* Weltobjektdefinitionen
+* weitere statische Definitionsdaten dieser Realm-Inhaltsversion
 
 ### Enthält Charakterdaten
 
@@ -530,7 +532,26 @@ Die Trennung umfasst damit sowohl:
 
 ---
 
-## 11. Charaktertransfers
+## 11. Realms als eigenständige Inhaltsversionen
+
+Jeder Realm besitzt nicht nur seinen eigenen dynamischen Zustand, sondern auch seine eigene statische Inhaltsversion in `realm_state_<realm>`.
+
+Dadurch sind verschiedene Realm-Versionen parallel möglich, beispielsweise:
+
+```text
+Live
+Classic
+Test
+Event
+```
+
+Realm-Versionen können unabhängig voneinander aktualisiert und migriert werden. Ein Update einer Realm-Version läuft automatisiert über Wartungsmodus → Shutdown → Backup → Update → Migration → Healthcheck → Freigabe und erzwingt keinen Neustart anderer Realms (siehe `Deployment_Betriebsarchitektur.md`).
+
+Ein Charakter eines Realms existiert auch hier ausschließlich in der Realm-Datenbank seines Realms.
+
+---
+
+## 12. Charaktertransfers
 
 Da Charaktere direkt in der Realm-Datenbank gespeichert werden, bedeutet ein Realmtransfer technisch eine kontrollierte Migration von Charakterdaten zwischen zwei Realm-Datenbanken.
 
@@ -556,7 +577,7 @@ Die genaue Transferlogik wird separat definiert.
 
 ---
 
-## 12. Datenbankverbindungen und DB-Benutzer
+## 13. Datenbankverbindungen und DB-Benutzer
 
 Jeder Datenbankbereich erhält eine eigene Verbindungskonfiguration und einen eigenen technischen MariaDB-Benutzer.
 
@@ -573,16 +594,6 @@ AUTH_DB_NAME=auth
 Diese Verbindung gehört ausschließlich zum Auth/API-Service.
 
 Webseite, Loginserver, Realmserver und Coordinator erhalten keine `AUTH_DB_*`-Konfiguration.
-
-### WORLD DATA
-
-```text
-WORLD_DATA_DB_HOST=
-WORLD_DATA_DB_PORT=3306
-WORLD_DATA_DB_USER=
-WORLD_DATA_DB_PASSWORD=
-WORLD_DATA_DB_NAME=world_data
-```
 
 ### REALM STATE
 
@@ -604,16 +615,13 @@ Konfiguration existiert nicht mehr.
 
 ---
 
-## 13. DB-Benutzer und Rechte
+## 14. DB-Benutzer und Rechte
 
 Beispiel:
 
 ```text
 andora_auth
 → ausschließlich auth
-
-andora_world_data
-→ world_data
 
 andora_realm_de1
 → ausschließlich realm_state_de1
@@ -638,9 +646,9 @@ realm_state_de2
 
 zugreifen.
 
-Für `world_data` soll der laufende Realmserver grundsätzlich nur die für den Betrieb erforderlichen Leserechte verwenden.
+Die statischen Weltdefinitionen liegen in derselben Realm-Datenbank und unterliegen damit denselben Benutzerrechten wie die Realm-Daten.
 
-Änderungen an statischen Weltdaten erfolgen kontrolliert über:
+Änderungen an statischen Weltdaten erfolgen kontrolliert über Realm-Updates und:
 
 * Migrationen
 * Deployment
@@ -648,7 +656,7 @@ Für `world_data` soll der laufende Realmserver grundsätzlich nur die für den 
 
 ---
 
-## 14. Keine Sammelverbindung
+## 15. Keine Sammelverbindung
 
 Es gibt keine allgemeine DB-Verbindung, die automatisch auf mehrere fachlich getrennte Datenbanken zugreifen kann.
 
@@ -659,7 +667,7 @@ DB_*
 WORLD_DB_*
 ```
 
-die stillschweigend `auth`, `world_data` oder mehrere Realm-Datenbanken miteinander verbindet.
+die stillschweigend `auth` oder mehrere Realm-Datenbanken miteinander verbindet.
 
 Fehlt eine notwendige Datenbankkonfiguration, soll der betreffende Dienst mit einer klaren Fehlermeldung abbrechen.
 
@@ -667,7 +675,7 @@ Er darf nicht automatisch auf eine andere Datenbank ausweichen.
 
 ---
 
-## 15. Coordinator besitzt keine Datenbankrechte
+## 16. Coordinator besitzt keine Datenbankrechte
 
 Der Coordinator ist ausschließlich die zentrale Schnittstelle für KI-/Ollama-Anfragen.
 
@@ -676,7 +684,6 @@ Er besitzt keinerlei direkten Datenbankzugriff.
 Insbesondere erhält er keine Credentials für:
 
 * `auth`
-* `world_data`
 * `realm_state_<realm>`
 
 Der Coordinator verwaltet seine eigenen KI-Jobs ausschließlich über seine dafür vorgesehenen lokalen Queue- und Job-Dateien.
@@ -708,7 +715,7 @@ Grundsatz:
 
 ---
 
-## 16. Mehrere technische Realm-Prozesse
+## 17. Mehrere technische Realm-Prozesse
 
 Ein Realm kann später aus mehreren technischen Serverprozessen bestehen.
 
@@ -730,7 +737,7 @@ Ein neuer öffentlicher Realm benötigt dagegen eine eigene persistente Realm-Da
 
 ---
 
-## 17. SQL-Dateibaum
+## 18. SQL-Dateibaum
 
 Die bisherige zentrale `schema.sql` wird nicht dauerhaft weiterverwendet.
 
@@ -745,14 +752,10 @@ src/api/
 
 src/realm/
 └── db/
-    ├── world_data/
-    │   ├── world_data.sql
+    ├── realm_state/
+    │   ├── realm_state.sql
     │   ├── migrations/
-    │   └── seed/
-    │
-    └── realm_state/
-        ├── realm_state.sql
-        └── migrations/
+    │   └── seed/              (statische Realm-Definitionen / Inhaltsversion)
 ```
 
 Der bisherige Bereich:
@@ -762,6 +765,18 @@ src/realm/db/character/
 ```
 
 entfällt.
+
+Der bisherige Bereich:
+
+```text
+src/realm/db/world_data/
+```
+
+entfällt ebenfalls; dessen Inhalte gehören künftig als statische Definitionen zu:
+
+```text
+src/realm/db/realm_state/
+```
 
 Charaktertabellen und deren Migrationen gehören künftig nach:
 
@@ -784,8 +799,11 @@ src/realm/db/realm_state/migrations/
 ├── 004_guilds.sql
 ├── 005_world_state.sql
 ├── 006_npc_state.sql
-├── 007_crafting_jobs.sql
-└── 008_mail.sql
+├── 007_item_definitions.sql
+├── 008_npc_definitions.sql
+├── 009_monster_definitions.sql
+├── 010_crafting_jobs.sql
+└── 011_mail.sql
 ```
 
 Die tatsächliche Nummerierung richtet sich nach dem vorhandenen Migrationsstand.
@@ -794,7 +812,7 @@ Bereits angewendete Migrationen werden nicht nachträglich umnummeriert oder ver
 
 ---
 
-## 18. Tabellen-Ownership
+## 19. Tabellen-Ownership
 
 Jede Tabelle gehört genau zu einem fachlichen Datenbankbereich.
 
@@ -819,15 +837,6 @@ world_server_credentials
 world_server_heartbeats
 → auth
 
-item_definitions
-→ world_data
-
-monster_definitions
-→ world_data
-
-npc_definitions
-→ world_data
-
 characters
 → realm_state_<realm>
 
@@ -841,6 +850,15 @@ item_instances
 → realm_state_<realm>
 
 character_skills
+→ realm_state_<realm>
+
+item_definitions
+→ realm_state_<realm>
+
+monster_definitions
+→ realm_state_<realm>
+
+npc_definitions
 → realm_state_<realm>
 
 character_quests
@@ -879,12 +897,12 @@ Wenn ein Dienst Informationen aus einem Bereich benötigt, auf den er keinen dir
 
 ---
 
-## 19. Keine Cross-DB-Abhängigkeiten ohne Prüfung
+## 20. Keine Cross-DB-Abhängigkeiten ohne Prüfung
 
 Neue Systeme müssen vor dem Anlegen einer Tabelle festlegen:
 
 1. Gehören die Daten zur Account-/Sicherheitsidentität?
-2. Sind es statische globale Weltdaten?
+2. Sind es statische Definitionen der Inhaltsversion eines konkreten Realms?
 3. Gehören sie zu einem konkreten Realm?
 4. Gehören sie zu einem Charakter dieses Realms?
 5. Müssen sie gemeinsam mit anderen Realm-Daten transaktional verarbeitet werden?
@@ -895,10 +913,7 @@ Danach wird entschieden:
 Account/Sicherheit
 → auth
 
-statische Definition
-→ world_data
-
-Charakter oder konkreter Spielzustand
+statische Definition oder Charakter/Spielzustand eines Realms
 → realm_state_<realm>
 ```
 
@@ -906,7 +921,7 @@ Charaktergebundene Daten bilden keinen eigenen globalen Datenbankbereich mehr.
 
 ---
 
-## 20. Migrationen und db_version
+## 21. Migrationen und db_version
 
 Jede Andora-Datenbank besitzt eine eigene Migrationshistorie und eine eigene `db_version`-Tabelle.
 
@@ -914,7 +929,6 @@ Damit existieren Migrationshistorien für:
 
 ```text
 auth
-world_data
 realm_state_<realm>
 ```
 
@@ -972,13 +986,13 @@ Der zuständige Realmserver verwaltet die Migrationen seiner Realm-Datenbank.
 
 Dies umfasst künftig auch Charakter-, Inventar-, Item-, Crafting- und Mailtabellen.
 
-### Zuständigkeit für world_data
+### Zuständigkeit für statische Realm-Definitionen
 
-Die Migrationen von `world_data` erfolgen kontrolliert gemäß Deployment-/Content-Update-Prozess.
+Die Migrationen der statischen Definitionen eines Realms erfolgen im Rahmen des automatisierten Realm-Updates (Wartungsmodus → Shutdown → Backup → Update → Migration → Healthcheck → Freigabe, siehe `Deployment_Betriebsarchitektur.md`). Dabei wird nur die jeweils betroffene Realm-Datenbank migriert; andere Realms bleiben unberührt.
 
 ---
 
-## 21. Unveränderliche Migrationen
+## 22. Unveränderliche Migrationen
 
 Bereits erfolgreich angewendete Migrationen werden niemals nachträglich verändert.
 
@@ -996,7 +1010,7 @@ Bestehende angewendete Migrationen werden nicht einfach umgeschrieben.
 
 ---
 
-## 22. Regeln für Qwen/OpenCode
+## 23. Regeln für Qwen/OpenCode
 
 Qwen/OpenCode darf SQL-Migrationen erstellen und während der Entwicklung mit den dafür vorgesehenen eingeschränkten DB-Zugangsdaten anwenden.
 
@@ -1018,7 +1032,7 @@ Produktive Migrationen werden später gesondert geregelt.
 
 ---
 
-## 23. Sicherheitsgrenzen
+## 24. Sicherheitsgrenzen
 
 ### Auth
 
@@ -1028,9 +1042,9 @@ Webseite, Loginserver und Realmserver greifen für Auth-Funktionen ausschließli
 
 Der Coordinator besitzt ebenfalls keinen Zugriff auf `auth`.
 
-### World Data
+### Realm-Definitionen
 
-`world_data` ist überwiegend lesend und enthält keine Account-Geheimnisse.
+Die statischen Weltdefinitionen liegen realmbezogen in `realm_state_<realm>` und enthalten keine Account-Geheimnisse.
 
 ### Realm State
 
@@ -1067,7 +1081,7 @@ Der Realm validiert weiterhin alle KI-Ergebnisse, bevor daraus spielmechanische 
 
 ---
 
-## 24. Backup- und Realm-Grenze
+## 25. Backup- und Realm-Grenze
 
 Da Charakter- und Weltzustände gemeinsam in `realm_state_<realm>` gespeichert werden, bildet die Realm-Datenbank eine natürliche Backup-Einheit.
 
@@ -1088,17 +1102,19 @@ enthält damit sowohl:
 
 Dadurch wird verhindert, dass Character-Daten und Realmzustand aus unterschiedlichen Backup-Zeitpunkten wiederhergestellt werden und dadurch Inkonsistenzen entstehen.
 
-`auth` und `world_data` bleiben unabhängige Datenbankbereiche mit eigenen Backup- und Migrationsanforderungen.
+`auth` und `realm_state_<realm>` bleiben unabhängige Datenbankbereiche mit eigenen Backup- und Migrationsanforderungen.
 
 ---
 
-## 25. Leitsätze
+## 26. Leitsätze
 
 > Auth weiß, wer du bist.
 
-> World Data weiß, was in Andora existieren kann.
+> Jede Realm-Inhaltsversion weiß, was in diesem Realm existieren kann.
 
 > Realm State weiß, wer und was in diesem Realm existiert und was dort passiert ist.
+
+> Jeder Realm besitzt seinen vollständigen statischen und dynamischen Datenstand selbst.
 
 > Ein Charakter gehört vollständig zu seinem Realm.
 

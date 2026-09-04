@@ -24,10 +24,10 @@ Er erhält insbesondere keinen direkten Zugriff auf:
 
 * Auth-Datenbank
 * Accountdaten
-* Character-Datenbanken
+* Character-Daten (in der jeweiligen Realm-Datenbank)
 * Realm-Datenbanken
-* Item-Datenbanken
-* Crafting-Datenbanken
+* Item-Daten
+* Crafting-Daten
 
 Er benötigt deshalb auch keine Zugangsdaten zu diesen Datenbanken.
 
@@ -458,7 +458,7 @@ Damit kann der Realm jederzeit bestimmen:
 
 Diese Daten bleiben ausschließlich im Realm.
 
-Der Coordinator benötigt dafür keine Character-Datenbank.
+Der Coordinator benötigt dafür keine Character-Datenbank, denn die Charakter- und Jobdaten liegen in der Realm-Datenbank (`realm_state_<realm>`), auf die er keinen Zugriff besitzt.
 
 ---
 

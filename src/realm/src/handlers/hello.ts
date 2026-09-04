@@ -1,15 +1,41 @@
-// handlers/hello.ts — HELLO: Charakter laden, registrieren, Nachbarn Spawn
+// handlers/hello.ts — HELLO: Session validieren, Charakter laden,
+// registrieren, Elternkontrolle anhaengen, Nachbarn Spawn
 import WebSocket from 'ws';
 import { S2C } from '../protocol';
 import { loadCharacter } from '../db/character';
 import { players, bySocket, ensureVisible } from '../world';
 import { config } from '../config';
+import { authApiEnabled, validateSession } from '../authapi';
+import { attachParental } from '../parental';
 import type { NetMsg, Player } from '../types';
 
 export async function handleHello(ws: WebSocket, msg: NetMsg): Promise<void> {
   const charId = String(msg.data?.char_id ?? '');
   if (!charId) return;
   const lang = String(msg.data?.lang ?? 'de');
+  const sessionId = String(msg.data?.session_id ?? '');
+
+  // Session-Bindung, sobald die Auth-API konfiguriert ist: ohne gueltige
+  // Session kein Einstieg (sonst waere die Elternkontrolle umgehbar).
+  let accountId = 0;
+  if (authApiEnabled()) {
+    if (!sessionId) {
+      ws.close();
+      return;
+    }
+    try {
+      const v = await validateSession(sessionId);
+      if (!v.valid || !v.account_id) {
+        ws.close();
+        return;
+      }
+      accountId = v.account_id;
+    } catch (e) {
+      console.error('HELLO session validate:', (e as Error).message);
+      ws.close();
+      return;
+    }
+  }
 
   const c = await loadCharacter(charId);
   const me: Player = {
@@ -21,6 +47,8 @@ export async function handleHello(ws: WebSocket, msg: NetMsg): Promise<void> {
     pingMs: 0, zoneId: 0,
     hp: 100, maxHp: 100,
     lang,
+    accountId,
+    sessionId,
     entities: new Set<string>(),
     lastActivity: Date.now(),
     pendingMove: null,
@@ -28,6 +56,16 @@ export async function handleHello(ws: WebSocket, msg: NetMsg): Promise<void> {
   };
   players.set(me.id, me);
   bySocket.set(ws, me);
+
+  // Elternkontrolle: BLOCKED am Login -> Einstieg verweigert (WELCOME
+  // wird dann nie gesendet; die Verbindung ist bereits geschlossen).
+  const parental = await attachParental(me, accountId, sessionId);
+  if (!parental.ok) {
+    players.delete(me.id);
+    bySocket.delete(ws);
+    ws.close();
+    return;
+  }
 
   // WELCOME an den Spieler selbst
   ws.send(JSON.stringify({

@@ -559,7 +559,7 @@ Stadt-, Wochen- und Fraktionsquests können politischen Einfluss erzeugen.
 
 Dabei gilt weiterhin die bestehende Questarchitektur:
 
-> **Lua beschreibt die Aufgabe. TypeScript prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
+> **Lua beschreibt die Aufgabe. Der Realm-Server (Rust) prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
 
 Das Politiksystem verwendet das vorhandene Quest-System und erzeugt kein zweites Questframework.
 

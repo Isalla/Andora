@@ -46,6 +46,10 @@ const (
 	permHandoffValidate     = "handoff.validate"
 	permWorldAuthenticate   = "world.authenticate"
 	permWorldHeartbeat      = "world.heartbeat"
+	permParentalManage      = "parental.manage"
+	permParentalPin         = "parental.pin"
+	permParentalStatus      = "parental.status"
+	permParentalNotify      = "parental.notifications"
 )
 
 // authorize checks the service identity and signature of a request.

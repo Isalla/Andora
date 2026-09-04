@@ -88,7 +88,7 @@ Die heutige Architektur lautet:
 ```text
 Server Event
       ↓
-TypeScript Scene Engine
+Realm-Server (Rust) Scene Engine
       ↓
 Lua Scene Definition
       ↓
@@ -99,7 +99,7 @@ Godot Darstellung
 
 Die Verantwortlichkeiten sind getrennt.
 
-## TypeScript
+## Realm-Server (Rust)
 
 Kontrolliert:
 

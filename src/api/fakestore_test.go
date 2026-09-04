@@ -30,6 +30,15 @@ type fakeStore struct {
 	securityEvents map[int][]SecurityEvent
 	nextDeviceID   int
 	nextEventID    int
+	// Parental control (mirrors the parental_* tables).
+	parental      map[int]*ParentalControls
+	periods       map[int][]*ParentalPeriod
+	nextPeriodID  int
+	exceptions    map[int]map[string]*ParentalException
+	nextExcID     int
+	usage         map[int]map[string]*ParentalDailyUsage
+	notifications map[int][]*ParentalNotification
+	nextNotifID   int
 }
 
 func newFakeStore() *fakeStore {
@@ -49,6 +58,14 @@ func newFakeStore() *fakeStore {
 		securityEvents: map[int][]SecurityEvent{},
 		nextDeviceID:   1,
 		nextEventID:    1,
+		parental:       map[int]*ParentalControls{},
+		periods:        map[int][]*ParentalPeriod{},
+		nextPeriodID:   1,
+		exceptions:     map[int]map[string]*ParentalException{},
+		nextExcID:      1,
+		usage:          map[int]map[string]*ParentalDailyUsage{},
+		notifications:  map[int][]*ParentalNotification{},
+		nextNotifID:    1,
 	}
 }
 
@@ -603,6 +620,299 @@ func (f *fakeStore) ListSecurityEvents(_ context.Context, accountID int) ([]Secu
 	// newest first, like the SQL ORDER BY id DESC
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
+// --- parental control (in-memory mirror of the parental_* tables) ---
+
+func copyBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
+}
+
+func (f *fakeStore) FetchParentalControls(_ context.Context, accountID int) (*ParentalControls, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if c := f.parental[accountID]; c != nil {
+		cp := *c
+		cp.ParentEmailEnc = copyBytes(c.ParentEmailEnc)
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) CreateParentalControl(_ context.Context, ctl *ParentalControls) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.parental[ctl.AccountID]; ok {
+		return fmt.Errorf("Duplicate entry for parental_controls")
+	}
+	cp := *ctl
+	cp.ParentEmailEnc = copyBytes(ctl.ParentEmailEnc)
+	f.parental[ctl.AccountID] = &cp
+	return nil
+}
+
+func (f *fakeStore) UpdateParentalControls(_ context.Context, ctl *ParentalControls) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.parental[ctl.AccountID]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	cur.Week = ctl.Week
+	cur.ChatEnabled = ctl.ChatEnabled
+	cur.VoiceEnabled = ctl.VoiceEnabled
+	cur.WarningMinutes = ctl.WarningMinutes
+	cur.UpdatedAt = time.Now()
+	return nil
+}
+
+func (f *fakeStore) SetParentPinHash(_ context.Context, accountID int, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.parental[accountID]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	cur.PinHash = hash
+	return nil
+}
+
+func (f *fakeStore) SetParentEmailEnc(_ context.Context, accountID int, enc []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.parental[accountID]
+	if !ok {
+		return sql.ErrNoRows
+	}
+	cur.ParentEmailEnc = copyBytes(enc)
+	return nil
+}
+
+func (f *fakeStore) SetParentalEnabled(_ context.Context, accountID int, enabled bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if acc := f.accounts[accountID]; acc != nil {
+		acc.ParentalEnabled = enabled
+	}
+	return nil
+}
+
+func (f *fakeStore) DeleteParentalControls(_ context.Context, accountID int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.parental, accountID)
+	delete(f.periods, accountID)
+	delete(f.exceptions, accountID)
+	delete(f.usage, accountID)
+	return nil
+}
+
+func (f *fakeStore) ListParentalPeriods(_ context.Context, accountID int) ([]ParentalPeriod, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []ParentalPeriod{}
+	for _, p := range f.periods[accountID] {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Start.Equal(out[j].Start) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Start.Before(out[j].Start)
+	})
+	return out, nil
+}
+
+func (f *fakeStore) AddParentalPeriod(_ context.Context, p *ParentalPeriod) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *p
+	cp.ID = f.nextPeriodID
+	f.nextPeriodID++
+	f.periods[p.AccountID] = append(f.periods[p.AccountID], &cp)
+	return cp.ID, nil
+}
+
+func (f *fakeStore) DeleteParentalPeriod(_ context.Context, accountID, id int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	list := f.periods[accountID]
+	for i, p := range list {
+		if p.ID == id {
+			f.periods[accountID] = append(list[:i], list[i+1:]...)
+			return nil
+		}
+	}
+	return sql.ErrNoRows
+}
+
+func (f *fakeStore) GetActiveParentalPeriod(_ context.Context, accountID int, date time.Time) (*ParentalPeriod, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Compare calendar-day strings (like the SQL DATE comparison) so
+	// parsed period bounds (UTC) match server-local poll days.
+	day := parentalDayString(date)
+	for _, p := range f.periods[accountID] {
+		if s0, s1 := parentalDayString(p.Start), parentalDayString(p.End); day >= s0 && day <= s1 {
+			cp := *p
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) FetchParentalException(_ context.Context, accountID int, date time.Time) (*ParentalException, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if e := f.exceptions[accountID][parentalDayString(date)]; e != nil {
+		cp := *e
+		return &cp, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeStore) SaveParentalException(_ context.Context, e *ParentalException) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := parentalDayString(e.Date)
+	if f.exceptions[e.AccountID] == nil {
+		f.exceptions[e.AccountID] = map[string]*ParentalException{}
+	}
+	if cur := f.exceptions[e.AccountID][key]; cur != nil {
+		cur.ExtraMinutes = e.ExtraMinutes
+		cur.OverrideMinutes = e.OverrideMinutes
+		return cur.ID, nil
+	}
+	cp := *e
+	cp.ID = f.nextExcID
+	f.nextExcID++
+	f.exceptions[e.AccountID][key] = &cp
+	return cp.ID, nil
+}
+
+func (f *fakeStore) DeleteParentalException(_ context.Context, accountID int, date time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := parentalDayString(date)
+	if f.exceptions[accountID] == nil || f.exceptions[accountID][key] == nil {
+		return sql.ErrNoRows
+	}
+	delete(f.exceptions[accountID], key)
+	return nil
+}
+
+func (f *fakeStore) FetchParentalUsage(_ context.Context, accountID int, date time.Time) (ParentalDailyUsage, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u := ParentalDailyUsage{AccountID: accountID, Date: parentalDayKey(date)}
+	if cur := f.usage[accountID][parentalDayString(date)]; cur != nil {
+		u = *cur
+	}
+	return u, nil
+}
+
+func (f *fakeStore) AddParentalUsageSeconds(_ context.Context, accountID int, date time.Time, seconds int, lastPolled time.Time, _ int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := parentalDayString(date)
+	if f.usage[accountID] == nil {
+		f.usage[accountID] = map[string]*ParentalDailyUsage{}
+	}
+	cur := f.usage[accountID][key]
+	if cur == nil {
+		cur = &ParentalDailyUsage{AccountID: accountID, Date: parentalDayKey(date)}
+		f.usage[accountID][key] = cur
+	}
+	cur.UsedSeconds += seconds
+	lp := lastPolled
+	cur.LastPolledAt = &lp
+	return nil
+}
+
+func (f *fakeStore) SetParentalBufferStart(_ context.Context, accountID int, date time.Time, t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := parentalDayString(date)
+	if f.usage[accountID] == nil {
+		f.usage[accountID] = map[string]*ParentalDailyUsage{}
+	}
+	cur := f.usage[accountID][key]
+	if cur == nil {
+		cur = &ParentalDailyUsage{AccountID: accountID, Date: parentalDayKey(date)}
+		f.usage[accountID][key] = cur
+	}
+	if cur.BufferStartedAt == nil {
+		b := t
+		cur.BufferStartedAt = &b
+	}
+	return nil
+}
+
+func (f *fakeStore) UseParentalExtension(_ context.Context, accountID int, date time.Time, t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := parentalDayString(date)
+	if f.usage[accountID] == nil {
+		f.usage[accountID] = map[string]*ParentalDailyUsage{}
+	}
+	cur := f.usage[accountID][key]
+	if cur == nil {
+		cur = &ParentalDailyUsage{AccountID: accountID, Date: parentalDayKey(date)}
+		f.usage[accountID][key] = cur
+	}
+	if cur.ExtendedAt != nil {
+		return ErrExtensionUsed
+	}
+	e := t
+	cur.ExtendedAt = &e
+	return nil
+}
+
+func (f *fakeStore) CreateParentalNotification(_ context.Context, n *ParentalNotification) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *n
+	cp.ID = f.nextNotifID
+	f.nextNotifID++
+	cp.CreatedAt = time.Now()
+	cp.RecipientEmailEnc = copyBytes(n.RecipientEmailEnc)
+	f.notifications[n.AccountID] = append(f.notifications[n.AccountID], &cp)
+	return cp.ID, nil
+}
+
+func (f *fakeStore) ListPendingParentalNotifications(_ context.Context, accountID int) ([]ParentalNotification, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []ParentalNotification{}
+	for _, n := range f.notifications[accountID] {
+		if n.DeliveredAt == nil {
+			out = append(out, *n)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) MarkParentalNotificationsDelivered(_ context.Context, accountID int, ids []int, t time.Time) ([]ParentalNotification, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	want := map[int]bool{}
+	for _, id := range ids {
+		want[id] = true
+	}
+	out := []ParentalNotification{}
+	for _, n := range f.notifications[accountID] {
+		if want[n.ID] && n.DeliveredAt == nil {
+			d := t
+			n.DeliveredAt = &d
+			out = append(out, *n)
+		}
 	}
 	return out, nil
 }
