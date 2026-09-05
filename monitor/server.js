@@ -86,6 +86,32 @@ function tokenOk(req) {
   return h === config.token || q === config.token;
 }
 
+/**
+ * Bind-Host in eine Liste von Listener-Adressen überführen (analog
+ * src/realm/src/bind.ts): ""/auto = bisheriges Verhalten (nur 127.0.0.1),
+ * ipv4/4  = 0.0.0.0, ipv6/6 = [::] ipv6Only, dual/both = beides, sonst
+ * Literal bzw. Hostname.
+ */
+function listenPlans(bindHost) {
+  const h = String(bindHost || '').trim().toLowerCase();
+  switch (h) {
+    case '':
+    case 'auto':
+      return [{ host: '127.0.0.1' }];
+    case 'ipv4':
+    case '4':
+      return [{ host: '0.0.0.0' }];
+    case 'ipv6':
+    case '6':
+      return [{ host: '::', ipv6Only: true }];
+    case 'dual':
+    case 'both':
+      return [{ host: '0.0.0.0' }, { host: '::', ipv6Only: true }];
+    default:
+      return [{ host: h }];
+  }
+}
+
 /** Liest das Dashboard-HTML (monitor/public/index.html) ein. */
 function dashboardHtml() {
   const p = path.join(__dirname, 'public', 'index.html');
@@ -178,10 +204,13 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(config.bindPort, config.bindHost, () => {
-  console.log('Monitoring-Panel auf http://' + config.bindHost + ':' + config.bindPort +
-    ' (Token: ' + (config.token ? 'erforderlich' : 'aus') + ')');
-});
+for (const plan of listenPlans(config.bindHost)) {
+  server.listen({ port: config.bindPort, host: plan.host, ipv6Only: plan.ipv6Only || false }, () => {
+    console.log('Monitoring-Panel auf http://' + plan.host + ':' + config.bindPort +
+      ' (Token: ' + (config.token ? 'erforderlich' : 'aus') + ')');
+  });
+}
+server.on('error', (e) => console.error('Panel listen error:', e.message));
 
 setInterval(recordHistoryPoint, STATUS_POLL_MS);
 process.on('unhandledRejection', (e) => {

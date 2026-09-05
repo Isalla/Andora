@@ -21,21 +21,28 @@ import (
 // only the permissions the login flow actually needs (see
 // docs/Auth_API_Architektur.md section 10, LOGIN set).
 type Config struct {
-	Port int
+	Port     int
+	BindHost string
 	// AuthAPI is the base URL of the Auth/API-Service, e.g.
-	// http://127.0.0.1:8080 (no trailing slash).
+	// http://127.0.0.1:8080 (no trailing slash). IPv6 hosts are
+	// bracketed at load time.
 	AuthAPIURL string
 	ServiceID  string
 	Secret     string
 	// RealmWS maps realm_id -> websocket URL of that realm's game
 	// server (operator deployment config, e.g. "1=ws://10.0.0.5:3001").
 	// Parsed from REALM_WS_URLS ("id=url,id=url"). Realms without an
-	// entry get an empty ws_url in handoff answers.
+	// entry get an empty ws_url in handoff answers. IPv6 hosts are
+	// bracketed at load time.
 	RealmWS map[int]string
 	// AuthAPITimeout bounds a single Auth-API call.
-	AuthAPITimeout time.Duration
+	AuthAPITimeout  time.Duration
 	RateLimitBurst  int
 	RateLimitPerMin int
+	// TrustedProxies are the only sources whose X-Forwarded-For /
+	// X-Real-IP headers are honored. Fail-closed: empty means the
+	// forwarding headers are never believed.
+	TrustedProxies *trustedProxySet
 	// Optional TLS (certificate + key path; empty disables).
 	TLSCertFile string
 	TLSKeyFile  string
@@ -122,7 +129,20 @@ func loadConfig(path string) (*Config, error) {
 	}
 	get := func(k string) string { return env[k] }
 
-	url := strings.TrimRight(get("AUTHAPI_URL"), "/")
+	port := intEnv(env, "LOGIN_PORT", 8081)
+	bindHost := strings.TrimSpace(get("LOGIN_BIND_HOST"))
+	if _, err := listenHosts(bindHost, port); err != nil {
+		return nil, fmt.Errorf("LOGIN_BIND_HOST: %w", err)
+	}
+	trusted, err := parseTrustedProxies(get("TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, err
+	}
+
+	url, err := normalizeURLHost(strings.TrimRight(get("AUTHAPI_URL"), "/"))
+	if err != nil {
+		return nil, err
+	}
 	if url == "" {
 		return nil, fmt.Errorf("AUTHAPI_URL is required")
 	}
@@ -134,17 +154,26 @@ func loadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	for id, u := range realmWS {
+		n, err := normalizeURLHost(u)
+		if err != nil {
+			return nil, fmt.Errorf("REALM_WS_URLS realm %d: %w", id, err)
+		}
+		realmWS[id] = n
+	}
 	return &Config{
-		Port:           intEnv(env, "LOGIN_PORT", 8081),
-		AuthAPIURL:     url,
-		ServiceID:      sid,
-		Secret:         secret,
-		RealmWS:        realmWS,
-		AuthAPITimeout: time.Duration(intEnv(env, "AUTHAPI_TIMEOUT_MS", 5000)) * time.Millisecond,
-		RateLimitBurst: intEnv(env, "RATE_LIMIT_BURST", 10),
+		Port:            port,
+		BindHost:        bindHost,
+		AuthAPIURL:      url,
+		ServiceID:       sid,
+		Secret:          secret,
+		RealmWS:         realmWS,
+		TrustedProxies:  trusted,
+		AuthAPITimeout:  time.Duration(intEnv(env, "AUTHAPI_TIMEOUT_MS", 5000)) * time.Millisecond,
+		RateLimitBurst:  intEnv(env, "RATE_LIMIT_BURST", 10),
 		RateLimitPerMin: intEnv(env, "RATE_LIMIT_PER_MIN", 120),
-		TLSCertFile:    get("TLS_CERT_FILE"),
-		TLSKeyFile:     get("TLS_KEY_FILE"),
+		TLSCertFile:     get("TLS_CERT_FILE"),
+		TLSKeyFile:      get("TLS_KEY_FILE"),
 	}, nil
 }
 

@@ -97,7 +97,7 @@ func testServer(t *testing.T, authURL string) *Server {
 	t.Helper()
 	cfg := &Config{
 		Port: 0, AuthAPIURL: authURL, ServiceID: testSvcID, Secret: testSvcPw,
-		RealmWS: map[int]string{1: "ws://realm1:3001"},
+		RealmWS:        map[int]string{1: "ws://realm1:3001"},
 		AuthAPITimeout: 2 * time.Second, RateLimitBurst: 100, RateLimitPerMin: 1000,
 	}
 	return newServer(cfg)

@@ -1,8 +1,19 @@
-PROJEKTFOLDER / PFAAD
+PROJEKTROOT / PFADE
 
-Das Projekt liegt unter `/home/pi/Projekt/pimmo` (großes `P`).
-`/home/pi/projekt/pimmo` (kleines `p`) ist KEIN Projektordner und enthält keine Daten.
-Alle Suchvorgänge, Tool-Aufrufe und Projektaufgaben werden ausschließlich in `/home/pi/Projekt/pimmo` mit großem `P` durchgeführt.
+Der Root des aktuell geöffneten Andora-Repositories ist der **Projektroot**. Er ist nicht an einen festen Pfad gebunden und darf nicht als feste Voraussetzung verwendet werden.
+
+Alle Arbeitsregeln und Pfadangaben beziehen sich relativ auf diesen Projektroot.
+
+Die Coding-KI arbeitet ausschließlich innerhalb des Projektroots, sofern ein Arbeitsauftrag nicht ausdrücklich etwas anderes erlaubt.
+
+Grundstruktur (relativ zum Projektroot):
+
+- `.tmp/` – temporäre Projektdateien (einschließlich aller Toolchains, Downloads und temporärer Artefakte)
+- `deploy/` – Deployment-Artefakte
+- `docs/` – Projektdokumentation
+- `references/` – technische Referenzen und Bücher
+
+Absolute Pfade werden nur dort verwendet, wo sie technisch tatsächlich notwendig sind; solche Pfade müssen konfigurierbar bzw. deploymentabhängig sein.
 
 AUTONOMES ARBEITEN BEI LANGEN AUFTRÄGEN
 
@@ -54,21 +65,27 @@ Eine Session darf nicht erst dann komprimiert werden, wenn das Kontextlimit bere
 Ziel:
 Für weitere Tool-Calls, Codeänderungen, Tests und Abschlussberichte müssen jederzeit ausreichend freie Tokens verbleiben.
 
-GO-TOOLCHAIN / TEMPORÄRE AUSLEGER
+TOOLCHAINEN / TEMPORÄRE AUSLEGER
 
-Die Go-Toolchain des Projekts liegt in `.tmp/go` unterhalb des Projektroots:
+Die Projekt-Toolchains liegen unterhalb des Projektroots (relativ):
 
-- Toolchain-Binary: `/home/pi/Projekt/pimmo/.tmp/go/go-toolchain/bin/go` (aktuell go1.27.1, linux/arm64)
-- Mod-Cache: `/home/pi/Projekt/pimmo/.tmp/go-mod-cache`
-- Build-Cache: `/home/pi/Projekt/pimmo/.tmp/go-build-cache`
+Go-Toolchain:
+- Toolchain-Binary: `.tmp/go/go-toolchain/bin/go` (relativ zum Projektroot; aktuell go1.27.1, linux/arm64)
+- Mod-Cache: `.tmp/go-mod-cache`
+- Build-Cache: `.tmp/go-build-cache`
 
-Jeder NEUE Coding-Auftrag (gofmt, vet, build, test, Downloads temporärer Toolchains) MUSS diese Toolchain unter `.tmp/` verwenden.
+Rust-Toolchain:
+- Rust-Installation (rustup, rustc, cargo): `.tmp/rust` bzw. `.tmp/rustup` (relativ zum Projektroot; Profil `minimal`, Toolchain `stable-aarch64-unknown-linux-gnu`)
+- Aktivierung: `source .tmp/rust/env.sh` (setzt `RUSTUP_HOME`, `CARGO_HOME`, `PATH` passend)
+- Details: `docs/Temporäre_Dateien.md` (Abschnitt „Projekt-Toolchains in `.tmp/`")
+
+Jeder NEUE Coding-Auftrag (gofmt, vet, build, test für Go; cargo build/test für Rust, Downloads temporärer Toolchains) MUSS die jeweils passende projektinterne Toolchain unter `.tmp/` verwenden. Der systemweite Rust-Pfad `~/.cargo` wird NICHT verwendet.
 
 Regeln:
 - `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt.
-- Temporäre Toolchains, Downloads und temporäre Artefakte landen ausschließlich in `/home/pi/Projekt/pimmo/.tmp/`
-  (z. B. `.tmp/go` für eine neu geladene Toolchain).
-- Das Operating System des Projekts lässt sich über `/home/pi/Projekt/pimmo/.tmp/os-release`
+- Temporäre Toolchains, Downloads und temporäre Artefakte landen ausschließlich in `.tmp/`
+  (relativ zum Projektroot, z. B. `.tmp/go` für eine neu geladene Toolchain).
+- Das Operating System des Projekts lässt sich über `.tmp/os-release` (relativ zum Projektroot)
   prüfen (aktuell Debian GNU/Linux 13 (trixie), ARM64). Diese Datei ersetzt das systemweite
   Auslesen aus `/etc/os-release`.
 - Entwicklungs-/Testsystem: Die Test-Binärdateien werden auf einem ARM64-System gebaut
@@ -76,6 +93,20 @@ Regeln:
   - Produktions-Binärdateien: Für die Produktion fallen ARM64 und AMD64 an
   (CROSS-COMPILIATION von der ARM64-Entwicklungsumgebung nach AMD64, z. B. via
   `GOARCH=amd64 GOOS=linux go build ...`).
+
+PROJEKT-STATUS-DOKUMENTATION
+
+Der tatsächliche Implementierungsstand aller Dienste und Systeme wird zentral in
+`docs/Projekt-Status.md` (relativ zum Projektroot) festgehalten.
+
+Die Coding-KI MUSS `docs/Projekt-Status.md` selbstständig und unmittelbar aktualisieren,
+wann immer sich der tatsächliche Implementierungsstand ändert (neue Endpoints/Handler,
+implementierte/freigeschaltete C2S-Typen, neue Module/Migrationen, Tests, Wegfall oder
+Neustufung von Legacy-Bestand). Abschlussberichte verweisen auf den aktualisierten Eintrag.
+
+Maßstab sind Code, Tests und DB-Migrationen – eine Spezifikation gilt erst als
+implementiert, wenn Code existiert. Die Statusstufen und die Gliederung richten sich nach
+`docs/Projekt-Status.md`.
 
 OPENCODE-SESSIONS- UND DATENBANKPFLEGE
 

@@ -15,6 +15,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 | 1. Projektübergreifend | [project_overview.md](./project_overview.md) | Grundidee, Plattformen, Server-Autorität, alle Kernsysteme in übergeordneter Form |
 | 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.5, fünf Serverdienste: Go-API/Auth, Login, Realm/Rust, Coordinator, Voice; MariaDB, WebSocket), Zielplattformen (linux-amd64/arm64), Verzeichnis- und exp1_/exp2_-Präfix-Regeln |
 | 3. KI-Grundregel | [ai_system.md](./ai_system.md) | Zentrale KI-Architektur: Server ist Autorität, AI-/Narrative-Context, spezialisierte KI-Systeme, Budget, Fallbacks |
+| 4. Implementierungsstand | [Projekt-Status.md](./Projekt-Status.md) | Tatsächlicher Code-Stand aller Dienste/Systeme nach Statusstufen (Fertig … Nur spezifiziert, Legacy/Transition); Pflicht-Aktualisierung durch die Coding-KI bei jeder Implementierungsänderung |
 
 ## Kategorien
 
@@ -110,3 +111,4 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 
 ## Hinweise
 - `Auktionshaus und Marktplatz` hat KEINE `.md`-Endung (Link o. a. entsprechend).
+- **Root-README-Pflege:** Die Root-README (`readme.md`) beschreibt ausschließlich die tatsächlich im Git-Repository enthaltene Projektstruktur. Verzeichnisse und Dateien, die durch `.gitignore` vom Repository ausgeschlossen sind, dürfen dort nicht als Bestandteil der Repository-Struktur aufgeführt werden. Lokale Toolchains, Caches, temporäre Dateien und andere nur lokal vorhandene Arbeitsartefakte gehören nicht in die Root-README; diese lokalen Entwicklungsregeln bleiben in den dafür vorgesehenen Projektdokumentationen dokumentiert (u. a. `docs/ai_jobs.md`, `docs/Temporäre_Dateien.md`). Beim Prüfen/Ändern der Root-README ist die Repository-Struktur (`git ls-files`) als Maßstab anzulegen.

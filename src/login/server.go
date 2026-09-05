@@ -55,7 +55,7 @@ func (s *Server) handler() http.Handler {
 // key is IP + path). Same shape as the Auth/API-Service.
 func (s *Server) ratePreAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := "ip:" + remoteAddr(r) + ":" + r.URL.Path
+		key := "ip:" + clientIP(r, s.cfg.TrustedProxies) + ":" + r.URL.Path
 		if ok, retry := s.rl.allow(key); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
@@ -65,18 +65,23 @@ func (s *Server) ratePreAuth(next http.Handler) http.Handler {
 	})
 }
 
-// listener opens the TCP listener, TLS-enabled iff both cert and key
-// are configured.
-func (s *Server) listener() (net.Listener, error) {
-	addr := fmt.Sprintf(":%d", s.cfg.Port)
+// listeners opens one or more TCP listeners according to the
+// configured bind host and port, TLS-enabled iff both cert and key
+// are configured. Dual bind hosts yield one listener per family.
+func (s *Server) listeners() ([]net.Listener, error) {
+	var tlsCfg *tls.Config
 	if s.cfg.TLSCertFile != "" && s.cfg.TLSKeyFile != "" {
 		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
 		if err != nil {
 			return nil, fmt.Errorf("load TLS cert/key: %w", err)
 		}
-		return tls.Listen("tcp", addr, &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}})
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{cert}}
 	}
-	return net.Listen("tcp", addr)
+	plans, err := listenHosts(s.cfg.BindHost, s.cfg.Port)
+	if err != nil {
+		return nil, err
+	}
+	return openListeners(plans, tlsCfg)
 }
 
 func main() {
@@ -96,16 +101,21 @@ func main() {
 	}
 	srv := newServer(cfg)
 
-	ln, err := srv.listener()
+	lns, err := srv.listeners()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "listen:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("login listening on %s (authapi %s)\n", ln.Addr().String(), cfg.AuthAPIURL)
+	for _, ln := range lns {
+		fmt.Printf("login listening on %s (authapi %s)\n", ln.Addr().String(), cfg.AuthAPIURL)
+	}
 
 	httpServer := &http.Server{Handler: srv.handler(), ReadHeaderTimeout: readHeaderTimeout}
-	errCh := make(chan error, 1)
-	go func() { errCh <- httpServer.Serve(ln) }()
+	errCh := make(chan error, len(lns))
+	for _, ln := range lns {
+		ln := ln
+		go func() { errCh <- httpServer.Serve(ln) }()
+	}
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	select {
@@ -217,17 +227,6 @@ func (rl *rateLimit) allow(key string) (bool, int) {
 	}
 	rl.hits[key] = append(ts, now)
 	return true, 0
-}
-
-// remoteAddr extracts the presenting client IP (X-Forwarded-For is
-// deliberately NOT trusted here: a spoofed forwarder would let one
-// IP abuse the budget of another).
-func remoteAddr(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // loggingMiddleware adds a single per-request log line. The line

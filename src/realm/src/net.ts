@@ -1,5 +1,7 @@
 // net.ts — WebSocket-Server + Message-Dispatcher
+import http from 'http';
 import WebSocket from 'ws';
+import { bindHosts } from './bind';
 import { config } from './config';
 import { C2S } from './protocol';
 import { bySocket, players } from './world';
@@ -12,9 +14,14 @@ import { handleParentalMessage, detachParental } from './parental';
 import type { NetMsg } from './types';
 
 let wss: WebSocket.Server;
+const httpServers: http.Server[] = [];
 
 export function initWebSocket(): WebSocket.Server {
-  wss = new WebSocket.Server({ port: config.wsPort });
+  // noServer: Der Handler wird je Listener über das upgrade-Ereignis
+  // verdrahtet, damit wir pro Adresse explizit binden können (IPv4-only,
+  // IPv6-only via ipv6Only, dual, Hostname), ohne auf plattformspezifische
+  // IPv4-mapped-Acceptance angewiesen zu sein.
+  wss = new WebSocket.Server({ noServer: true });
 
   wss.on('connection', (ws) => {
     console.log('client connected');
@@ -63,6 +70,17 @@ export function initWebSocket(): WebSocket.Server {
     ws.on('error', (e) => console.error('ws error:', e.message));
   });
 
-  console.log(`WebSocket on ${config.wsPort}`);
+  for (const plan of bindHosts(config.wsBindHost)) {
+    const srv = http.createServer();
+    srv.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    });
+    srv.on('error', (e) => console.error('WebSocket listen error:', e.message));
+    srv.listen({ port: config.wsPort, host: plan.host, ipv6Only: plan.ipv6Only || false }, () => {
+      console.log(`WebSocket on ${plan.host || 'all interfaces'}:${config.wsPort}`);
+    });
+    httpServers.push(srv);
+  }
+
   return wss;
 }

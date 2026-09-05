@@ -28,12 +28,15 @@ Protokoll-IDs (`shared/protocol.js`), Health/Status (`/health`,
 `/status`, `/players`), Speed-Cap (210 m/s), Migrationen mit
 `db_version` + Destruktiv-Sperre.
 
-## Bauen/Testen (vorhandene Toolchain, kein System-Rust nötig)
+## Bauen/Testen (projektinterne Rust-Toolchain, kein System-Rust nötig)
+
+Die Rust-Toolchain des Projekts liegt unter `.tmp/` des Projektroots
+(relativ, Details: `docs/Temporäre_Dateien.md`):
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-cargo build
-cargo test
+source .tmp/rust/env.sh
+cargo build --manifest-path src/realm-rs/Cargo.toml
+cargo test  --manifest-path src/realm-rs/Cargo.toml
 ```
 
 ## Betrieb

@@ -21,6 +21,7 @@
 // bewusst deaktiviert (Entwicklung/Testprototyp).
 import fs from 'fs';
 import path from 'path';
+import { bracketUrlHost } from './bind';
 
 export interface Env {
   [k: string]: string;
@@ -67,11 +68,16 @@ function dbConfig(p: string, dName: string): DbConfig {
 export const config = {
   wsPort: num('PORT_WS', 3001),
   healthPort: num('PORT_HTTP', 3002),
+  // Bind-Hosts der Listener (siehe bind.ts): leer = alle Interfaces.
+  wsBindHost: env['WS_BIND_HOST'] || '',
+  healthBindHost: env['HEALTH_BIND_HOST'] || '',
   tickInterval: num('TICK_MS', 100),
   aofbRadius: num('AOFB_RADIUS', 20),
   renderCap: num('RENDER_CAP_DEFAULT', 64),
   ollama: {
-    url: env['OLLAMA_URL'] || 'http://192.168.1.32:11434',
+    // IPv6-Literal im Host unbedingt geklammert angeben; der Lader
+    // normalisiert zusätzlich die übliche host:port-Schreibweise.
+    url: bracketUrlHost(env['OLLAMA_URL'] || 'http://192.168.1.32:11434'),
     model: env['OLLAMA_MODEL'] || '',
     modelQuality: env['OLLAMA_MODEL_QUALITY'] || '',
     timeoutMs: num('OLLAMA_TIMEOUT_MS', 15000),
@@ -85,7 +91,8 @@ export const config = {
   // Auth-API des separaten Auth-/API-Services (eigene Service-Credential
   // dieses Realms; leere URL = Auth-Anbindung deaktiviert).
   authApi: {
-    url: (env['AUTHAPI_URL'] || '').replace(/\/$/, ''),
+    // IPv6-Literal im Host: der Lader klammert (host:port wird zu [host]:port).
+    url: bracketUrlHost((env['AUTHAPI_URL'] || '').replace(/\/$/, '')),
     serviceId: env['AUTHAPI_SERVICE_ID'] || '',
     secret: env['AUTHAPI_SERVICE_SECRET'] || ''
   },

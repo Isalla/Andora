@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -48,12 +47,12 @@ const (
 	// world.authenticate/world.heartbeat werden von keinem Dienst mehr
 	// verwendet. Endpunkte bleiben aus Kompatibilität bestehen, es darf
 	// nichts Neues darauf aufgebaut werden.
-	permWorldAuthenticate   = "world.authenticate"
-	permWorldHeartbeat      = "world.heartbeat"
-	permParentalManage      = "parental.manage"
-	permParentalPin         = "parental.pin"
-	permParentalStatus      = "parental.status"
-	permParentalNotify      = "parental.notifications"
+	permWorldAuthenticate = "world.authenticate"
+	permWorldHeartbeat    = "world.heartbeat"
+	permParentalManage    = "parental.manage"
+	permParentalPin       = "parental.pin"
+	permParentalStatus    = "parental.status"
+	permParentalNotify    = "parental.notifications"
 )
 
 // authorize checks the service identity and signature of a request.
@@ -212,17 +211,6 @@ func (rl *rateLimit) allow(key string) (bool, int) {
 	}
 	rl.hits[key] = append(ts, now)
 	return true, 0
-}
-
-// remoteAddr extracts the presenting client IP (X-Forwarded-For is
-// deliberately NOT trusted here: a spoofed forwarder would let one
-// IP abuse the budget of another).
-func remoteAddr(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // loggingMiddleware adds a single per-request log line on the

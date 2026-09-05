@@ -27,11 +27,34 @@ pub async fn serve(
     shared: Shared,
     parental: SharedParental,
 ) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cfg.ws_port))
-        .await
-        .map_err(|e| format!("websocket listen {}: {e}", cfg.ws_port))?;
-    log::info!("websocket on {}", cfg.ws_port);
+    let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
     let ctx = Arc::new(Ctx { cfg, db, auth, shared, parental });
+    let mut listeners = Vec::with_capacity(addrs.len());
+    for addr in &addrs {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("websocket listen {addr}: {e}"))?;
+        log::info!("websocket on {addr}");
+        listeners.push(listener);
+    }
+    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> = Vec::with_capacity(listeners.len());
+    for listener in listeners {
+        let ctx = ctx.clone();
+        tasks.push(tokio::spawn(async move { accept_loop(listener, ctx).await }));
+    }
+    // Erster Fehler beendet den Server; alle Listener-Tasks werden gestoppt.
+    let (res, _, rest) = futures_util::future::select_all(tasks).await;
+    for t in rest {
+        t.abort();
+    }
+    match res {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("websocket task: {e}")),
+    }
+}
+
+async fn accept_loop(listener: tokio::net::TcpListener, ctx: Arc<Ctx>) -> Result<(), String> {
     loop {
         let (sock, _) = listener.accept().await.map_err(|e| format!("websocket accept: {e}"))?;
         let ctx = ctx.clone();

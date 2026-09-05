@@ -36,12 +36,17 @@ type ServiceCred struct {
 // The path may also be given via AUTHAPI_CONFIG. If neither is given,
 // "config.env" next to the binary is used.
 type Config struct {
-	Port         int
-	AuthDB       AuthDBConfig
-	Services     map[string]ServiceCred
-	ArgonTime    uint32
-	ArgonMemory  uint32
-	ArgonThreads uint8
+	Port     int
+	BindHost string
+	AuthDB   AuthDBConfig
+	Services map[string]ServiceCred
+	// TrustedProxies are the only sources whose X-Forwarded-For /
+	// X-Real-IP headers are honored. Fail-closed: empty means the
+	// forwarding headers are never believed.
+	TrustedProxies *trustedProxySet
+	ArgonTime      uint32
+	ArgonMemory    uint32
+	ArgonThreads   uint8
 	// Security parameters.
 	SessionTTL      time.Duration
 	HandoffTTL      time.Duration
@@ -110,6 +115,14 @@ func loadConfig(path string) (*Config, error) {
 	get := func(k string) string { return env[k] }
 
 	port := intEnv(env, "AUTHAPI_PORT", 8080)
+	bindHost := strings.TrimSpace(get("AUTHAPI_BIND_HOST"))
+	if _, err := listenHosts(bindHost, port); err != nil {
+		return nil, fmt.Errorf("AUTHAPI_BIND_HOST: %w", err)
+	}
+	trusted, err := parseTrustedProxies(get("TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, err
+	}
 
 	db := AuthDBConfig{
 		Host:     get("AUTH_DB_HOST"),
@@ -151,8 +164,10 @@ func loadConfig(path string) (*Config, error) {
 
 	return &Config{
 		Port:            port,
+		BindHost:        bindHost,
 		AuthDB:          db,
 		Services:        svc,
+		TrustedProxies:  trusted,
 		ArgonTime:       uint32(intEnv(env, "ARGON_TIME", 1)),
 		ArgonMemory:     uint32(intEnv(env, "ARGON_MEMORY", 19456)),
 		ArgonThreads:    uint8(intEnv(env, "ARGON_THREADS", 4)),

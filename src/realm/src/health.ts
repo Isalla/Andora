@@ -1,5 +1,6 @@
 // health.ts — HTTP-Status-Server (Port PORT_HTTP): /health + /status
 import { createServer, IncomingMessage, ServerResponse } from 'http';
+import { bindHosts } from './bind';
 import { config } from './config';
 import { players } from './world';
 import { tickStat, processCpuSeconds, heapKb, rssMb } from './metrics';
@@ -106,7 +107,11 @@ export function setupHealth(): void {
     }
     send(res, 404, { ok: false, error: 'Not found' });
   });
-  httpServer.listen(config.healthPort, () => {
-    console.log(`Health server on ${config.healthPort} (/health, /status, /players)`);
-  });
+  // Ein Server, beliebig viele Listener (ein Aufruf pro Bind-Plan).
+  for (const plan of bindHosts(config.healthBindHost)) {
+    httpServer.listen({ port: config.healthPort, host: plan.host, ipv6Only: plan.ipv6Only || false }, () => {
+      console.log(`Health server on ${plan.host || 'all interfaces'}:${config.healthPort} (/health, /status, /players)`);
+    });
+  }
+  httpServer.on('error', (e) => console.error('Health listen error:', e.message));
 }

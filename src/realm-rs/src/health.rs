@@ -59,10 +59,33 @@ fn response(status: u16, body: &serde_json::Value) -> String {
 }
 
 pub async fn serve(cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cfg.health_port))
-        .await
-        .map_err(|e| format!("health listen {}: {e}", cfg.health_port))?;
-    log::info!("health on {} (/health, /status, /players)", cfg.health_port);
+    let addrs = crate::config::bind_addrs(&cfg.health_bind_host, cfg.health_port)?;
+    let mut listeners = Vec::with_capacity(addrs.len());
+    for addr in &addrs {
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("health listen {addr}: {e}"))?;
+        log::info!("health on {addr} (/health, /status, /players)");
+        listeners.push(listener);
+    }
+    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> = Vec::with_capacity(listeners.len());
+    for listener in listeners {
+        let cfg = cfg.clone();
+        let shared = shared.clone();
+        tasks.push(tokio::spawn(async move { accept_loop(listener, cfg, shared).await }));
+    }
+    let (res, _, rest) = futures_util::future::select_all(tasks).await;
+    for t in rest {
+        t.abort();
+    }
+    match res {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("health task: {e}")),
+    }
+}
+
+async fn accept_loop(listener: tokio::net::TcpListener, cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
     loop {
         let (mut sock, _) = listener.accept().await.map_err(|e| format!("health accept: {e}"))?;
         let cfg = cfg.clone();
@@ -119,6 +142,8 @@ mod tests {
             realm_id: 1,
             ws_port: 3001,
             health_port: 3002,
+            ws_bind_host: String::new(),
+            health_bind_host: String::new(),
             tick_ms: 100,
             aofb_radius: 20.0,
             render_cap: 64,

@@ -3,6 +3,7 @@
 // world_data-Pools wie im TypeScript-Übergangsstand).
 // Pfad auch per argv[1] oder REALM_CONFIG. Format: KEY=VALUE, #-Kommentare.
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -16,12 +17,122 @@ pub struct DbConfig {
 
 impl DbConfig {
     /// MariaDB-DSN im sqlx-Format (ohne TLS; LAN-Betrieb wie bisher).
+    /// Ein IPv6-Host wird mit Klammern geschrieben:
+    /// mysql://u:p@[2001:db8::1]:3306/db.
     pub fn url(&self) -> String {
         format!(
             "mysql://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.database
+            self.user,
+            self.password,
+            bracket_host(&self.host),
+            self.port,
+            self.database
         )
     }
+}
+
+/// Klammer einen IPv6-Host (auch "[::1]" bleibt unverändert).
+pub fn bracket_host(host: &str) -> String {
+    let h = host.trim();
+    if h.is_empty() || h.starts_with('[') || !h.contains(':') {
+        return h.to_string();
+    }
+    format!("[{h}]")
+}
+
+/// Klammer einen ungeklammerten IPv6-Literal im Host-Anteil einer URL
+/// (Port-zuerst: "http://2001:db8::1:8080/x" -> "http://[2001:db8::1]:8080/x").
+/// Bare IPv6-Adressen (ohne Port) bitte geklammert angeben: "ws://[::1]/ws".
+pub fn bracket_url_host(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let rest = &raw[scheme_end + 3..];
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let auth = &rest[..auth_end];
+    if auth.is_empty() || auth.starts_with('[') || !auth.contains(':') {
+        return raw.to_string();
+    }
+    // host:port-Form: letzter Doppelpunkt trennt einen dezimalen Port.
+    if let Some(li) = auth.rfind(':') {
+        let (host_part, port_part) = auth.split_at(li);
+        let port_part = &port_part[1..];
+        if !port_part.is_empty() && port_part.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(ip) = host_part.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+                if ip.is_ipv6() {
+                    return format!("{}[{host_part}]:{port_part}{}", &raw[..scheme_end + 3], &rest[auth_end..]);
+                }
+            }
+        }
+    }
+    // Bare IPv6-Adresse.
+    if let Ok(ip) = auth.parse::<IpAddr>() {
+        if ip.is_ipv6() {
+            return format!("{}[{auth}]{}", &raw[..scheme_end + 3], &rest[auth_end..]);
+        }
+    }
+    raw.to_string()
+}
+
+/// Bind-Adressen aus einem Bind-Host-Wert (ein oder zwei SocketAddr).
+///
+///   "" | "auto"   -> 0.0.0.0 (IPv4, bisheriges Verhalten)
+///   "ipv4" | "4"  -> 0.0.0.0
+///   "ipv6" | "6"  -> [::] (IPv6-only)
+///   "dual"|"both" -> 0.0.0.0 + [::] (zwei explizite Listener)
+///   IP-Literal    -> diese Adresse (Family des Literals)
+///   Hostname      -> erste v4- und erste v6-Adresse aus der Auflösung
+pub fn bind_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let h = host.to_lowercase();
+    match h.trim() {
+        "" | "auto" | "ipv4" | "4" => Ok(vec![SocketAddr::from((IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port))]),
+        "ipv6" | "6" => Ok(vec![SocketAddr::from((IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port))]),
+        "dual" | "both" => Ok(vec![
+            SocketAddr::from((IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)),
+            SocketAddr::from((IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)),
+        ]),
+        other => {
+            let lit = other.trim_matches(|c| c == '[' || c == ']');
+            if let Ok(ip) = lit.parse::<IpAddr>() {
+                return Ok(vec![SocketAddr::from((ip, port))]);
+            }
+            resolve_addrs(other.trim(), port)
+        }
+    }
+}
+
+/// Löse einen Hostnamen auf und melde höchstens EINE Adresse pro Family.
+fn resolve_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("bind host {host:?} auflösen: {e}"))?;
+    let mut v4: Option<SocketAddr> = None;
+    let mut v6: Option<SocketAddr> = None;
+    for a in addrs {
+        match a {
+            a if a.is_ipv4() => {
+                if v4.is_none() {
+                    v4 = Some(a);
+                }
+            }
+            a => {
+                if v6.is_none() {
+                    v6 = Some(a);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(a) = v4 {
+        out.push(a);
+    }
+    if let Some(a) = v6 {
+        out.push(a);
+    }
+    if out.is_empty() {
+        return Err(format!("bind host {host:?} ergab keine Adresse"));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +149,9 @@ pub struct Config {
     pub realm_id: u32,
     pub ws_port: u16,
     pub health_port: u16,
+    /// Bind-Hosts für WebSocket- und Health-Listener (siehe bind_addrs).
+    pub ws_bind_host: String,
+    pub health_bind_host: String,
     pub tick_ms: u64,
     pub aofb_radius: f64,
     /// Roadmap: Client-Render-Cap (PERFGO) + Coordinator/Ollama-Anbindung.
@@ -134,6 +248,8 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         realm_id,
         ws_port: num(&env, "PORT_WS", 3001) as u16,
         health_port: num(&env, "PORT_HTTP", 3002) as u16,
+        ws_bind_host: g("WS_BIND_HOST"),
+        health_bind_host: g("HEALTH_BIND_HOST"),
         tick_ms: num(&env, "TICK_MS", 100),
         aofb_radius: num(&env, "AOFB_RADIUS", 20) as f64,
         render_cap: num(&env, "RENDER_CAP_DEFAULT", 64) as u32,
@@ -142,11 +258,11 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
             if u.is_empty() {
                 "http://192.168.1.32:11434".to_string()
             } else {
-                u
+                bracket_url_host(&u.trim().to_string())
             }
         },
         auth_api: AuthApiConfig {
-            url: g("AUTHAPI_URL").trim_end_matches('/').to_string(),
+            url: bracket_url_host(&g("AUTHAPI_URL").trim_end_matches('/').to_string()),
             service_id: g("AUTHAPI_SERVICE_ID"),
             secret: g("AUTHAPI_SERVICE_SECRET"),
         },
@@ -203,5 +319,58 @@ mod tests {
         assert_eq!(cfg.realm_db.database, "realm_state_de2");
         assert!(!cfg.allow_destructive);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn db_url_brackets_ipv6() {
+        let v4 = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: "u".into(),
+            password: "p".into(),
+            database: "realm_state_de1".into(),
+        };
+        assert_eq!(v4.url(), "mysql://u:p@127.0.0.1:3306/realm_state_de1");
+        let v6 = DbConfig { host: "2001:db8::1".into(), ..v4.clone() };
+        assert_eq!(v6.url(), "mysql://u:p@[2001:db8::1]:3306/realm_state_de1");
+        let v6b = DbConfig { host: "[::1]".into(), ..v4 };
+        assert_eq!(v6b.url(), "mysql://u:p@[::1]:3306/realm_state_de1");
+    }
+
+    #[test]
+    fn bracket_host_uniform() {
+        assert_eq!(bracket_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(bracket_host("db"), "db");
+        assert_eq!(bracket_host("2001:db8::1"), "[2001:db8::1]");
+        assert_eq!(bracket_host("[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn url_host_bracketing() {
+        assert_eq!(bracket_url_host("http://127.0.0.1:8080/x"), "http://127.0.0.1:8080/x");
+        assert_eq!(bracket_url_host("http://[2001:db8::1]:8080/x"), "http://[2001:db8::1]:8080/x");
+        assert_eq!(bracket_url_host("http://2001:db8::1:8080/x"), "http://[2001:db8::1]:8080/x");
+        assert_eq!(bracket_url_host("ws://::1:3001/ws"), "ws://[::1]:3001/ws");
+        assert_eq!(bracket_url_host("http://::1"), "http://[::1]");
+    }
+
+    #[test]
+    fn bind_addrs_explicit_families() {
+        use std::net::Ipv4Addr;
+        let v4 = bind_addrs("", 3001).unwrap();
+        assert_eq!(v4, vec![SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3001))]);
+        let ipv6 = bind_addrs("ipv6", 3001).unwrap();
+        assert_eq!(ipv6.len(), 1);
+        assert!(ipv6[0].is_ipv6());
+        let dual = bind_addrs("dual", 3001).unwrap();
+        assert_eq!(dual.len(), 2, "dual must yield two listeners");
+        assert!(dual[0].is_ipv4() && dual[1].is_ipv6());
+        let lit = bind_addrs("127.0.0.1", 3001).unwrap();
+        assert_eq!(lit, vec![SocketAddr::from((IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3001))]);
+        let v6lit = bind_addrs("::1", 3001).unwrap();
+        assert_eq!(v6lit.len(), 1);
+        assert!(v6lit[0].is_ipv6());
+        let v6litb = bind_addrs("[::1]", 3001).unwrap();
+        assert_eq!(v6lit, v6litb);
     }
 }

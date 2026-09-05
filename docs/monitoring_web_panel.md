@@ -44,7 +44,11 @@ Steuerung des Servers und soll durch das zentrale Panel-/Agent-Modell der Zielar
 | 3003 | Panel | `GET /` Dashboard, `GET/POST /api/*` |
 
 Panel-Bindung: default `127.0.0.1:3003` (weder LAN noch public);
-optional `ANDORA_MONITOR_TOKEN` (Header `x-api-token` oder `?token=`).
+`ANDORA_MONITOR_BIND` wählt die Interfaces (`""`/`auto` = 127.0.0.1,
+`ipv4`/`4` = 0.0.0.0, `ipv6`/`6` = nur IPv6, `dual`/`both` = dual-stack,
+sonst IP-Literal oder Hostname); optional `ANDORA_MONITOR_TOKEN` (Header
+`x-api-token` oder `?token=`). `ANDORA_GAME_SERVER_URL` darf IPv6-Literal
+ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
 
 ## Metriken des Gameservers (`GET /status` auf 3002)
 
@@ -74,7 +78,8 @@ optional `ANDORA_MONITOR_TOKEN` (Header `x-api-token` oder `?token=`).
   (POST `/api/control` mit `confirm: true`).
 - **Verlauf**: `GET /api/history` (In-Memory, max. 360 Punkte à 10 s).
 - **Config**: `GET /api/config` + `POST /api/config` — nur Whitelist-Keys von
-  `src/realm/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`, `TICK_MS`,
+  `src/realm/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`,
+  `WS_BIND_HOST`, `HEALTH_BIND_HOST`, `TICK_MS`,
   `AOFB_RADIUS`, `RENDER_CAP_DEFAULT`, alle `OLLAMA_*` außer
   Secrets); `DB_*` und Passwörter sind **nicht** sichtbar und nicht
   änderbar. Werte werden serverseitig validiert (Port-Bereiche, Tick 16-1000

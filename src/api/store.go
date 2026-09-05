@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -235,13 +236,18 @@ type sQLStore struct {
 
 func newSQLStore(db *sql.DB) *sQLStore { return &sQLStore{db: db} }
 
+// mysqlDSN builds the DSN for the go-sql-driver/mysql connection. An
+// IPv6 host is bracketed via net.JoinHostPort.
+func mysqlDSN(cfg AuthDBConfig) string {
+	return fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=5s&readTimeout=5s&writeTimeout=5s",
+		cfg.User, cfg.Password, net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), cfg.Database)
+}
+
 // openAuthDB connects to the auth database and verifies the
 // connection. Fails hard if credentials are wrong or the DB is
 // unreachable.
 func openAuthDB(ctx context.Context, cfg AuthDBConfig) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=5s&writeTimeout=5s",
-		cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
-	db, err := sql.Open("mysql", dsn)
+	db, err := sql.Open("mysql", mysqlDSN(cfg))
 	if err != nil {
 		return nil, fmt.Errorf("open auth db: %w", err)
 	}
