@@ -53,9 +53,10 @@ Der Auth/API-Service übernimmt unter anderem:
 -   Account- und Banstatus prüfen
 -   Sessions und Login-Tokens verwalten
 -   Handoff-Tokens verwalten
--   Realms und registrierte World-Server verwalten
--   World-Server authentifizieren
--   Heartbeats registrierter World-Server verarbeiten
+-   Realms verwalten
+-   (LEGACY: registrierte World-Server verwalten, World-Server
+-   authentifizieren, deren Heartbeats verarbeiten — kein separater
+-   Worldserver mehr, Endpunkte nur kompatibel erhalten)
 
 Er gibt nur die Informationen zurück, die der anfragende Dienst
 tatsächlich benötigt.
@@ -127,19 +128,28 @@ login_status
 Er benötigt keine Passwort-Hashes, verschlüsselten E-Mail-Daten,
 Lookup-Hashes oder Verschlüsselungsschlüssel.
 
-## 8. Realm-/World-Server
+## 8. Login-/Realm-Server
 
-Realmserver besitzen keinen direkten Zugriff auf `auth`.
+Login- und Realmserver besitzen keinen direkten Zugriff auf `auth`.
 
-Sie verwenden die Auth-API nur für begrenzte Aufgaben, beispielsweise:
+Der Login-Service (`src/login`) verwendet beispielsweise:
 
--   Handoff-Token validieren
+-   Login prüfen (`account.authenticate`)
+-   Session verwalten/prüfen
+-   Realm-Liste abrufen
+-   Handoff-Token ausstellen
+
+Realmserver verwenden beispielsweise:
+
+-   Handoff-Token validieren und verbrauchen (realm-gebunden)
 -   Session validieren
--   Account-ID ermitteln
+-   Elternkontroll-Status/PIN/Extension abfragen
 -   notwendige Berechtigungen prüfen
--   World-Server gegenüber dem Auth-System authentifizieren
 
-> Ein World-Server kennt den Spieler, aber nicht seine sensiblen
+(LEGACY: World-Server-Authentifizierung gegenüber dem Auth-System —
+kein separater Worldserver mehr.)
+
+> Ein Realm-Server kennt den Spieler, aber nicht seine sensiblen
 > Accountdaten.
 
 ## 9. Realm-spezifische Service-Credentials
@@ -169,17 +179,19 @@ WEB
 ├── account.password_change
 └── account.recovery
 
-LOGIN
+LOGIN (Login-Service, `src/login`)
 ├── account.authenticate
-├── session.create
 ├── session.validate
+├── session.revoke
 ├── realm.list
 └── handoff.create
 
-REALM
+REALM (Realm-Server, `src/realm-rs`; Übergangsstand `src/realm`)
 ├── handoff.validate
 ├── session.validate
-└── account.permissions
+├── account.permissions
+├── parental.status
+└── parental.pin
 ```
 
 Die Liste wird nur erweitert, wenn ein konkreter Dienst zusätzliche
@@ -263,6 +275,13 @@ Auth/API-Service freigeben
 
 Schlägt eine notwendige Migration fehl, darf der Auth/API-Service nicht
 normal starten.
+
+Dateiformat: `NNN_name.sql` in `src/api/db/auth/migrations/`. Der Name wird
+am **ersten** Unterstrich getrennt (Version + Tag); der Tag darf weitere
+Unterstriche enthalten (z. B. `004_world_servers.sql` → Version 4, Tag
+`world_servers`). Dieselbe Konvention gilt für die Realm-Migrationen
+(`src/realm/db/<bereich>/migrations/`, Runner in `src/realm/src/db/`
+mit eigener `db_version`-Tabelle je Realm-Datenbank).
 
 Loginserver, Realmserver und Webseite führen keine Migrationen auf
 `auth` aus.

@@ -94,5 +94,17 @@ export const config = {
   // world_data-DB: statische globale Weltdaten (eigene Verbindung, zumeist lesend)
   worldDataDb: dbConfig('WORLD_DATA_DB', 'world_data'),
   // realm_state-DB: persistenter Zustand eines konkreten Realms (realm_state_<realm>)
-  realmStateDb: dbConfig('REALM_STATE_DB', 'realm_state_de1')
+  realmStateDb: dbConfig('REALM_STATE_DB', 'realm_state_de1'),
+  // SQL-Migrationen: je DB eigenes Verzeichnis (Override, sonst
+  // <serverroot>/db/<bereich>/migrations, siehe db/migrations.ts).
+  // ALLOW_DESTRUCTIVE_MIGRATIONS=1 gibt als destruktiv markierte
+  // Migrationen (`-- destructive: ...`) frei und darf nur im
+  // Realm-Update-Ablauf NACH erfolgtem Backup gesetzt werden
+  // (siehe docs/Deployment_Betriebsarchitektur.md).
+  migrations: {
+    allowDestructive: env['ALLOW_DESTRUCTIVE_MIGRATIONS'] === '1',
+    characterDir: env['CHARACTER_MIGRATIONS_DIR'] || '',
+    worldDataDir: env['WORLD_DATA_MIGRATIONS_DIR'] || '',
+    realmStateDir: env['REALM_STATE_MIGRATIONS_DIR'] || ''
+  }
 };

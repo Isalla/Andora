@@ -1,5 +1,5 @@
 [Unit]
-Description=Andora MMO Server (Game-Server, Node.js)
+Description=Andora MMO Server (Game-Server, Node.js — ÜBERGANGSSTAND, Ziel: Rust-Realm src/realm-rs)
 
 [Service]
 Type=simple

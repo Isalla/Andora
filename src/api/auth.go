@@ -44,6 +44,10 @@ const (
 	permRealmList           = "realm.list"
 	permHandoffCreate       = "handoff.create"
 	permHandoffValidate     = "handoff.validate"
+	// LEGACY (kein separater Worldserver mehr, Kette Auth/API → Login → Realm):
+	// world.authenticate/world.heartbeat werden von keinem Dienst mehr
+	// verwendet. Endpunkte bleiben aus Kompatibilität bestehen, es darf
+	// nichts Neues darauf aufgebaut werden.
 	permWorldAuthenticate   = "world.authenticate"
 	permWorldHeartbeat      = "world.heartbeat"
 	permParentalManage      = "parental.manage"

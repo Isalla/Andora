@@ -7,14 +7,19 @@ Dieses Dokument beschreibt die verbindliche Betriebs- und Deployment-Architektur
 Sie gilt für alle Andora-Komponenten:
 
 ```text
-API/Auth-Service (Go)
-Login-Service
-Realm-Server (Rust; aktuell Node.js/TS-Übergangsstand wird abgelöst)
-Coordinator
+API/Auth-Service (Go, src/api)
+Login-Service (Go, src/login — implementiert)
+Realm-Server (Rust, src/realm-rs — implementiert; Node.js/TS-Übergangsstand
+  src/realm bleibt aktiv, bis die Ablösung abgeschlossen ist)
+Coordinator (detailliert spezifiziert, Implementierung folgt)
 Voice-Service (späterer Release)
 Andora-Agent
 andora-updater
 ```
+
+Zielkette für den Spieleinstieg: `Auth/API → Login → Realm`. Einen
+separaten Worldserver-Dienst gibt es nicht; der Realm-Server führt
+seinen Realm direkt aus (Handoff-Übergabe, realm-gebunden, einmalig).
 
 Ziel der Architektur ist:
 
@@ -163,20 +168,23 @@ Backup
         ↓
 Update (statische Definitionen / Schema)
         ↓
-Migration (nur realm_state_<realm>)
+Migration (automatisch beim Realm-Start, je eigene DB/db_version)
         ↓
 Healthcheck
         ↓
 Freigabe (Realm wieder öffnen)
 ```
 
+Der Migrationsschritt wird vom Realm-Server selbst ausgeführt: Beim Start wendet er automatisch alle noch fehlenden, versionsbasierten SQL-Migrationen seiner eigenen Datenbanken an (siehe `Datenbank_Architektur.md`, Abschnitt Migrationen und db_version). Schlägt eine Migration fehl, bricht der Start mit klarer Fehlermeldung ab, bevor Spieler zugelassen werden; der Realm bleibt bis zur Behebung geschlossen.
+
 ### Regeln
 
 - Jeder Realm wird getrennt aktualisiert.
 - Ein Realm-Update erzwingt **keinen** Neustart oder Downtime anderer Realms.
-- Die Migrationen und Updates betreffen ausschließlich `realm_state_<realm>` des betroffenen Realms.
+- Die Migrationen und Updates betreffen ausschließlich die Datenbanken des betroffenen Realms (eigene `db_version`-Historie je Datenbank, keine zentrale globale Migrationssteuerung).
 - Der Wartungsmodus verhindert, dass Spieler während der Migration in einen inkonsistenten Realmzustand geraten.
 - Im Fehlerfall greifen die Rollback- und Backup-Regeln des Updaters.
+- Destruktive oder nicht rückwärtskompatible Migrationen (in der Datei mit `-- destructive: <Grund>` markiert) laufen nur mit `ALLOW_DESTRUCTIVE_MIGRATIONS=1`. Diese Freigabe darf ausschließlich innerhalb dieses Ablaufs **nach** dem Backup-Schritt gesetzt und muss danach wieder entfernt werden. Ohne Freigabe bricht der Realm-Start vor der destruktiven Migration ab.
 
 ### Realm-Versionen
 

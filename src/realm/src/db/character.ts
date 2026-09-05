@@ -2,6 +2,12 @@
 // persoenlicher Fortschritt. Getrennt von auth, world_data und realm_state
 // (eigene CHARACTER_DB_*-Konfiguration, eigener Pool).
 // Access-/Geheimnisse werden hier NICHT gelesen oder gespeichert.
+//
+// ÜBERGANGSSTAND (Alt-Architektur): Zielarchitektur ist genau EINE
+// Realm-Datenbank (realm_state_<realm>) ohne separate character-DB
+// (siehe docs/Datenbank_Architektur.md). Diese Anbindung bleibt nur
+// bestehen, bis Charakterdaten/ Realm-Zustand im Rust-Realm
+// (src/realm-rs) zusammengeführt sind.
 import { Pool } from 'mysql2/promise';
 import { config } from '../config';
 import { DbPoolHandle, openPool, closePool, getPool } from './pool';

@@ -16,9 +16,10 @@
 ## Verzeichnisse
 - `shared/`   – Protokoll + Definitionsdaten (Client UND Server lesen)
 - `i18n/`     – Sprache-JSONs (de, en, ...), beide Seiten teilen
-- `src/realm/`      – Realm-/World-Server (Autorität: Combat, Loot, AH, NPC-AI via Coordinator/Ollama). Zielsprache Rust; der bestehende Node.js/TypeScript-Code unter `src/realm/` ist der Übergangsstand und wird schrittweise nach Rust migriert.
+- `src/realm-rs/`   – Realm-Server in Rust (Zielimplementierung; Autorität: Combat, Loot, AH, NPC-AI via Coordinator/Ollama). Genau eine DB (`realm_state_<realm>`), Einstieg per Handoff. Bauen/Testen mit der vorhandenen Toolchain (`~/.cargo`).
+- `src/realm/`      – Realm-Server (Node.js/TypeScript) als ÜBERGANGSSTAND: lauffähig, wird schrittweise nach `src/realm-rs/` migriert ( Alt-Annahmen: character-/world_data-Pools, Session statt Handoff). Nicht ausbauen.
 - `src/api/`        – Go-API-/Auth-Service (einziger Service mit Auth-DB-Zugriff; Zielplattformen arm64 + amd64)
-- `src/login/`      – separater Login-Server (Struktur vorgesehen, kein Code vorhanden)
+- `src/login/`      – separater Login-Service (Go, implementiert): Client-Login, Realm-Liste, Handoff-Ausstellung gegen die Auth-API; keine DB-Rechte
 - `src/coordinator/`– separater Coordinator-Service (Struktur vorgesehen, kein Code vorhanden)
 - `src/voice/`      – Voice-Service (noch nicht angelegt, geplant)
 - `monitor`         – lokales Monitoring-/Admin-Panel (Übergangs-/Legacy-Status, siehe `monitoring_web_panel.md`)

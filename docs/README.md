@@ -4,6 +4,10 @@
 
 **PFLICHT VOR JEDEM CODING-AUFTAG:** [ai_jobs.md](./ai_jobs.md) (Autonomie-/Kontextreserve-Regeln) lesen. Projektinformationen beziehen neue KI-Sessions ausschließlich aus den aktuellen Dokumenten dieser Übersicht (`docs/`) und, soweit Fachliteratur relevant ist, aus [references/README.md](../references/README.md) – nicht aus `.tmp/ai-context` oder sonstigen Übergabedokumenten.
 
+## Referenzbibliothek (references/)
+
+Unter `references/` befindet sich die lokale technische Referenzbibliothek; Einstiegspunkt und Index ist [references/README.md](../references/README.md). Bei technischen Aufgaben prüft die KI selbstständig, ob dort passende Fachliteratur vorhanden ist, insbesondere zu Themen wie Go, Rust, Netzwerkarchitektur, Datenbanken und Migrationen, Sicherheit, Nebenläufigkeit, Performance, verteilte Systeme, APIs und Microservices. Die Literatur dient ausschließlich als technische Unterstützung: Die Andora-Dokumentation unter `docs/` bleibt für alle projektspezifischen Architektur-, Design- und Systementscheidungen verbindlich und hat bei Widersprüchen Vorrang. Die Nutzung der Referenzbibliothek ist damit eine dauerhafte Regel dieses Dokuments und muss nicht in jedem einzelnen Arbeitsauftrag ausdrücklich erwähnt werden.
+
 ## Einstieg
 
 | Schritt | Datei | Warum |
@@ -15,7 +19,8 @@
 ## Kategorien
 
 ### 1. KI-Backend & Dev-Prozess
-- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt, OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation).
+- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt, OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation). Außerdem die Kurzregeln zur OpenCode-Session- und Datenbankpflege (Details in `OpenCode_Session_Pflege.md`).
+- **OpenCode_Session_Pflege.md** – Pflege der OpenCode-Sessions/Datenbank (`~/.local/share/opencode/opencode.db`): Sessions sind temporäre Arbeitsdaten; automatische Löschung ohne Rückfrage bei letzter Aktivität älter als 3 Tage, Ausnahme bei nicht in Git gesicherter relevanter Projektarbeit; Datenbankpflege nur ohne parallelen OpenCode-Prozess (Backup, Freelist-/Kompaktierungsprüfung, Integritätsprüfung, Teststart); offizielle OpenCode-Löschmechanismen haben Vorrang; keine Konfiguration, Skills, Provider-/Modell-Einstellungen oder sonstigen nicht sessionspezifischen Daten entfernen.
 - **ai_system.md** – Zentrale KI-Architektur von Andora (Interpreter-Prinzip, Kontexte, asynchrone Verarbeitung, spezialisierte KI-Module).
 - **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, dateibasierte Queue, Recovery, Crafting-Zuordnung.
 - **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **derzeit als lokales Panel umgesetzt (Übergangsstand)**, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.

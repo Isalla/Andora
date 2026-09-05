@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 // main.ts — Einstiegspunkt Andora-Server (dünn, nur Verkabelung)
+//
+// ÜBERGANGSSTAND: Dieser Node.js/TypeScript-Server ist der Übergangsstand
+// (siehe docs/architecture.md). Zielimplementierung ist der Rust-Realm
+// (src/realm-rs). Bestehende Logik dient dort als Referenz und wird
+// schrittweise migriert; dieser Code bleibt bis dahin lauffähig.
 import { config } from './config';
-import { initCharacterDb, closeCharacterDb } from './db/character';
-import { initWorldDataDb, closeWorldDataDb } from './db/worldData';
-import { initRealmStateDb, closeRealmStateDb } from './db/realmState';
+import { initCharacterDb, closeCharacterDb, getCharacterPool } from './db/character';
+import { initWorldDataDb, closeWorldDataDb, getWorldDataPool } from './db/worldData';
+import { initRealmStateDb, closeRealmStateDb, getRealmStatePool } from './db/realmState';
+import { applyMigrations, migrationsDir } from './db/migrations';
 import { setupHealth } from './health';
 import { initWebSocket } from './net';
 import { startParentalPoller, stopParentalPoller } from './parental';
@@ -20,6 +26,22 @@ async function main(): Promise<void> {
   await initCharacterDb();
   await initWorldDataDb();
   await initRealmStateDb();
+  // Automatische, versionsbasierte Migrationen der drei eigenen DBs
+  // (je DB eigene db_version-Historie, keine zentrale Steuerung).
+  // Läuft VOR Health/WebSocket: Schlägt eine Migration fehl, bricht der
+  // catch-Handler unten den Start mit Exit 1 ab — keine Spieler.
+  await applyMigrations(
+    getCharacterPool(), 'CHARACTER_DB', config.characterDb.database,
+    migrationsDir('character', config.migrations.characterDir)
+  );
+  await applyMigrations(
+    getWorldDataPool(), 'WORLD_DATA_DB', config.worldDataDb.database,
+    migrationsDir('world_data', config.migrations.worldDataDir)
+  );
+  await applyMigrations(
+    getRealmStatePool(), 'REALM_STATE_DB', config.realmStateDb.database,
+    migrationsDir('realm_state', config.migrations.realmStateDir)
+  );
   setupHealth();
   initWebSocket();
   // Elternkontrolle: Status-Polling pro beaufsichtigtem Spieler (~10 s).

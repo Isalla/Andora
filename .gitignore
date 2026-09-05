@@ -20,3 +20,7 @@ references/
 .tmp_gotoolchain/
 src/api/authapi
 src/api/build/
+src/login/login
+src/login/config.env
+src/realm-rs/target/
+src/realm-rs/config.env

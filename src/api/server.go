@@ -95,6 +95,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/realms", s.handleRealms)
 	mux.HandleFunc("/handoff/create", s.handleHandoffCreate)
 	mux.HandleFunc("/handoff/validate", s.handleHandoffValidate)
+	// LEGACY: kein separater Worldserver mehr (Kette Auth/API → Login → Realm).
 	mux.HandleFunc("/world/authenticate", s.handleWorldAuthenticate)
 	mux.HandleFunc("/world/heartbeat", s.handleWorldHeartbeat)
 	mux.HandleFunc("/twofactor/status", s.handleTwofactorStatus)

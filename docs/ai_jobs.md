@@ -1,3 +1,9 @@
+PROJEKTFOLDER / PFAAD
+
+Das Projekt liegt unter `/home/pi/Projekt/pimmo` (großes `P`).
+`/home/pi/projekt/pimmo` (kleines `p`) ist KEIN Projektordner und enthält keine Daten.
+Alle Suchvorgänge, Tool-Aufrufe und Projektaufgaben werden ausschließlich in `/home/pi/Projekt/pimmo` mit großem `P` durchgeführt.
+
 AUTONOMES ARBEITEN BEI LANGEN AUFTRÄGEN
 
 Bei einem laufenden Coding-Auftrag arbeitest du selbstständig weiter, bis der Auftrag vollständig abgeschlossen und geprüft wurde.
@@ -67,6 +73,26 @@ Regeln:
   Auslesen aus `/etc/os-release`.
 - Entwicklungs-/Testsystem: Die Test-Binärdateien werden auf einem ARM64-System gebaut
   (arm64, z. B. `go1.x.x.linux-arm64`).
-- Produktions-Binärdateien: Für die Produktion fallen ARM64 und AMD64 an
+  - Produktions-Binärdateien: Für die Produktion fallen ARM64 und AMD64 an
   (CROSS-COMPILIATION von der ARM64-Entwicklungsumgebung nach AMD64, z. B. via
   `GOARCH=amd64 GOOS=linux go build ...`).
+
+OPENCODE-SESSIONS- UND DATENBANKPFLEGE
+
+OpenCode-Sessions sind temporäre Arbeitsdaten, keine dauerhafte Projektdokumentation.
+
+* Alle OpenCode-Sessions mit letzter Aktivität älter als 3 Tage werden automatisch
+  und ohne Rückfrage gelöscht.
+* Ausnahme: keine automatische Löschung, wenn die Session noch nicht in Git
+  gesicherte relevante Projektarbeit enthält (relevante Architektur-/ und
+  Implementierungsstände müssen vorher in `docs/` bzw. Git abgelegt werden).
+* Datenbankpflege der OpenCode-Datenbank (Kompaktierung): nur bei nachweislich
+  relevantem Freelist-/Fragmentations-Bestand, vorher Backup, nur ohne parallelen
+  OpenCode-Prozess, danach Integritätsprüfung (`PRAGMA integrity_check`) und
+  testweiser Start.
+* Wenn OpenCode einen offiziellen Löschmechanismus anbietet, hat dieser Vorrang
+  vor direkten SQLite-Eingriffen.
+* Konfigurationen, Skills, Provider-/Modelleinstellungen und sonstige
+  nicht sessionspezifische Daten werden durch die Bereinigung nicht entfernt.
+
+Details: `docs/OpenCode_Session_Pflege.md`.

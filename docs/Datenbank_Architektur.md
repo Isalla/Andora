@@ -829,13 +829,14 @@ realms
 → auth
 
 world_servers
-→ auth
+→ auth (LEGACY: kein separater Worldserver mehr; Tabelle bleibt aus
+Kompatibilität bestehen, nichts Neues darauf aufbauen)
 
 world_server_credentials
-→ auth
+→ auth (LEGACY, siehe world_servers)
 
 world_server_heartbeats
-→ auth
+→ auth (LEGACY, siehe world_servers)
 
 characters
 → realm_state_<realm>
@@ -973,6 +974,37 @@ Dienst normal starten
 ```
 
 Schlägt eine notwendige Migration fehl, wird der Start des betroffenen Dienstes abgebrochen und der Fehler klar geloggt.
+
+### Tatsächliche Umsetzung (Realm-Server)
+
+Der Realm-Server (`src/realm`, `src/db/migrations.ts`) wendet beim Start automatisch die Migrationen aller eigenen Datenbanken an — `character`, `world_data` und `realm_state_<realm>`, je mit eigenem Verzeichnis (`src/realm/db/<bereich>/migrations/`) und eigener `db_version`-Tabelle in der jeweiligen Datenbank. Das ist derselbe Mechanismus wie beim Auth-Service (gleiches Dateiformat `NNN_name.sql`, gleiche `db_version`-Struktur, gleiche Reihenfolge- und Abbruchregeln), kein paralleles System. Es gibt keine zentrale globale Migrationssteuerung: Jeder Realm-Prozess migriert ausschließlich seine konfigurierten Datenbanken.
+
+```text
+Realm-Server startet
+      ↓
+Pools verbinden (character, world_data, realm_state_<realm>)
+      ↓
+je DB: db_version prüfen/erzeugen, angewendete Versionen laden
+      ↓
+je DB: Dateien prüfen (gültige Namen, eindeutige Nummern, lückenlose
+Folge ab 1, jede eingetragene Version hat eine passende Datei)
+      ↓
+je DB: fehlende Migrationen numerisch aufsteigend anwenden, je Migration
+in einer Transaktion (Statements + db_version-Eintrag)
+      ↓
+erst danach: Health/WebSocket starten (Spieler zulassen)
+```
+
+Abweichungen führen zum sofortigen Startabbruch mit klarer Fehlermeldung (Exit 1, keine Spieler): ungültige Dateinamen, doppelte Nummern, Lücken in der Nummerierung, eingetragene Versionen ohne passende Datei (Schema-Drift/Downgrade), fehlende Migrationsverzeichnisse, fehlgeschlagene Statements (mit Rollback) sowie als destruktiv markierte Migrationen ohne Freigabe.
+
+Details:
+
+* Dateinamen werden am **ersten** Unterstrich getrennt (`004_world_servers.sql` → Version 4, Tag `world_servers`); der Tag darf weitere Unterstriche enthalten.
+* `USE`-Anweisungen in Migrationsdateien werden ignoriert: Die Verbindung liegt bereits auf der konfigurierten Datenbank (z. B. `realm_state_de1`), während Dateien den kanonischen Namen tragen (z. B. `USE realm_state;`).
+* Transaktionen gelten, soweit MariaDB dies zulässt: DDL (CREATE/ALTER/DROP) führt einen impliziten Commit aus und ist nicht rückrollbar; die Dateien verwenden deshalb `IF NOT EXISTS`/`IF EXISTS`, damit ein abgebrochener Lauf beim nächsten Start sauber fortgesetzt wird. Der `db_version`-Eintrag wird erst nach allen Statements geschrieben — eine nur teilweise angewendete Migration wird nie als angewendet verbucht.
+* Dateien mit einer Kopfzeile `-- destructive: <Grund>` laufen nur mit `ALLOW_DESTRUCTIVE_MIGRATIONS=1` in `config.env`. Die Freigabe darf ausschließlich im Realm-Update-Ablauf nach erfolgtem Backup gesetzt werden (siehe `Deployment_Betriebsarchitektur.md`, Realm-Updates).
+* Verzeichnis-Overrides: `CHARACTER_MIGRATIONS_DIR`, `WORLD_DATA_MIGRATIONS_DIR`, `REALM_STATE_MIGRATIONS_DIR` (analog zu `AUTHAPI_MIGRATIONS_DIR` beim Auth-Service).
+* Übergangsstand: `character` und `world_data` werden derzeit noch als eigene Datenbanken mit eigenen `db_version`-Tabellen migriert. Bei der dokumentierten Zusammenführung in `realm_state_<realm>` wandern deren Migrationsdateien in `src/realm/db/realm_state/migrations/`; der Runner selbst bleibt unverändert.
 
 ### Zuständigkeit für auth
 

@@ -560,6 +560,10 @@ type worldAuthResponse struct {
 
 // handleWorldAuthenticate checks the credential of a registered
 // world server (constant-time compare against the stored value).
+//
+// LEGACY: kein separater Worldserver mehr (Kette Auth/API → Login → Realm).
+// Der Realm-Server authentifiziert Spieler per Handoff; diese Endpunkte
+// werden von keinem Dienst verwendet und bleiben nur kompatibel bestehen.
 func (s *Server) handleWorldAuthenticate(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permWorldAuthenticate)
 	if !ok {
@@ -596,6 +600,8 @@ type worldHeartbeatRequest struct {
 
 // handleWorldHeartbeat re-authenticates the world server and records
 // its status. ok=false marks the server offline.
+//
+// LEGACY: siehe handleWorldAuthenticate.
 func (s *Server) handleWorldHeartbeat(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permWorldHeartbeat)
 	if !ok {

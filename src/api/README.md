@@ -60,8 +60,8 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
 | GET/POST | `/realms` | `realm.list` | `{realms: [...]}` — nur Betriebsdaten (Name, Sprache, Region, Status) |
 | POST | `/handoff/create` | `handoff.create` | `{handoff_token, expires_at}` — bindet Account→Realm, `HANDOFF_TTL_SECONDS` |
 | POST | `/handoff/validate` | `handoff.validate` | `{valid, account_id, realm_id}` — validiert **und** verbraucht das Token (zweiter Aufruf → `{valid:false}`) |
-| POST | `/world/authenticate` | `world.authenticate` | `{valid, realm_id, name}` — constant-time Abgleich des World-Server-Secrets |
-| POST | `/world/heartbeat` | `world.heartbeat` | `{recorded}` — erneut authentifiziert und schreibt `last_heartbeat`, `status` (online/offline), `version`, `current_players` |
+| POST | `/world/authenticate` | `world.authenticate` | **LEGACY** (kein separater Worldserver mehr) — `{valid, realm_id, name}`, nur kompatibel erhalten |
+| POST | `/world/heartbeat` | `world.heartbeat` | **LEGACY** (kein separater Worldserver mehr) — `{recorded}`, nur kompatibel erhalten |
 | POST | `/twofactor/status` | `account.two_factor` | `{enabled, recovery_codes_available}` — 2FA-Zustand ohne geheime Daten |
 | POST | `/twofactor/setup` | `account.two_factor` | `{enabled, provisioning_uri, recovery_codes[10]}` — aktiviert 2FA, speichert den verschlüsselten TOTP-Secret, erzeugt 10 einmalige Recovery-Codes; bereits aktiviert → 409 |
 | POST | `/twofactor/enable` | `account.two_factor` | `{enabled}` — schaltet 2FA an, behält Secret/Codes |

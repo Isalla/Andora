@@ -428,6 +428,87 @@ func TestParentalRemove(t *testing.T) {
 	}
 }
 
+func TestParentalStatusSessionGating(t *testing.T) {
+	srv := testServer(t)
+	fs := srv.store.(*fakeStore)
+	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}
+	addAccount(t, fs, "kid11", "longenough1", "k11@example.com", false)
+	addAccount(t, fs, "kid12", "longenough1", "k12@example.com", false)
+	setupParental(t, client, 1, 60, "")
+
+	otherSession, _, err := fs.CreateSession(context.Background(), 2, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownSession, _, err := fs.CreateSession(context.Background(), 1, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1) foreign session, fresh budget: pure read, no accrual, not blocked
+	rec := client.post(t, "/parental/status", map[string]any{"account_id": 1, "session_id": otherSession})
+	st := decode(t, rec)
+	if st["blocked"] != false {
+		t.Fatalf("foreign session must not block: %v", st)
+	}
+	if u := fs.usage[1]; u != nil && u[parentalDayString(time.Now())] != nil {
+		t.Fatalf("foreign session must not accrue usage: %+v", u)
+	}
+
+	// exhaust the budget server-side; the helper also stamps a poll,
+	// so clear it to keep the step-3 assertion meaningful.
+	day := parentalDayKey(time.Now())
+	if err := fs.AddParentalUsageSeconds(context.Background(), 1, day, 3600, time.Now(), 60); err != nil {
+		t.Fatal(err)
+	}
+	fs.mu.Lock()
+	if u := fs.usage[1][parentalDayString(day)]; u != nil {
+		u.LastPolledAt = nil
+	}
+	fs.mu.Unlock()
+
+	// 2) no session at all: blocked, no buffer, no force logout
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1})
+	st = decode(t, rec)
+	if st["blocked"] != true {
+		t.Fatalf("exhausted budget must block without session: %v", st)
+	}
+	if st["buffer_until"] != nil || st["force_logout"] == true {
+		t.Fatalf("without session no buffer/logout: %v", st)
+	}
+
+	// 3) foreign session on exhausted budget: still only a read
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1, "session_id": otherSession})
+	st = decode(t, rec)
+	if st["blocked"] != true || st["buffer_until"] != nil || st["force_logout"] == true {
+		t.Fatalf("foreign session must not start buffer or logout: %v", st)
+	}
+	row := fs.usage[1]
+	if row == nil || row[parentalDayString(time.Now())] == nil {
+		t.Fatal("usage row missing")
+	}
+	if row[parentalDayString(time.Now())].LastPolledAt != nil {
+		t.Fatalf("foreign session must not stamp polls: %+v", row)
+	}
+
+	// 4) own live session on exhausted budget: grace buffer starts
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1, "session_id": ownSession})
+	st = decode(t, rec)
+	if st["blocked"] != true || st["buffer_until"] == nil || st["force_logout"] == true {
+		t.Fatalf("own session must start buffer: %v", st)
+	}
+
+	// 5) buffer fully elapsed, session still live: force logout
+	past := time.Now().Add(-parentalBufferDuration(time.Now()) - time.Minute)
+	u := fs.usage[1][parentalDayString(time.Now())]
+	u.BufferStartedAt = &past
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1, "session_id": ownSession})
+	st = decode(t, rec)
+	if st["force_logout"] != true {
+		t.Fatalf("elapsed buffer + own session must force logout: %v", st)
+	}
+}
+
 func TestParentalPermissionDeniedAndNotFound(t *testing.T) {
 	srv := testServer(t)
 	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}

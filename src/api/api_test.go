@@ -422,6 +422,25 @@ func TestHandoffSingleUse(t *testing.T) {
 	}
 }
 
+func TestHandoffExpiry(t *testing.T) {
+	srv := testServer(t)
+	fs := srv.store.(*fakeStore)
+	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}
+	addAccount(t, fs, "mover2", "longenough1", "m2@example.com", false)
+	fs.realms = []Realm{{ID: 1, Name: "de1", Language: "de", Region: "eu", Enabled: true}}
+
+	// already-created handoff (TTL expired)
+	token, _, err := fs.CreateHandoff(context.Background(), 1, 1, -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := client.post(t, "/handoff/validate", map[string]any{"handoff_token": token})
+	body := decode(t, rec)
+	if body["valid"] != false {
+		t.Fatalf("expired handoff must not validate: %v", body)
+	}
+}
+
 func TestWorldServerAuthAndHeartbeat(t *testing.T) {
 	srv := testServer(t)
 	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}

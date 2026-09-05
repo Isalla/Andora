@@ -4,7 +4,7 @@
 // {seq, type, data}. JSON hier ist OK, da Payloads klein sind (Positions-Pakete ~60 Byte).
 
 export const C2S = {
-  HELLO: 1,        // {session_id, char_id, lang}
+  HELLO: 1,        // {session_id, handoff_token, char_id, lang}
   MOVE: 2,         // {dir:[x,y], seq}
   ATTACK: 3,       // {target_id, skill_id}
   PICKUP: 4,       // {item_id}

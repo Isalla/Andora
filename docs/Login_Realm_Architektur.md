@@ -7,7 +7,7 @@ Dieses Dokument beschreibt die grundlegende Architektur für:
 * Accounts und Authentifizierung
 * Login
 * Realm-Auswahl
-* World-Server
+* Realm-Server (kein separater Worldserver-Dienst; Zielkette Auth/API → Login → Realm)
 * Character-Daten
 * World-Daten
 * persistente Realm-Zustände
@@ -15,7 +15,7 @@ Dieses Dokument beschreibt die grundlegende Architektur für:
 * Fresh-Start-Regeln
 * zukünftige Zugriffe einer Webseite
 
-Die Architektur soll von Beginn an mehrere Realms und mehrere technische World-Server ermöglichen, ohne spätere Erweiterungen unnötig zu erschweren.
+Die Architektur soll von Beginn an mehrere Realms ermöglichen, ohne spätere Erweiterungen unnötig zu erschweren. Ein Realm wird vom zuständigen Realm-Server ausgeführt (ggf. mehrere technische Realm-Prozesse mit gemeinsamem Realm-Zustand); einen separaten Worldserver-Dienst in der Kette gibt es nicht.
 
 ---
 
@@ -41,7 +41,8 @@ Character-System
 Realm
     │
     ├── eigener Weltzustand
-    └── ein oder mehrere World-Server
+    └── Realm-Server (führt den Realm aus; ggf. mehrere
+        technische Prozesse mit gemeinsamem Realm-Zustand)
 ```
 
 Dabei gilt:
@@ -50,7 +51,7 @@ Dabei gilt:
 
 > **Ein Realm ist eine eigenständige persistente Welt.**
 
-> **Ein World-Server führt einen Realm technisch aus.**
+> **Der Realm-Server führt seinen Realm technisch aus; es gibt keinen separaten Worldserver-Dienst.**
 
 ---
 
@@ -64,9 +65,8 @@ Zu seinen grundlegenden Aufgaben gehören:
 * Accountstatus prüfen
 * Sessions verwalten
 * verfügbare Realms bereitstellen
-* World-Server authentifizieren
-* World-Server-Status verwalten
-* später sichere Übergabe an einen Realm/World-Server
+* Handoff-Tokens für die sichere Übergabe an einen Realm verwalten
+* (LEGACY: World-Server-Authentifizierung/-Status — kein separater Worldserver mehr)
 
 Der Spielclient greift nicht direkt auf die Account-Datenbank zu.
 
@@ -144,10 +144,16 @@ Stattdessen erfolgt der Zugriff über kontrollierte Schnittstellen.
 ```text
 Spielclient ──────────┐
                       │
+Login-Service ────────┼──► Account/Auth-Service ──► Account-DB
+                      │
 Webseite ─────────────┼──► Account/Auth-Service ──► Account-DB
                       │
-World-Server ─────────┘
+Realmserver ──────────┘
 ```
+
+Zielkette für den Spieleinstieg: `Auth/API → Login → Realm` (der
+Login-Service ist in `src/login` implementiert; es gibt keinen
+separaten Worldserver-Dienst).
 
 Dabei können unterschiedliche API-Bereiche und Berechtigungen verwendet werden.
 
@@ -156,22 +162,26 @@ Beispielsweise:
 ```text
 Account/Auth-Service
 
-├── Client/Login API
+├── Client/Login API (Login-Service)
 │   ├── Login
 │   ├── Session
 │   ├── Realm-Liste
-│   └── Realm-Auswahl
+│   ├── Realm-Auswahl
+│   └── Handoff-Ausstellung
 │
-├── Internal World API
-│   ├── World-Server-Authentifizierung
-│   ├── Registrierung
-│   ├── Heartbeat
-│   └── Session-/Tokenprüfung
+├── Realm API (Realmserver)
+│   ├── Handoff-Tokenprüfung (einmalig, realm-gebunden)
+│   ├── Sessionprüfung
+│   └── Elternkontroll-Abfragen
 │
 └── spätere Web API
     ├── Accountverwaltung
     └── ausdrücklich freigegebene Accountfunktionen
 ```
+
+(LEGACY: die frühere „Internal World API" mit
+World-Server-Authentifizierung/-Registrierung/-Heartbeat entfällt —
+`/world/*`-Endpunkte bleiben nur kompatibel bestehen.)
 
 Die Webseite wird erst später entwickelt.
 
@@ -179,85 +189,76 @@ Die API-Grenze wird trotzdem bereits bei der Serverarchitektur berücksichtigt.
 
 ---
 
-# 6. World-Server-Authentifizierung
+# 6. Realm-Übergabe per Handoff (kein separater Worldserver)
 
-Ein World-Server darf sich nicht selbstständig als offizieller Andora-Server eintragen.
-
-Jeder erlaubte World-Server muss vorher im Account/Auth-System registriert worden sein.
-
-Beispiel:
+Ein Realm-Server trägt sich nicht selbstständig als offizieller
+Andora-Server ein: Der Spieler gelangt ausschließlich über eine
+sichere Übergabe (Handoff) vom Login-Service auf seinen Realm.
 
 ```text
-world_servers
-
-world_server_id
-realm_id
-name
-credential
-enabled
-host
-port
-version
-last_heartbeat
-current_players
-max_players
+Login stellt Handoff aus (handoff.create: account_id + realm_id,
+einmalig, kurze TTL) und stellt dazu die Session aus
+        │
+        ▼
+Client verbindet zum Realm-Server (HELLO: session_id + handoff_token)
+        │
+        ▼
+Realm-Server prüft+verbraucht den Handoff (handoff.validate, einmalig)
+        │
+        ▼
+realm_id gebunden? (REALM_ID des Servers muss passen)
+        │
+        ├── Nein → ablehnen, Verbindung schließen
+        │
+        ▼
+session_id vorhanden + gültig? (session.validate)
+        │
+        ├── nein → ablehnen, Verbindung schließen
+        │
+        ▼
+session.account_id == handoff.account_id?
+        │
+        ├── nein → ablehnen, Verbindung schließen
+        │
+        └── ja → account_id übernehmen, Charakter betritt Andora
 ```
 
-Der World-Server authentifiziert sich beim Start.
+Ein fremder Server kann sich dadurch nicht einfach selbst in die offizielle Realm-/Serverstruktur eintragen; ein abgefangenes Token ist nur einmal und nur für den gebundenen Realm gültig.
 
-```text
-World-Server startet
-        │
-        ▼
-Authentifizierung beim Account/Auth-Service
-        │
-        ▼
-Server-ID gültig?
-        │
-        ▼
-Credential gültig?
-        │
-        ▼
-Server aktiviert?
-        │
-        ├── Nein → ablehnen
-        │
-        └── Ja
-             │
-             ▼
-        Server registrieren
-```
+Der Einstieg ist fail-closed: Fehlt der Handoff, ist er ungültig, verbraucht, ungültig abgelaufen oder an einen anderen Realm gebunden, fehlt die `session_id`, ist die Session ungültig/abgelaufen oder gehört die Session zu einem anderen Account als der Handoff, lehnt der Realm-Server den Einstieg ab und schließt die Verbindung. Nur wenn alle Prüfungen gleichzeitig erfolgreich sind, wird der Account in den Realm gelassen. Dabei prüft der Realm-Server ausschließlich über die signierte Auth-API; eine direkte Account-/Session-DB-Zugriff hat er nicht.
 
-Ein fremder Server kann sich dadurch nicht einfach selbst in die offizielle Realm-/Serverstruktur eintragen.
-
-Server-Credentials werden nicht unnötig im Klartext in der Datenbank gespeichert.
+(LEGACY: Die frühere Registrierung separater World-Server mit eigenen
+Server-Credentials (`world_servers`-Tabelle, `/world/authenticate`)
+wird von keinem Dienst mehr verwendet und bleibt nur kompatibel
+bestehen. Server-Credentials werden nicht unnötig im Klartext in der
+Datenbank gespeichert.)
 
 ---
 
 # 7. Heartbeat
 
-Ein registrierter World-Server meldet regelmäßig seinen Zustand beim Account/Auth-Service.
+Der Realm-Server und der Spielclient halten ihre Verbindung über den
+Spiel-Heartbeat aufrecht (`HEARTBEAT` → `SYNC`; siehe Protokoll in
+`shared/protocol.js`). Bleiben die Lebenszeichen eines Spielers aus,
+gilt er als getrennt (Position speichern, DESPAWN, Registry putzen).
 
-Beispielsweise:
+Der Realm-Server meldet zusätzlich seinen Betriebszustand über
+`GET /health` und `GET /status` (Spielerzahl, Uptime, Tick-Statistiken).
+Bleibt ein Realm unerreichbar, vermittelt der Login dorthin keine
+neuen Spieler mehr (deaktivierte/nicht gelistete Realms lehnt bereits
+`/handoff` ab).
 
-```text
-world_server_id
-status
-current_players
-max_players
-version
-last_heartbeat
-```
-
-Bleibt der Heartbeat über einen definierten Zeitraum aus, gilt der World-Server als nicht verfügbar.
-
-Neue Spieler werden dann nicht mehr dorthin vermittelt.
+(LEGACY: Der frühere World-Server-Heartbeat (`world_servers`-Tabelle,
+`/world/heartbeat`) wird von keinem Dienst mehr verwendet und bleibt
+nur kompatibel bestehen.)
 
 ---
 
-# 8. Realm und World-Server
+# 8. Realm und Realm-Server
 
-Realm und World-Server sind unterschiedliche Dinge.
+Realm (persistente Welt) und Realm-Server (ausführender Dienst) sind
+unterschiedliche Dinge; einen separaten Worldserver-Dienst gibt es
+nicht.
 
 ## Realm
 
@@ -289,18 +290,20 @@ Beispielsweise könnte `DE-1` bereits weit in EXP1 fortgeschritten sein, währen
 
 Realm-Versionen können parallel existieren, beispielsweise als `Live`, `Classic`, `Test` oder `Event`. Jede Realm-Version besitzt ihre eigene statische Inhaltsversion und ist eigenständig aktualisierbar (siehe `Deployment_Betriebsarchitektur.md`). Die Realm-Auswahl zeigt dem Spieler den jeweiligen Realm inklusive seiner Inhaltsversion.
 
-## World-Server
+## Realm-Server
 
-Ein World-Server ist dagegen eine technische Instanz, welche einen Realm ausführt.
+Der Realm-Server ist dagegen der Dienst, welcher einen Realm ausführt
+(Zielimplementierung in Rust, `src/realm-rs`; der Node.js/TypeScript-Code
+unter `src/realm/` ist der Übergangsstand).
 
-Ein Realm kann später bei Bedarf von mehreren technischen World-Prozessen getragen werden.
+Ein Realm kann später bei Bedarf von mehreren technischen Realm-Prozessen getragen werden.
 
 ```text
 Realm DE-1
     │
-    ├── World-Prozess A
-    ├── World-Prozess B
-    └── gemeinsamer Realm-Zustand
+    ├── Realm-Prozess A
+    ├── Realm-Prozess B
+    └── gemeinsamer Realm-Zustand (realm_state_de1)
 ```
 
 Die technische Skalierung eines Realms muss für den Spieler nicht sichtbar sein.
@@ -644,8 +647,8 @@ Daraus folgen unter anderem:
 * Schlüssel getrennt von verschlüsselten Daten
 * kein direkter Account-DB-Zugriff durch die Webseite
 * kein direkter Account-DB-Zugriff durch den Spielclient
-* authentifizierte World-Server
-* keine selbstständige Aufnahme fremder World-Server
+* realm-gebundene Einmal-Handoffs statt separater Server-Registrierung
+* keine selbstständige Aufnahme fremder Server in die Realmstruktur
 * getrennte Berechtigungen für unterschiedliche APIs
 * kontrollierte Character-Transfers
 * serverseitige Prüfung von Fresh-Start-Regeln
@@ -688,12 +691,12 @@ Realmregeln prüfen
       └── Character-Zuordnung
       │
       ▼
-sichere Übergabe
-      │
-      ▼
-World-Server des Realms
-      │
-      ▼
+sichere Übergabe (Handoff, realm-gebunden, einmalig)
+       │
+       ▼
+Realm-Server des Realms (Handoff prüfen+verbrauchen)
+       │
+       ▼
 Charakter betritt Andora
 ```
 
@@ -707,7 +710,7 @@ Charakter betritt Andora
 
 > **Die statische Inhaltsversion eines Realms beschreibt, was existieren kann. Realm-State beschreibt, was tatsächlich passiert ist.**
 
-> **World-Server führen einen Realm technisch aus; sie definieren nicht dessen dauerhafte Identität.**
+> **Der Realm-Server führt seinen Realm technisch aus; er definiert nicht dessen dauerhafte Identität. Einen separaten Worldserver-Dienst gibt es nicht.**
 
 > **Neue Realms beginnen als echte neue Welten und können durch eine Fresh-Start-Sperre vor dem unmittelbaren Import alter Machtstrukturen geschützt werden.**
 
@@ -715,7 +718,7 @@ Charakter betritt Andora
 
 > **Sprache, Region und Latenz informieren den Spieler – die Wahl des Realms trifft der Spieler selbst.**
 
-> **Webseite, Client und World-Server greifen ausschließlich über dafür vorgesehene Schnittstellen auf Account-Funktionen zu.**
+> **Webseite, Client, Login-Service und Realm-Server greifen ausschließlich über dafür vorgesehene Schnittstellen auf Account-Funktionen zu.**
 
 # Schutz sensibler Daten im Arbeitsspeicher
 
@@ -741,9 +744,9 @@ Danach wird es nicht weiter benötigt.
 
 Der Account/Auth-Service gibt Passwörter niemals an andere Dienste weiter.
 
-Insbesondere erhalten World-Server niemals:
+Insbesondere erhalten Login-Service und Realm-Server niemals:
 
-- Klartextpasswörter
+- Klartextpasswörter (der Login leitet nur das eingegebene Passwort weiter)
 - Passwort-Hashes
 - Passwort-Salts
 - Passwort-Reset-Daten
@@ -761,7 +764,7 @@ Die entschlüsselte E-Mail-Adresse wird nur dann erzeugt, wenn eine Funktion sie
 - E-Mail-Änderung
 - Versand einer notwendigen Account-Nachricht
 
-World-Server benötigen keine E-Mail-Adressen und bekommen diese daher niemals übertragen.
+Login-Service und Realm-Server benötigen keine E-Mail-Adressen und bekommen diese daher niemals übertragen.
 
 ---
 
@@ -779,26 +782,28 @@ Account/Auth-Service:
 - Sessions
 - Authentifizierungsdaten
 
-Realm-Server (World-Server des Realms):
+Login-Service (eigener Dienst, `src/login`):
+- Benutzername/E-Mail-Lookup (nur zur Weiterleitung an die Auth-API)
+- eingegebenes Passwort (nur zur Weiterleitung, nie gespeichert)
+- Session- und Handoff-Tokens (nur zur Weiterleitung/Prüfung)
+
+Realm-Server des Realms:
 - account_id
 - character_id
+- handoff_token (einmalig, realm-gebunden)
+- session_id (für Elternkontroll-Polling)
+- notwendige Spielberechtigungen
 - Charakterdaten (in realm_state_<realm>)
 
-World-Server:
-- account_id
-- character_id
-- gültige World-Session
-- notwendige Spielberechtigungen
-
-World-Server erhalten keine sensiblen Accountdaten.
+Realm-Server erhalten keine sensiblen Accountdaten.
 
 ---
 
-## World-Handoff
+## World-Handoff (Realm-Übergabe)
 
-Beim Wechsel vom Login-/Account-Service zum World-Server werden keine sensiblen Accountdaten übertragen.
+Beim Wechsel vom Login-Service zum Realm-Server werden keine sensiblen Accountdaten übertragen.
 
-Der World-Server erhält beispielsweise nur:
+Der Realm-Server erhält beispielsweise nur:
 
 account_id
 character_id
@@ -806,21 +811,21 @@ handoff_token
 session_id
 permissions
 
-Der World-Server prüft, ob der Handoff gültig ist.
+Der Realm-Server prüft, ob der Handoff gültig und an seinen Realm gebunden ist, und verbraucht ihn dabei (einmalig).
 
 Danach wird der Handoff-Token ungültig bzw. läuft nach kurzer Zeit automatisch ab.
 
 ---
 
-## Schutz bei kompromittierten World-Servern
+## Schutz bei kompromittierten Realm-Servern
 
-Ein kompromittierter World-Server soll nicht automatisch einen vollständigen Account-Datenverlust ermöglichen.
+Ein kompromittierter Realm-Server soll nicht automatisch einen vollständigen Account-Datenverlust ermöglichen.
 
 Da dort keine Passwörter, Passwort-Hashes, E-Mail-Adressen oder Account-Verschlüsselungsschlüssel benötigt werden, sollen diese Daten dort auch niemals vorhanden sein.
 
 Damit gilt:
 
-> Ein World-Server kennt den Spieler, aber nicht seine sensiblen Accountdaten.
+> Ein Realm-Server kennt den Spieler, aber nicht seine sensiblen Accountdaten.
 
 ---
 
@@ -842,7 +847,7 @@ Sie dürfen nicht:
 
 - gemeinsam mit einem Datenbank-Backup gespeichert werden
 - in Git eingecheckt werden
-- an World-Server verteilt werden
+- an Login-/Realm-Server verteilt werden
 - an den Spielclient übertragen werden
 - unnötig an den Webserver weitergegeben werden
 
@@ -860,7 +865,7 @@ Authentifizierungs- und Übergabe-Tokens sollen:
 - möglichst nur für einen bestimmten Zweck gelten
 - nach Verwendung ungültig werden können
 
-Ein World-Handoff-Token ist beispielsweise nur für den Übergang zu einem bestimmten World-Server oder Realm gültig.
+Ein Handoff-Token ist beispielsweise nur für den Übergang zu einem bestimmten Realm gültig (realm-gebunden, einmalig).
 
 ---
 
@@ -874,7 +879,7 @@ Das Sicherheitsziel lautet deshalb:
 
 > Ein kompromittierter Prozess soll nur die sensiblen Daten preisgeben können, die dieser Prozess tatsächlich benötigt.
 
-Ein RAM-Dump eines World-Servers darf daher beispielsweise keine komplette Accountdatenbank, E-Mail-Liste oder Passwort-Hashes enthalten.
+Ein RAM-Dump eines Login- oder Realm-Servers darf daher beispielsweise keine komplette Accountdatenbank, E-Mail-Liste oder Passwort-Hashes enthalten.
 
 Ein RAM-Dump des Account/Auth-Servers kann dagegen aktuell verwendete sensible Daten enthalten und muss deshalb als besonders kritischer Sicherheitsvorfall behandelt werden.
 

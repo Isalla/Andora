@@ -318,7 +318,10 @@ func applyAuthMigrations(ctx context.Context, db *sql.DB, cfg *Config) error {
 
 	for _, name := range names {
 		base := strings.TrimSuffix(name, ".sql")
-		dot := strings.LastIndex(base, "_")
+		// Split at the FIRST underscore: names are NNN_rest_of_name.sql
+		// and the rest may itself contain underscores
+		// (e.g. 004_world_servers.sql -> 004 / world_servers).
+		dot := strings.Index(base, "_")
 		if dot == -1 {
 			return fmt.Errorf("migration %q must contain an underscore separating number and name", name)
 		}

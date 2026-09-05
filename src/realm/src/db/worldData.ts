@@ -4,6 +4,12 @@
 // Getrennt von auth, character und realm_state (eigene WORLD_DATA_DB_*-Konfiguration,
 // eigener Pool). Im Server-Betrieb wird world_data nur gelesen; Aenderungen
 // erfolgen kontrolliert ueber migrations/ und seed/ (Deployment/Content-Updates).
+//
+// ÜBERGANGSSTAND (Alt-Architektur): Eine zentrale world_data-Datenbank ist
+// NICHT Zielarchitektur — statische Definitionen gehören realmbezogen in
+// realm_state_<realm> (siehe docs/Datenbank_Architektur.md). Dieser Pool
+// (derzeit ohne fachliche Queries, nur verbunden) darf nicht ausgebaut
+// werden und entfällt mit dem Rust-Realm (src/realm-rs).
 import { Pool } from 'mysql2/promise';
 import { config } from '../config';
 import { DbPoolHandle, openPool, closePool, getPool } from './pool';
