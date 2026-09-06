@@ -24,6 +24,7 @@ Andora ist ein Fantasy-MMORPG mit einer isometrischen Spielwelt. Der Client wird
 * `shared/` – gemeinsames Netzwerkprotokoll und Definitionen (Client und Server lesen dieselben Dateien)
 * `i18n/` – Übersetzungen und Lokalisierung
 * `monitor/` – lokales Monitoring-/Admin-Panel (Übergangs-/Legacy-Stand)
+* `web/andora-monitor/` – PHP-Implementierung des lokalen Monitoring-Panels
 * `deploy/` – Deployment-Vorlagen (NUR Vorlagen: systemd-Units, Konfiguration, sudoers; Zielbetrieb in `docs/Deployment_Betriebsarchitektur.md`)
 * `docs/` – Architektur-, System- und Spieldesign-Dokumentation; Einstiegspunkt: `docs/README.md`
 
@@ -55,16 +56,20 @@ Build- und Test-Toolchains werden aus `.tmp/` des Projektroots verwendet (`docs/
 
 ## Monitoring & Admin-Panel
 
-Das aktuelle lokale Admin-/Monitoring-Panel (`monitor/`) ist ein Übergangs-/Legacy-Stand und ausschließlich für Administration und Betrieb vorgesehen, nicht Bestandteil des Spielerclients. Die verbindliche Zielarchitektur (zentrales Panel, Andora-Agent pro Server, mTLS, `andora-updater`) steht in `docs/Deployment_Betriebsarchitektur.md`.
+Das aktuelle lokale Admin-/Monitoring-Panel (`monitor/`) ist ein Übergangs-/Legacy-Stand und ausschließlich für Administration und Betrieb vorgesehen, nicht Bestandteil des Spielerclients. Zusätzlich existiert eine PHP-Implementierung unter `web/andora-monitor/`, die als fertiggestellt gilt und denselben Zweck erfüllt. Die verbindliche Zielarchitektur (zentrales Panel, Andora-Agent pro Server, mTLS, `andora-updater`) steht in `docs/Deployment_Betriebsarchitektur.md`.
 
 ```bash
 cd monitor
 node server.js
+# oder (PHP-Implementierung):
+cd web/andora-monitor
+php -S 127.0.0.1:3003 -t public
 ```
 
 Produktionsbezogene Konfigurationen und Vorlagen befinden sich unter `deploy/` (NUR Vorlagen; Installation manuell auf dem Zielsystem, siehe `deploy/README.md`).
 
 Weitere technische Details befinden sich in der Dokumentation unter `docs/` (Eintritt: `docs/README.md`).
+```
 
 ## Entwicklungsprinzip
 

@@ -15,7 +15,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 | 1. Projektübergreifend | [project_overview.md](./project_overview.md) | Grundidee, Plattformen, Server-Autorität, alle Kernsysteme in übergeordneter Form |
 | 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.5, fünf Serverdienste: Go-API/Auth, Login, Realm/Rust, Coordinator, Voice; MariaDB, WebSocket), Zielplattformen (linux-amd64/arm64), Verzeichnis- und exp1_/exp2_-Präfix-Regeln |
 | 3. KI-Grundregel | [ai_system.md](./ai_system.md) | Zentrale KI-Architektur: Server ist Autorität, AI-/Narrative-Context, spezialisierte KI-Systeme, Budget, Fallbacks |
-| 4. Implementierungsstand | [Projekt-Status.md](./Projekt-Status.md) | Tatsächlicher Code-Stand aller Dienste/Systeme nach Statusstufen (Fertig … Nur spezifiziert, Legacy/Transition); Pflicht-Aktualisierung durch die Coding-KI bei jeder Implementierungsänderung |
+| 4. Implementierungsstand | [Projekt-Status.md](./Projekt-Status.md) | Sehr kurze Übersicht, welche größeren Funktionen/Systeme bereits umgesetzt sind und welche noch fehlen; technische Details in den Detaildokumenten; Pflicht-Aktualisierung durch die Coding-KI bei jeder Implementierungsänderung |
 
 ## Kategorien
 
@@ -24,7 +24,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **OpenCode_Session_Pflege.md** – Pflege der OpenCode-Sessions/Datenbank (`~/.local/share/opencode/opencode.db`): Sessions sind temporäre Arbeitsdaten; automatische Löschung ohne Rückfrage bei letzter Aktivität älter als 3 Tage, Ausnahme bei nicht in Git gesicherter relevanter Projektarbeit; Datenbankpflege nur ohne parallelen OpenCode-Prozess (Backup, Freelist-/Kompaktierungsprüfung, Integritätsprüfung, Teststart); offizielle OpenCode-Löschmechanismen haben Vorrang; keine Konfiguration, Skills, Provider-/Modell-Einstellungen oder sonstigen nicht sessionspezifischen Daten entfernen.
 - **ai_system.md** – Zentrale KI-Architektur von Andora (Interpreter-Prinzip, Kontexte, asynchrone Verarbeitung, spezialisierte KI-Module).
 - **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, dateibasierte Queue, Recovery, Crafting-Zuordnung.
-- **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **derzeit als lokales Panel umgesetzt (Übergangsstand)**, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.
+- **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **PHP-Implementierung in `web/andora-monitor` (fertiggestellt) und Node-Legacy-Referenz (`monitor/`)**, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.
 - **Deployment_Betriebsarchitektur.md** – Verbindliche Betriebs-/Deployment-Architektur: fünf getrennte Serverdienste (eigenständig betreibbar, linux-amd64 + linux-arm64), zentrales Admin-/Deployment-Panel, Andora-Agent pro Server (mTLS, ohne Remote-Shell), Nicht-Root-Benutzer `andora`, `andora-updater` (signierte Manifeste, Prüfsummen, Healthchecks, Rollback, inkl. Agent), automatisierte Realm-Updates (Wartungsmodus → Shutdown → Backup → Update → Migration → Healthcheck → Freigabe) und parallele Realm-Versionen (Live, Classic, Test, Event).
 
 ### 2. Architektur, Auth & Datenbank

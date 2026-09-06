@@ -15,6 +15,27 @@ Grundstruktur (relativ zum Projektroot):
 
 Absolute Pfade werden nur dort verwendet, wo sie technisch tatsächlich notwendig sind; solche Pfade müssen konfigurierbar bzw. deploymentabhängig sein.
 
+SYSTEMGRENZE / INSTALLATIONEN (VERBINDLICH)
+
+Systemweite Installationen oder Änderungen am Betriebssystem sind ohne vorherige ausdrückliche Zustimmung des Nutzers verboten.
+
+Dazu gehören insbesondere:
+
+* `apt` / `apt-get` und andere systemweite Paketverwaltungen,
+* systemweite `pip`-, `npm`-, `cargo`- oder vergleichbare Installationen,
+* eigenmächtige Verwendung von `sudo` für Systemänderungen,
+* Installation oder Entfernung von Diensten, Servern, Containern oder Laufzeitumgebungen,
+* Änderungen an `/etc`, systemd, Benutzern, Gruppen, Berechtigungen, Firewall, Netzwerk-, Mount- oder Betriebssystemkonfiguration,
+* sonstige Änderungen außerhalb des Projektroots, die den Host dauerhaft verändern.
+
+Fehlt für eine Aufgabe ein Werkzeug, muss zuerst nach einer projektlokalen Lösung unter `<Projektroot>/.tmp/` gesucht werden (vgl. TOOLCHAINEN / TEMPORÄRE AUSLEGER).
+
+Ist eine projektlokale Lösung nicht sinnvoll oder technisch nicht möglich, muss die Coding-KI **vor** jeder systemweiten Installation oder Änderung den Nutzer um ausdrückliche Zustimmung bitten und kurz erklären:
+
+1. was installiert oder geändert werden soll,
+2. warum es benötigt wird,
+3. welche systemweiten Auswirkungen die Änderung hat.
+
 AUTONOMES ARBEITEN BEI LANGEN AUFTRÄGEN
 
 Bei einem laufenden Coding-Auftrag arbeitest du selbstständig weiter, bis der Auftrag vollständig abgeschlossen und geprüft wurde.
@@ -32,6 +53,8 @@ Wenn eine solche Anfrage auftritt:
 Frage den Benutzer nur dann, wenn eine zwingend notwendige fachliche oder architektonische Entscheidung getroffen werden muss, die weder aus dem aktuellen Auftrag noch aus den Projektdokumentationen oder dem bestehenden Code eindeutig hervorgeht.
 
 Technische Probleme, fehlgeschlagene Tool-Aufrufe, leere Antworten, ungültige Jobs oder ein zunächst nicht funktionierender Lösungsweg gelten nicht automatisch als solche Entscheidung.
+
+Ausnahme: die allgemeine Anweisung zum autonomen Weiterarbeiten hebt die Grenze aus SYSTEMGRENZE / INSTALLATIONEN ausdrücklich **nicht** auf. Eine fehlende systemweite Installation ist immer ein Zustimmungspflicht-Fall und kein Grund für eigenmächtiges Installieren.
 
 Ziel:
 Auch unbeaufsichtigte, mehrstündige Coding-Aufträge sollen ohne unnötigen Benutzer-Input bis zum Abschluss weiterlaufen.

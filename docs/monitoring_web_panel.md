@@ -4,6 +4,8 @@
 
 **Übergangs-/Legacy-Status:** Das unten beschriebene lokale Panel auf dem Gameserver-Host ist der **derzeit umgesetzte Stand** und wird von der neuen Betriebsarchitektur abgelöst.
 
+Zusätzlich gibt es eine PHP-Implementierung des lokalen Panels unter `web/andora-monitor/` (derzeit fertiggestellt, siehe Dokumentation unten). Beide Varianten dienen als Übergang zur Zielarchitektur.
+
 **Zielarchitektur:** Das Admin- und Deployment-Panel wird zentralisiert. Auf jedem verwalteten Andora-Server läuft ein eigener **Andora-Agent**. Die Kommunikation zwischen Panel und Agenten erfolgt über einen dedizierten Port mit **mTLS**, ohne generische Remote-Shell. Alle Andora-Komponenten laufen unter dem dedizierten Nicht-Root-Benutzer `andora`. Updates übernimmt der **`andora-updater`** (signierte Manifeste, Prüfsummen, Healthchecks, Rollback) für alle Dienste inklusive des Agenten selbst. Realm-Updates laufen automatisiert im Wartungsmodus ab.
 
 Die verbindliche Beschreibung der Zielarchitektur steht in:
@@ -18,22 +20,20 @@ Der folgende Abschnitt beschreibt den bisherigen lokalen Panel-Stand (Übergang)
 
 ## Lokales Panel (derzeit umgesetzt, Übergangsstand)
 
-Eine Web-Oberfläche auf dem **selben Host** wie der Gameserver, ausschließlich
-für den Admin (Spieler haben KEINEN Zugriff). Sie dient der Überwachung und
-Steuerung des Servers und soll durch das zentrale Panel-/Agent-Modell der Zielarchitektur abgelöst werden.
+Es gibt zwei lokale Panel-Implementierungen:
 
-## Getrennte Prozesse
+1. **PHP-Panel** (`web/andora-monitor`): Eine PHP-basierte Web-Oberfläche auf demselben Host wie der Gameserver, ausschließlich für den Admin (Spieler haben KEINEN Zugriff). Sie dient der Überwachung und Steuerung des Servers. Der PHP-Built-In-Server oder Apache/Nginx wird als Router genutzt. Sicherheit:
+   - optional Token (`ANDORA_MONITOR_TOKEN`): bei gesetztem Token muss jeder Request davon betroffen sein (Header `x-api-token` oder `?token=`)
+   - fail-closed: wenn Token konfiguriert ist und Header/Param fehlt/invalid → 401 Unauthorized
+   - keine Secrets an den Client (nur Whitelist-Keys)
+   - nur feste Aktionen via systemctl (start/stop/restart), nie Shell-Freheit
+   - gefährliche Aktionen (restart/stop) erst nach expliziter Bestätigung (`confirm: true`)
+   - History-Speicherung in `data/history.json` mit 5-Sekunden-Drosselung und echten Serverstatus-Werten
+   - Control: fehlgeschlagene systemctl-Aktionen melden `ok=false` mit generischer Fehlermeldung, interne Fehler werden nur intern protokolliert
 
-- **Gameserver** (`server/build/main.js`): läuft als systemd-Unit
-  `andora-server.service` (Vorlage in `deploy/systemd/`). `Restart=on-failure`
-  kümmert sich um den Crash-Neustart.
-- **Monitoring-Panel** (`monitor/server.js`): läuft als eigener Node-Prozess
-  (systemd-Unit `andora-monitor.service`, Vorlage in `deploy/systemd/`).
-  Überlebt einen Gameserver-Crash (zeigt dann Offline + Neustart-Button).
-- Das Panel startet/stoppt den Gameserver **nur** über
-  `sudo -n systemctl start|stop|restart andora-server.service` — keine
-  Shell-Freiheit, keine Root-Berechtigung des Panels (sudoers-Vorlage in
-  `deploy/sudoers/andora-monitor`, nur diese drei Befehle, passwordless).
+2. **Node-Panel** (`monitor/`): Laufender Node-Prozess (systemd-Unit `andora-monitor.service`). Überlebt einen Gameserver-Crash (zeigt dann Offline + Neustart-Button). Startet/stoppt den Gameserver nur über `sudo -n systemctl start|stop|restart andora-server.service` — keine Shell-Freiheit, keine Root-Berechtigung des Panels (sudoers-Vorlage in `deploy/sudoers/andora-monitor`, nur diese drei Befehle, passwordless). Dashboard-HTML unter `public/index.html`.
+
+Das PHP-Panel ist die aktuell fertiggestellte Umsetzung; das Node-Panel bleibt als Legacy-Referenz erhalten.
 
 ## Ports & Endpunkte
 
@@ -63,12 +63,17 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   (Lag-Indikator), gemessen im gleitenden 1-Minuten-Fenster (60 Messwerte à 1 s,
   Ringpuffer — alte Ausreißer fallen automatisch raus, kein Array-Wachstum)
 
-### Spielerdiagnose (`players[]` in `/status` bzw. `GET /players`)
+### Spielerdiagnose (`GET /players` auf 3002)
 
-- `id`, `name`, `zone_id`, `ping_ms` (Client sendet optional `ping_ms` im
-  `HEARTBEAT.data`), `last_activity`, `seconds_inactive`, `visible_entities`
-  (Entity-/NPC-Anzahl im AOFB-Radius des Spielers).
-  Keine Rangliste — nur Diagnosewerte.
+- `/status` liefert in `players` nur die **Anzahl** der Spieler (Zählung).
+- Die Spielerliste kommt ausschließlich aus `GET /players`:
+  `{ "ok": true, "players": [ { "id", "name", "zone_id", "ping_ms",
+  "last_activity" } ] }` (kein `seconds_inactive`, kein `visible_entities`
+  im derzeitigen Payload).
+- `last_activity`: Node-Implementierung liefert Unix-Zeitstempel in ms,
+  Rust-Implementierung verstrichene Sekunden (`elapsed().as_secs()`). Das
+  PHP-Panel unterscheidet beides über den Zahlenbereich (>1e10 = ms).
+- Keine Rangliste — nur Diagnosewerte.
 
 ## Funktionen des Panels
 
@@ -76,7 +81,14 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   Verlauf (~10 min, In-Memory Ring-Buffer, Poll 2 s), Steuerung, Config.
 - **Steuerung**: Start / Stop / Restart — erst nach zweiter Bestätigung
   (POST `/api/control` mit `confirm: true`).
-- **Verlauf**: `GET /api/history` (In-Memory, max. 360 Punkte à 10 s).
+  - PHP-Implementierung: fehlgeschlagene `systemctl`-Aktionen melden `ok=false`
+    mit generischer Fehlermeldung; interne Fehler werden nur intern protokolliert,
+    nicht an den Client weitergegeben. Exit-Code wird geprüft (fail-closed).
+- **Verlauf**: `GET /api/history` (Datei-basiert in `data/history.json`,
+  max. 360 Punkte, 5-Sekunden-Drosselung anhand letzten Timestamp).
+  - PHP-Implementierung: speichert echte Werte des abgefragten Serverstatus
+    (online, players, cpu_percent, heap_mb, tick-Werte, loop_lag_ms). Es werden
+    keine pauschalen `online=true`, `players=0` und alle Messwerte auf 0 gesetzt.
 - **Config**: `GET /api/config` + `POST /api/config` — nur Whitelist-Keys von
   `src/realm/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`,
   `WS_BIND_HOST`, `HEALTH_BIND_HOST`, `TICK_MS`,
@@ -85,6 +97,10 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   änderbar. Werte werden serverseitig validiert (Port-Bereiche, Tick 16-1000
   ms, Sampling-Bereiche, URL-Format …).
 - **Keine Secrets** an den Client: ausschließlich Whitelist-Werte.
+- Token-Authentifizierung: wenn `ANDORA_MONITOR_TOKEN` gesetzt ist, müssen alle
+  `GET/POST /api/*`-Requests den Token im Header (`x-api-token`) oder als
+  Query-Parameter (`?token=`) übergeben werden (fail-closed). Das Root-Dashboard
+  `/` erfordert ebenfalls den Token, wenn er konfiguriert ist.
 
 ## Geänderte / neue Dateien
 
@@ -98,6 +114,15 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   - `public/index.html` (Dashboard)
 - `src/realm/src/metrics.ts` — Tick-Statistik + CPU/Heap/RSS
 - `src/realm/src/events.ts` — Event-Loop-Lag-Messung
+
+- `web/andora-monitor/` — PHP-Implementierung des lokalen Monitoring-Admin-Panels (fertiggestellt):
+  - `public/index.php` — Front-Controller, Routing, API-Endpunkte
+  - `lib/config.php` — Laden der Panel-Konfiguration
+  - `lib/envconfig.php` — Lese-/Schreib-Logik für `config.env` (Whitelist-basiert,
+    validateChanges, writeChanges, read_env_file)
+  - `data/` — History-Datenverzeichnis (history.json, ggf. .lastpoint)
+  - `config.php` — Projektkonfiguration (Umgebungsvariablen, sensible Defaults)
+  - `public/index.html` — Dashboard-HTML für den PHP-Built-In-Server
 - `deploy/` — Vorlagen (NUR Vorlagen, nicht installiert):
   - `deploy/systemd/andora-server.service`, `andora-monitor.service`
   - `deploy/conf/monitor.conf` (EnvironmentFile des Panels)
@@ -143,3 +168,6 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
    `andora`-Nicht-Root-Benutzer, `andora-updater`, signierte Manifeste und
    automatisierte Realm-Updates) ist verbindlich in
    `docs/Deployment_Betriebsarchitektur.md` dokumentiert.
+8. **PHP-spezifische Optimierungen**: Die 5-Sekunden-Drosselung der History
+   und der Token-fail-closed-Schutz wurden in der PHP-Implementierung
+   nachgerüstet (siehe `monitoring_web_panel.md`.

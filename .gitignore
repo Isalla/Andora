@@ -24,3 +24,4 @@ src/login/login
 src/login/config.env
 src/realm-rs/target/
 src/realm-rs/config.env
+web/andora-monitor/data/
