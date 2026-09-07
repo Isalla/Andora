@@ -17,7 +17,7 @@ Implementierungsstands automatisch selbst (Pflicht laut `docs/ai_jobs.md`).
 | 3 | Sicherheitsebene / Auth | Eingebaut | Einziger Dienst mit direktem Auth-DB-Zugriff |
 | 4 | Loginserver | Eingebaut | Brücke zu Auth, kein eigener DB-Zugriff |
 | 5 | Realm-Grundsystem | Teilweise | Einstieg, Charakter, Chat, Parental fertig; fehlen u. a. persistente Welt, Kampf, Loot, NPC, Auktion |
-| 6 | Coordinator | Eingebaut | Go-Dienst `src/coordinator`: dateibasierte KI-Queue, Priorisierung, Cooldown, mehrsprachige Input-/Output-Sperrwortfilter (Sprachdateien), Ollama-Anbindung, Ergebnis-Callback/Poll; Realm-Anbindung offen |
+| 6 | Coordinator | Eingebaut | Go-Dienst `src/coordinator`: dateibasierte KI-Queue, Priorisierung, Cooldown, mehrsprachige Input-/Output-Sperrwortfilter (Sprachdateien), Ollama-Anbindung (angeschlossener lokaler Provider; Architektur providerunabhängig, siehe `docs/Coordinator.md` §3.1), Ergebnis-Callback/Poll; Realm-Anbindung offen |
 | 7 | Voice | Später vorgesehen | Kein Code, kein Dienst |
 | 8 | Client | Grundgerüst | Godot-Rahmen mit Demo; Netzwerk und Login fehlen |
 | 9 | Realm (Node.js) | Legacy | Übergang, wird durch den Rust-Realm abgelöst |

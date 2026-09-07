@@ -35,7 +35,8 @@ Andora Gameserver
       ↓
 AI Service
       ↓
-Ollama
+KI-Provider
+(lokal: Ollama)
       ↓
 AI Service
       ↓
@@ -44,7 +45,7 @@ Andora Gameserver
 Godot Client
 ```
 
-Der Client kommuniziert niemals direkt mit Ollama.
+Der Client kommuniziert niemals direkt mit einem KI-Provider.
 
 Der Gameserver kontrolliert:
 
@@ -132,9 +133,9 @@ Die KI erhält keinen direkten Datenbankzugriff.
 
 ---
 
-## Ollama
+## KI-Provider
 
-Ollama verarbeitet ausschließlich vom AI-Service vorbereitete Aufgaben.
+Der KI-Provider (im lokalen Standardbetrieb: Ollama) verarbeitet ausschließlich vom AI-Service vorbereitete Aufgaben.
 
 Mögliche Aufgaben:
 
@@ -146,7 +147,23 @@ Mögliche Aufgaben:
 * Crafting-Wünsche interpretieren
 * situationsabhängige Reaktionen
 
-Ollama ist niemals die Quelle des tatsächlichen Weltzustands.
+Der KI-Provider ist niemals die Quelle des tatsächlichen Weltzustands.
+
+## Providerunabhängigkeit
+
+Andoras Runtime-KI ist langfristig nicht fest an Ollama oder einen einzelnen KI-Anbieter gekoppelt.
+
+Der bestehende lokale Betrieb über Ollama bleibt ein unterstützter und zunächst bevorzugter Weg (Standard-/Basislösung). Andora muss weiterhin vollständig mit lokal betriebener KI arbeiten können; eine spätere Unterstützung externer Provider darf keine zwingende Cloud-Abhängigkeit erzeugen.
+
+Die Architektur ermöglicht es, später auch externe KI-Provider über deren API anzubinden, ohne dafür Realm oder Gameplay-Systeme grundlegend umbauen zu müssen. Mögliche Beispiele sind lokale Modelle über Ollama, eine OpenAI- / ChatGPT-kompatible API, Anthropic sowie weitere zukünftige KI-Anbieter. Diese Nennungen beschreiben ausschließlich Erweiterungsmöglichkeiten und stellen keine Verpflichtung dar, diese jetzt zu implementieren oder dauerhaft zu unterstützen. Es wird hier noch keine konkrete Provider-API oder Implementierung festgelegt.
+
+Der Realm muss nicht wissen, welcher konkrete KI-Provider einen Auftrag verarbeitet. Die bestehende Verantwortungsgrenze bleibt grundsätzlich: Realm → Coordinator/AI-Service → KI-Provider. Der Coordinator bildet die zentrale kontrollierte Schnittstelle zwischen Realm und Runtime-KI. Provider-spezifische Kommunikation (insbesondere API-Endpunkte, Authentifizierung, Modellnamen, Request-/Response-Formate, Timeouts, Rate-Limits und Fehlerbehandlung) gehört hinter eine klar abgegrenzte Provider-Schicht des KI-Systems und wird nicht in Realm-Logik oder Clients verteilt.
+
+Zukünftig soll eine konfigurierbare Provider-Auswahl möglich sein; eine spätere Auswahl unterschiedlicher Provider oder Modelle abhängig von Jobtyp, Realm oder anderen kontrollierten Kriterien darf architektonisch möglich bleiben. Welche Routingregeln tatsächlich verwendet werden, wird später entschieden. Es werden jetzt keine automatische Provider-Auswahl, Fallback-Kette oder Kostenlogik festgelegt.
+
+API-Keys, Tokens und andere Provider-Zugangsdaten sind Service-Secrets. Sie dürfen insbesondere nicht an Clients übertragen werden, nicht Bestandteil von Realm-Jobs sein, nicht in Git eingecheckt werden, nicht in normalen Logs erscheinen und nicht unnötig in Realm-/Gameplay-Datenbanken gespeichert werden. Die konkrete Secret-Verwaltung wird bei der späteren Implementierung festgelegt.
+
+Ein externer KI-Provider erhält dadurch keinerlei direkte Autorität über Realm, Datenbanken oder Clients. Alle übrigen zentralen KI-Regeln dieses Dokuments (Realm-Autorität, Queue, Validierung, Rate-Limits, Fehler- und Fallback-Regeln, NPC-Wissensregeln) bleiben providerunabhängig bestehen.
 
 ---
 
@@ -223,7 +240,7 @@ Der NPC hat bewusst über eine bekannte Wahrheit gelogen.
 
 # 6. AI Context
 
-Ollama bekommt nicht automatisch den gesamten Weltzustand oder die vollständige Datenbank.
+Der KI-Provider bekommt nicht automatisch den gesamten Weltzustand oder die vollständige Datenbank.
 
 Der Server erstellt für jede Anfrage einen begrenzten, relevanten Kontext.
 
@@ -433,7 +450,7 @@ Gameserver
       ↓
 AI Service
       ↓
-Ollama
+KI-Provider
 ```
 
 Der AI-Service gibt die gewünschte Ausgabesprache zentral vor.
@@ -482,7 +499,7 @@ Server validiert
 Ergebnis verwenden
 ```
 
-Der Server wartet niemals innerhalb des World-Ticks synchron auf Ollama.
+Der Server wartet niemals innerhalb des World-Ticks synchron auf den KI-Provider.
 
 ---
 
@@ -534,8 +551,8 @@ AI Request Queue
 Priority
         ↓
 Concurrency Limit
-        ↓
-Ollama
+         ↓
+KI-Provider (lokal: Ollama)
 ```
 
 Ein Raum mit 30 NPCs darf nicht automatisch 30 parallele LLM-Anfragen erzeugen.
@@ -588,13 +605,13 @@ Falls später Response-Caching benötigt wird, muss der vollständige relevante 
 
 # 16. AI-Ausfall
 
-Ollama ist kein kritischer Bestandteil des World-Ticks.
+Der KI-Provider ist kein kritischer Bestandteil des World-Ticks.
 
 Bei einem Ausfall:
 
 ```text
-Ollama offline
-       ↓
+KI-Provider offline
+        ↓
 World Tick läuft weiter
        ↓
 Combat läuft weiter
@@ -615,7 +632,7 @@ KI-abhängige Funktionen verwenden:
 * deterministische Antworten
 * temporäre Nichtverfügbarkeit
 
-Ein Ollama-Ausfall darf niemals den Gameserver zum Stillstand bringen.
+Ein Provider-Ausfall darf niemals den Gameserver zum Stillstand bringen.
 
 ---
 
@@ -732,6 +749,28 @@ Eine fehlerhafte Lua-Datei darf die zentrale Regel:
 > Server ist die Quelle der Wahrheit.
 
 nicht aufheben.
+
+## Ruleset-spezifische KI-Schicht
+
+Ein Ruleset darf zusätzlich eine übergeordnete Prompt-/Verhaltensschicht für dynamisch generierte KI-NPC-Kommunikation bereitstellen.
+
+Dabei gilt:
+
+* Die eigentliche NPC-Persönlichkeit bleibt unabhängig vom Ruleset erhalten.
+* Rolle, Wissen, Beziehungen und individuelle Eigenschaften eines NPC werden nicht durch das Ruleset ersetzt.
+* Das Ruleset ergänzt lediglich übergeordnete Verhaltens-, Kommunikations- und Tonalitätsregeln.
+* Es werden keine separaten vollständigen NPC-Prompt-Sammlungen pro Ruleset gepflegt; es gibt genau eine Schicht pro Ruleset (`normal`, später ggf. `roleplay`, `hardcore`).
+* Der Realm übergibt sein Ruleset mit jeder KI-Anfrage, damit die zugehörige Schicht angewendet werden kann.
+
+Beispiele:
+
+* `normal`: normale für Andora vorgesehene NPC-Kommunikation.
+* `roleplay`: NPCs können konsequenter in ihrer Weltrolle sprechen, moderne oder spielmechanische Ausdrucksweisen vermeiden und stärker immersiv auf den Spieler reagieren.
+* `hardcore`: dynamische NPC-Kommunikation kann einen raueren, direkteren oder teilweise feindseligeren Grundton erhalten und die gefährlichere Atmosphäre des Realms widerspiegeln.
+
+Ein grundsätzlich freundlicher NPC muss dadurch nicht feindselig werden. Seine individuelle Persönlichkeit hat weiterhin Bestand; das Ruleset beeinflusst nur den übergeordneten Ton und das dynamische Verhalten.
+
+Klare inhaltliche Grenze: Ruleset-spezifische Prompt-/Tonalitätsschichten dürfen ausschließlich dynamisch von der KI generierte Kommunikation und Reaktionen beeinflussen. Fest definierte Inhalte (Questtexte, fest geschriebene Questdialoge, Storytexte, Lore, Bücher und Briefe, Cutscene-Dialoge und andere redaktionell festgelegte Texte) bleiben davon unberührt und sind auf allen Rulesets identisch.
 
 ---
 
@@ -926,13 +965,14 @@ Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
                                         Builder
                                           │
                                           ▼
-                                     AI Service
-                                          │
-                                          ▼
-                                        Ollama
-                                          │
-                                          ▼
-                                   AI Response
+                                      AI Service
+                                           │
+                                           ▼
+                                      KI-Provider
+                                  (lokal: Ollama)
+                                           │
+                                           ▼
+                                    AI Response
                                           │
                                           ▼
                                 Server Validation
@@ -957,7 +997,9 @@ Neue KI-Systeme müssen dieselben zentralen Regeln einhalten.
 
 > **Fehlerhafte oder leere KI-Jobs dürfen die AI-Queue niemals blockieren; sie werden nach den Fehler- und Recovery-Regeln selbstständig behandelt und die Verarbeitung wird mit dem nächsten Job fortgesetzt.**
 
-> **Das Spiel muss auch ohne Ollama funktionieren.**
+> **Das Spiel muss auch ohne verfügbaren KI-Provider funktionieren.**
+
+> **Andora bleibt vollständig mit lokal betriebener KI (Standard-/Basislösung: Ollama) lauffähig; externe Provider dürfen keine zwingende Cloud-Abhängigkeit erzeugen.**
 
 > **Spielmechanik liegt im Realm-Server (Rust), Inhalte und Prompt-Fragmente liegen in Lua, Persistenz liegt in MariaDB und die KI übernimmt Sprache, Interpretation und kontrollierte Improvisation.**
 

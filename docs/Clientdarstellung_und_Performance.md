@@ -1,14 +1,16 @@
 # Clientdarstellung und Performance
 
-**ZWECK:** Verbindliche Grundentscheidung für die Darstellung und Leistung des Andora-Clients: wie die Welt gerendert wird, welche Rolle 3D spielt, welche 2D-/3D-Darstellungen Spieler bei Fähigkeiten, Zaubern und kurzlebigen Kampfeffekten selbst wählen können, woran die Performance-Messung ausgerichtet ist und welche technische Fachliteratur als (nicht verbindliche) Referenz herangezogen wird.
+**ZWECK:** Verbindliche Grundentscheidung für die Darstellung und Leistung des Andora-Clients (Godot-Referenzclient): wie die Welt gerendert wird, welche Rolle 3D spielt, welche 2D-/3D-Darstellungen Spieler bei Fähigkeiten, Zaubern und kurzlebigen Kampfeffekten selbst wählen können, woran die Performance-Messung ausgerichtet ist und welche technische Fachliteratur als (nicht verbindliche) Referenz herangezogen wird.
 
-Dieses Dokument ist die zentrale, verbindliche Doku für das Thema „Client-Darstellung & Performance". Es ergänzt und präzisiert die allgemeineren Aussagen in `project_overview.md` und `architecture.md`; bei Widersprüchen gilt dieses Dokument.
+Dieses Dokument ist die zentrale, verbindliche Doku für das Thema „Client-Darstellung & Performance" des Godot-Referenzclients. Es ergänzt und präzisiert die allgemeineren Aussagen in `project_overview.md` und `architecture.md`; bei Widersprüchen gilt dieses Dokument. Die dahinterliegende Client-Strategie (mehrere offizielle Clients, gemeinsame Realms, Godot-First) steht in `Mehrere_Offizielle_Clients.md`.
 
 ---
 
-## 1. Verbindliche Grundentscheidung
+## 1. Verbindliche Grundentscheidung (gilt für den Godot-Referenzclient)
 
 > **2D trägt die Welt. 3D setzt die Akzente.**
+
+Diese Grundentscheidung gilt für den verbindlichen Godot-/Raspberry-Pi-Referenzclient. Weitere offizielle Clients dürfen denselben Realm mit anderen Darstellungsprinzipien (bis hin zu vollständiger Echtzeit-3D) darstellen; verbindlich sind dabei die gemeinsamen Regeln aus `Mehrere_Offizielle_Clients.md` (identische Inhalte, kein Gameplay-Vorteil durch Darstellung, Realm autoritativ).
 
 Die dauerhaft dargestellte Spielwelt ist überwiegend **2D bzw. aus vorgerenderten Assets**. Es gibt keine vollständige Low-Poly-3D-Welt als permanentes Rendermodell.
 
@@ -106,12 +108,12 @@ Relevante Berührungspunkte: `Kampfsystem.md` (Fähigkeiten, Tempo, Effekte, Rea
 
 ## 5. Performance-Grundsatz
 
-Die primäre Referenzplattform für die Client-Performance ist der **Raspberry Pi 4**.
+Die primäre Referenzplattform für die Client-Performance des Godot-Referenzclients ist der **Raspberry Pi 4**.
 
 * **Ziel:** **60 FPS**
 * **Untergrenze:** **30 FPS** unter definierter hoher Last
 
-Die Darstellungswahl (2D/3D) in den Grafikoptionen (§4.2) dient insbesondere dem Zweck, dass schwächere Clients auf die günstigere 2D-Darstellung wechseln können, während leistungsfähigere Systeme optional aufwendigere 3D-Effekte verwenden. Die bereits verbindlichen Client-Performanceziele bleiben davon unberührt.
+Der Performance-Grundsatz gilt für den Godot-Referenzclient; andere offizielle Clients sind nicht darauf beschränkt, dürfen aber auch keine gameplayrelevanten Unterschiede erzeugen (`Mehrere_Offizielle_Clients.md`). Die Darstellungswahl (2D/3D) in den Grafikoptionen (§4.2) dient insbesondere dem Zweck, dass schwächere Clients auf die günstigere 2D-Darstellung wechseln können, während leistungsfähigere Systeme optional aufwendigere 3D-Effekte verwenden. Die bereits verbindlichen Client-Performanceziele bleiben davon unberührt.
 
 „Definierte hohe Last" ist kein frei erfundener Wert, sondern bezieht sich auf die bestehenden Client-Schutzmechanismen in `architecture.md`:
 
@@ -158,7 +160,7 @@ Hinweis zu den Einstufungen: „Direkt relevant" = direkt an den Godot-Client an
 * **Kein Render-Fix vor Tests:** Konkrete `perf_mode`-Werte, und in welcher Variante konkrete Effekte umgesetzt werden, werden erst durch Performance-Tests auf dem Raspberry Pi 4 festgelegt. Die 2D-/3D-Darstellungswahl über die Grafikoptionen ist davon getrennt (§4.2, §4.3).
 * **Auto-Einstellung nicht festgelegt:** Eine spätere automatische 2D-/3D-Wahl darf architektonisch möglich bleiben, wird mit dieser Entscheidung aber nicht festgelegt und nicht implementiert (§4.2).
 * **Variantenzuordnung offen:** Ob ein konkreter Effekt eine 2D-, eine 3D- oder beide Varianten erhält, wird in der späteren Content- und Effektentwicklung entschieden; kein Effekt ist standardmäßig zu beiden Varianten verpflichtet (§4.2).
-* **Plattform-Vorrang:** Raspberry Pi 4 ist die primäre Referenzplattform; die Webversion nutzt dieselbe Spielwelt und serverseitigen Systeme (`project_overview.md` §2).
+* **Plattform-Vorrang:** Raspberry Pi 4 ist die primäre Referenzplattform für den Godot-Referenzclient; alle offiziellen Clients nutzen dieselbe Spielwelt und dieselben serverseitigen Systeme (`project_overview.md` §2, `Mehrere_Offizielle_Clients.md`).
 * **Keine detailarme Welt:** Das Ziel ist eine detailreiche, atmosphärische 2D-Welt; 3D dient als Akzent, Produktionswerkzeug und optional gewählter Darstellung, nicht als permanente Welt.
 
 ---
@@ -170,4 +172,5 @@ Hinweis zu den Einstufungen: „Direkt relevant" = direkt an den Godot-Client an
 * `Kampfsystem.md` – Fähigkeiten, Tempo, Effekte
 * `cutscene_system.md` – Szenen, Animationen, Effekte (Client für visuelle Präsentation)
 * `Charaktererstellung_und_Charakterdarstellung.md` – clientseitige Charakter-Sets (2D-/vorgerendert)
+* `Mehrere_Offizielle_Clients.md` – Client-Strategie: mehrere offizielle Clients, gemeinsame Realms, Godot-First
 * `references/README.md` – Index der Referenzbibliothek und Kapitelseiten

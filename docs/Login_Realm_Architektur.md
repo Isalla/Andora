@@ -13,6 +13,7 @@ Dieses Dokument beschreibt die grundlegende Architektur für:
 * persistente Realm-Zustände
 * spätere Charaktertransfers
 * Fresh-Start-Regeln
+* Realm-Rulesets (konfigurierbare Regelvarianten je Realm)
 * zukünftige Zugriffe einer Webseite
 
 Die Architektur soll von Beginn an mehrere Realms ermöglichen, ohne spätere Erweiterungen unnötig zu erschweren. Ein Realm wird vom zuständigen Realm-Server ausgeführt (ggf. mehrere technische Realm-Prozesse mit gemeinsamem Realm-Zustand); einen separaten Worldserver-Dienst in der Kette gibt es nicht.
@@ -290,6 +291,8 @@ Beispielsweise könnte `DE-1` bereits weit in EXP1 fortgeschritten sein, währen
 
 Realm-Versionen können parallel existieren, beispielsweise als `Live`, `Classic`, `Test` oder `Event`. Jede Realm-Version besitzt ihre eigene statische Inhaltsversion und ist eigenständig aktualisierbar (siehe `Deployment_Betriebsarchitektur.md`). Die Realm-Auswahl zeigt dem Spieler den jeweiligen Realm inklusive seiner Inhaltsversion.
 
+**Hinweis:** Realm-Versionen (Live, Classic, Test, Event) sind Inhaltsversionen eines Realms, keine clientgespezifischen Realms. Es gibt keine PC-, Pi-, Browser- oder UE-Realms; alle offiziellen Clients verbinden sich mit denselben Realms (`Mehrere_Offizielle_Clients.md`).
+
 ## Realm-Server
 
 Der Realm-Server ist dagegen der Dienst, welcher einen Realm ausführt
@@ -307,6 +310,37 @@ Realm DE-1
 ```
 
 Die technische Skalierung eines Realms muss für den Spieler nicht sichtbar sein.
+
+## Realm-Rulesets
+
+Jeder Realm verwendet genau ein definiertes Ruleset. Rulesets sind Realm-Regelvarianten, keine Client-Varianten.
+
+Grundsätze:
+
+* `normal` ist das regulär verwendete Ruleset.
+* Weitere Rulesets (`hardcore`, `roleplay`) sind reservierte Möglichkeiten und können später bei tatsächlichem Bedarf aktiviert werden; ihre konkreten Spielregeln sind noch nicht definiert.
+* Die Realm-Software wird nicht pro Ruleset geforkt: Dasselbe Realm-Binary führt jedes Ruleset aus; das Ruleset ist Konfiguration (Realm-Metadaten), keine eigene Implementierung.
+* Zentrale Spielmechaniken dürfen nicht unnötig fest auf ausschließlich ein Ruleset verdrahtet werden.
+* Alle unterstützten offiziellen Clients eines Realms verwenden dasselbe Ruleset. Es gibt keine Godot-, Browser- oder UE-spezifischen Rulesets.
+
+Reservierte Rulesets (Vorbereitung statt Aktivierung):
+
+* `normal`: reguläres Andora-Regelwerk.
+* `hardcore`: alternative Realm-Regeln für Spieler, die eine härtere Spielweise wünschen. Dauerhafter Charaktertod (Permadeath) ist als mögliche Regel vorgemerkt, aber noch nicht verbindlich definiert.
+* `roleplay`: alternative Realm-Regeln für stärker rollenspielorientierte Spieler. Welche mechanischen RP-Regeln gelten, wird erst später festgelegt.
+
+Hardcore- und RP-Realms müssen nicht zum Release angeboten werden. Ziel ist, später auf Spielerinteresse reagieren zu können und beispielsweise kurzfristig einen Realm mit `HC` oder `RP` im Namen starten zu können, ohne dafür zunächst die grundlegende Realm-Architektur umbauen zu müssen.
+
+Beispiel (später möglich):
+
+```text
+DE-1       → normal
+DE-2       → normal
+DE-RP-1    → roleplay
+DE-HC-1    → hardcore
+```
+
+Charaktertransfers zwischen Realms mit unterschiedlichen Rulesets benötigen eigene, später zu definierende Regeln (siehe Abschnitt 12). Fresh-Start-Regeln gelten unabhängig vom Ruleset.
 
 ---
 
@@ -589,6 +623,7 @@ Name
 Sprache
 Region
 Status
+Ruleset
 Spielerzahl
 Maximalspieler
 Latenz
@@ -683,12 +718,13 @@ Spieler wählt Realm
       ▼
 Charakter auswählen / erstellen
       │
-      ▼
+       ▼
 Realmregeln prüfen
-      │
-      ├── Fresh-Start
-      ├── Transferberechtigung
-      └── Character-Zuordnung
+        │
+       ├── Fresh-Start
+       ├── Transferberechtigung
+       ├── Ruleset
+       └── Character-Zuordnung
       │
       ▼
 sichere Übergabe (Handoff, realm-gebunden, einmalig)
@@ -707,6 +743,10 @@ Charakter betritt Andora
 > **Der Account gehört keinem Realm.**
 
 > **Ein Realm ist eine eigenständige persistente Welt.**
+
+> **Realms werden nicht nach Clienttypen getrennt (keine PC-, Pi-, Browser- oder UE-Realms); alle offiziellen Clients verbinden sich mit denselben Realms.**
+
+> **Jeder Realm verwendet genau ein definiertes Ruleset (`normal`, später ggf. `hardcore`/`roleplay`). Rulesets sind Realm-Regelvarianten, keine Client-Varianten. Die Realm-Software wird nicht pro Ruleset geforkt.**
 
 > **Die statische Inhaltsversion eines Realms beschreibt, was existieren kann. Realm-State beschreibt, was tatsächlich passiert ist.**
 

@@ -8,7 +8,7 @@ Accountdaten und den übrigen Andora-Diensten.
 > Nur der Auth/API-Service besitzt direkten Zugriff auf die
 > Auth-Datenbank.
 
-Loginserver, Realm-/World-Server, Webseite und spätere externe Dienste
+Loginserver, Realm-Server, Webseite und spätere externe Dienste
 erhalten keinen direkten Zugriff auf sensible Accounttabellen. Sie
 kommunizieren ausschließlich über definierte API-Endpunkte.
 
@@ -166,7 +166,7 @@ Dadurch kann ein kompromittierter Realmserver nicht automatisch die
 API-Berechtigungen anderer Realmserver verwenden.
 
 Die Auth-API kann zusätzlich Service-Credential, registrierten
-World-Server, Realm-Zuordnung und Serverstatus prüfen.
+Realm-Server, Realm-Zuordnung und Serverstatus prüfen.
 
 ## 10. API-Berechtigungen
 
@@ -342,7 +342,7 @@ Datenbankzugriff.
 > Die API stellt fachliche Funktionen bereit und niemals eine allgemeine
 > SQL-Schnittstelle.
 
-> Ein World-Server kennt den Spieler, aber nicht seine sensiblen
+> Ein Realm-Server kennt den Spieler, aber nicht seine sensiblen
 > Accountdaten.
 
 > Eine kompromittierte Webseite darf nicht automatisch zu einer

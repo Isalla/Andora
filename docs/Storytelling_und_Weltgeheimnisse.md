@@ -390,6 +390,8 @@ Die Unterschiede entstehen dadurch, welche vorbereiteten Ereignisse auf welchem 
 
 Daher entwickelt jeder Realm im Laufe der Zeit eine eigene Chronik derselben Welt.
 
+Rulesets ändern daran nichts: Fest definierte Inhalte (Questtexte, fest geschriebene Questdialoge, Storytexte, Lore, Bücher und Briefe, Cutscene-Dialoge und andere redaktionell festgelegte Texte) bleiben auf Normal-, RP- und Hardcore-Realms identisch und werden durch ein Ruleset weder automatisch verändert noch umgeschrieben. Nur die individuelle Chronik jedes Realms unterscheidet sich — einschließlich der Folgen des jeweiligen Rulesets (z. B. andere Todesfolgen, falls ein Ruleset sie definiert).
+
 Ausnahmen:
 
 * **Classic** wird bewusst als abweichender Realm-Realm definiert und ist von dieser Grundregel ausgenommen.

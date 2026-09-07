@@ -1,4 +1,4 @@
-# Coordinator – KI-Queue und Ollama-Schnittstelle
+# Coordinator – KI-Queue und Provider-Schnittstelle
 
 > **Umsetzungsstand (2026-09):** Implementiert als eigenständiger Go-Dienst
 > in `src/coordinator` (Endpunkte, Betrieb und Konfiguration:
@@ -9,7 +9,9 @@
 
 ## 1. Zweck
 
-Der Coordinator ist die zentrale Schnittstelle zwischen den Andora-Realmservern und Ollama.
+Der Coordinator ist die zentrale Schnittstelle zwischen den Andora-Realmservern und den KI-Providern.
+
+Der bestehende lokale Betrieb über Ollama bleibt ein unterstützter und zunächst bevorzugter Weg (Standard-/Basislösung); die Architektur ist jedoch providerunabhängig (siehe §3.1).
 
 Seine Aufgabe ist ausschließlich die kontrollierte Verarbeitung von KI-Anfragen.
 
@@ -17,7 +19,9 @@ Der Coordinator ist kein Gameserver, kein Loginserver, keine Account-API und kei
 
 Grundprinzip:
 
-**Realm → Coordinator → Ollama → Coordinator → Realm**
+**Realm → Coordinator → KI-Provider → Coordinator → Realm**
+
+Der Realm muss dabei nicht wissen, welcher konkrete KI-Provider einen Auftrag verarbeitet (aktuell lokal: Ollama; Details zur Providerunabhängigkeit in §3.1).
 
 Die Realmserver bleiben vollständig für ihre eigenen Spiel-, Charakter-, Item- und Auftragsdaten verantwortlich.
 
@@ -42,13 +46,13 @@ Seine lokale Persistenz besteht ausschließlich aus seinen Queue-/Job-Dateien un
 
 Der Coordinator darf keine Spielzustände direkt verändern.
 
-**Ollama erzeugt Vorschläge bzw. Antworten. Der Coordinator prüft und vermittelt diese. Der Realm entscheidet über alle spielmechanischen Auswirkungen.**
+**Der KI-Provider erzeugt Vorschläge bzw. Antworten. Der Coordinator prüft und vermittelt diese. Der Realm entscheidet über alle spielmechanischen Auswirkungen.**
 
 ---
 
-## 3. Zentrale Ollama-Schnittstelle
+## 3. Zentrale Provider-Schnittstelle
 
-Realmserver greifen nicht direkt auf Ollama zu.
+Realmserver greifen nicht direkt auf KI-Provider zu.
 
 Alle KI-Anfragen werden an den Coordinator gesendet.
 
@@ -62,10 +66,57 @@ Dadurch existiert eine zentrale Stelle für:
 * Output-Prüfung
 * Korrekturversuche
 * Timeouts
-* Ollama-Verfügbarkeit
+* Provider-Verfügbarkeit
 * Recovery
 
-Ollama muss dadurch nicht gleichzeitig unabhängige Verbindungen von allen Realmservern verwalten.
+Der KI-Provider muss dadurch nicht gleichzeitig unabhängige Verbindungen von allen Realmservern verwalten.
+
+### 3.1 Providerunabhängigkeit und Provider-Schicht
+
+Andoras Runtime-KI ist langfristig nicht fest an Ollama oder einen einzelnen KI-Anbieter gekoppelt.
+
+Der bestehende lokale Betrieb über Ollama bleibt ein unterstützter und zunächst bevorzugter Weg. Ollama bleibt als lokale Standard-/Basislösung vorgesehen. Andora muss weiterhin vollständig mit lokal betriebener KI arbeiten können; eine spätere Unterstützung externer Provider darf keine zwingende Cloud-Abhängigkeit erzeugen.
+
+Die Architektur ermöglicht es, später auch externe KI-Provider über deren API anzubinden, ohne dafür Realm oder Gameplay-Systeme grundlegend umbauen zu müssen.
+
+Mögliche Beispiele sind:
+
+* lokale Modelle über Ollama
+* OpenAI- / ChatGPT-kompatible API
+* Anthropic
+* weitere zukünftige KI-Anbieter
+
+Die Nennung konkreter Anbieter beschreibt ausschließlich Erweiterungsmöglichkeiten und stellt keine Verpflichtung dar, diese jetzt zu implementieren oder dauerhaft zu unterstützen. Es wird hier noch keine konkrete Provider-API oder Implementierung festgelegt.
+
+Grundprinzip:
+
+Der Realm muss nicht wissen, welcher konkrete KI-Provider einen Auftrag verarbeitet.
+
+Die bestehende Verantwortungsgrenze bleibt grundsätzlich:
+
+Realm → Coordinator → KI-Provider
+
+Der Coordinator bildet die zentrale kontrollierte Schnittstelle zwischen Realm und Runtime-KI.
+
+Provider-spezifische Kommunikation gehört hinter eine klar abgegrenzte Provider-Schicht des KI-Systems und wird nicht in Realm-Logik oder Clients verteilt. Innerhalb der Provider-/Coordinator-Schicht gekapselt werden insbesondere provider-spezifische Unterschiede wie:
+
+* API-Endpunkte
+* Authentifizierung
+* Modellnamen
+* Request-/Response-Formate
+* Timeouts
+* Rate-Limits
+* Fehlerbehandlung
+
+Provider-Auswahl:
+
+Die Architektur soll zukünftig eine konfigurierbare Provider-Auswahl ermöglichen. Eine spätere Auswahl unterschiedlicher Provider oder Modelle abhängig von Jobtyp, Realm oder anderen kontrollierten Kriterien darf architektonisch möglich bleiben.
+
+Welche Routingregeln tatsächlich verwendet werden, wird später entschieden. Es werden jetzt keine automatische Provider-Auswahl, Fallback-Kette oder Kostenlogik festgelegt.
+
+Bestehende Regeln bleiben erhalten:
+
+Ein externer KI-Provider erhält dadurch keinerlei direkte Autorität über Realm, Datenbanken oder Clients. Bestehende Regeln zu Queue, Validierung, Jobzuständen, Rate-Limits, Spam-/Inhaltsfiltern und Realm-Autorität bleiben bestehen, soweit sie nicht technisch ausschließlich an Ollama gekoppelt formuliert sind. Die übrigen Abschnitte dieses Dokuments gelten providerunabhängig; wo dort noch „Ollama“ als konkreter Provider genannt ist, ist damit der aktuell angeschlossene lokale Standard-Provider gemeint.
 
 ---
 
@@ -142,7 +193,7 @@ Normale Spielmechaniken wie:
 * Kaufen/Verkaufen
 * normale Crafting-Mechaniken
 
-laufen vollständig über normalen Realm-Spielcode und dürfen nicht unnötig an Ollama gesendet werden.
+laufen vollständig über normalen Realm-Spielcode und dürfen nicht unnötig an den KI-Provider gesendet werden.
 
 ---
 
@@ -158,7 +209,7 @@ Die Prüfung soll nicht ausschließlich dem Client vertraut werden.
 
 Die Grenze soll mindestens erneut auf Realm-Seite und beim Coordinator geprüft werden.
 
-Zu lange Eingaben werden nicht an Ollama weitergegeben.
+Zu lange Eingaben werden nicht an den KI-Provider weitergegeben.
 
 Der Coordinator kann beispielsweise antworten:
 
@@ -170,11 +221,11 @@ Die 500-Zeichen-Grenze betrifft die freie Texteingabe des Spielers, nicht den ge
 
 ## 8. Kontextbudget
 
-Für Ollama ist zunächst ein Kontext von ungefähr:
+Für den KI-Provider ist zunächst ein Kontext von ungefähr:
 
 **8k Tokens**
 
-vorgesehen.
+vorgesehen (provider-spezifischer Konfigurationswert der Provider-Schicht; aktuell bemessen am lokalen Ollama-Standardbetrieb).
 
 Der Coordinator muss darauf achten, dass genügend Platz für die eigentliche Antwort verbleibt.
 
@@ -193,7 +244,7 @@ Unnötige Informationen dürfen nicht in jede Anfrage aufgenommen werden.
 
 ## 9. Input-Prüfung
 
-Bevor eine Spieleranfrage an Ollama geschickt wird, prüft der Coordinator den Inhalt gegen zentrale Regeln.
+Bevor eine Spieleranfrage an den KI-Provider geschickt wird, prüft der Coordinator den Inhalt gegen zentrale Regeln.
 
 Dadurch wird verhindert, dass jeder einzelne Realm sämtliche Inhaltsregeln selbst vollständig implementieren muss.
 
@@ -233,7 +284,7 @@ Regeln:
    **nicht von der Client-/Spielersprache abhängig**. Ein Wechsel der
    Client-Sprache kann Filter daher nicht umgehen.
 4. **Input und Output sind getrennt:** `*.input.txt` greift auf die
-   Spielereingabe (§9), `*.output.txt` auf Ollamas Antwort (§10).
+   Spielereingabe (§9), `*.output.txt` auf die Provider-Antwort (§10).
 5. `INPUT_DENY_WORDS`/`OUTPUT_DENY_WORDS` bleiben als **zusätzliche
    Betreiber-Einträge** erhalten und verschmelzen mit den Dateiregeln.
 6. Format: eine Regel je Zeile (niedrig geschrieben), `#`-Zeilen sind
@@ -255,19 +306,19 @@ Regeln:
 
 ## 10. Output-Prüfung
 
-Auch Ollamas Antwort wird vor der Weitergabe an den Realm geprüft.
+Auch die Provider-Antwort wird vor der Weitergabe an den Realm geprüft.
 
 Dabei können sowohl Inhaltsregeln als auch definierte Welt-/Plausibilitätsregeln geprüft werden.
 
 Beispiel:
 
-Ollama schlägt für einen Schmied ein 20 Meter langes Schwert vor.
+Der KI-Provider schlägt für einen Schmied ein 20 Meter langes Schwert vor.
 
 Der Coordinator erkennt, dass die vorgeschlagenen Eigenschaften außerhalb der erlaubten Andora-Regeln liegen.
 
 Die Antwort wird nicht unmittelbar verworfen.
 
-Stattdessen erhält Ollama einen Korrekturauftrag und soll eine regelkonforme Alternative erzeugen.
+Stattdessen erhält der KI-Provider einen Korrekturauftrag und soll eine regelkonforme Alternative erzeugen.
 
 Grundprinzip:
 
@@ -277,7 +328,7 @@ Grundprinzip:
 
 ## 11. Begrenzte Korrekturschleife
 
-Coordinator und Ollama dürfen niemals unbegrenzt in einer Korrekturschleife hängen.
+Coordinator und KI-Provider dürfen niemals unbegrenzt in einer Korrekturschleife hängen.
 
 Startwert:
 
@@ -295,9 +346,9 @@ Der Fallback darf niemals selbst eine neue KI-Anfrage erzeugen.
 
 ---
 
-## 12. Fehlende oder leere Ollama-Antwort
+## 12. Fehlende oder leere Provider-Antwort
 
-Nach jeder Ollama-Anfrage muss geprüft werden, ob tatsächlich eine verwertbare Antwort vorhanden ist.
+Nach jeder Provider-Anfrage muss geprüft werden, ob tatsächlich eine verwertbare Antwort vorhanden ist.
 
 Als ungültig gelten insbesondere:
 
@@ -307,7 +358,7 @@ Als ungültig gelten insbesondere:
 * unvollständige strukturierte Antwort
 * nicht parsebares erwartetes Format
 
-Dies kann beispielsweise auftreten, wenn eine Anfrage das verfügbare Kontextlimit überschreitet oder Ollama die Generierung abbricht.
+Dies kann beispielsweise auftreten, wenn eine Anfrage das verfügbare Kontextlimit überschreitet oder der KI-Provider die Generierung abbricht.
 
 Solche Fälle zählen als fehlgeschlagener Versuch.
 
@@ -327,7 +378,7 @@ Dies gilt insbesondere bei:
 * `VALIDATION_FAILED`
 * `CONTEXT_TOO_LARGE`
 * `INPUT_TOO_LONG`
-* fehlender/leer gebliebener Ollama-Antwort
+* fehlender/leer gebliebener Provider-Antwort
 
 Der Coordinator meldet nur den technischen Zustand an den Realm.
 
@@ -464,7 +515,7 @@ Sie müssen beim Shutdown nicht unnötig umgeschrieben werden.
 
 Beim nächsten Start liest der Coordinator `queue.json` und setzt die Verarbeitung fort.
 
-Ein hartes Timeout soll verhindern, dass ein hängender Ollama-Aufruf den Shutdown unbegrenzt blockiert.
+Ein hartes Timeout soll verhindern, dass ein hängender Provider-Aufruf den Shutdown unbegrenzt blockiert.
 
 ---
 
@@ -635,6 +686,18 @@ Freie Spielertexte können allerdings vom Spieler selbst eingegebene persönlich
 
 Solche Inhalte sollen deshalb nicht unnötig langfristig gespeichert werden.
 
+Provider-Zugangsdaten sind Service-Secrets:
+
+API-Keys, Tokens und andere Provider-Zugangsdaten dürfen insbesondere nicht:
+
+* an Clients übertragen werden
+* Bestandteil von Realm-Jobs sein
+* in Git eingecheckt werden
+* in normalen Logs erscheinen
+* unnötig in Realm-/Gameplay-Datenbanken gespeichert werden
+
+Die konkrete Secret-Verwaltung wird bei der späteren Implementierung festgelegt.
+
 ---
 
 ## 29. Zentrale Architekturregel
@@ -660,12 +723,12 @@ Die Verantwortlichkeiten bleiben strikt getrennt:
 * Priorisierung
 * Spam-/Lastschutz
 * Input-Prüfung
-* Ollama-Kommunikation
+* Provider-Kommunikation (Provider-Schicht, aktuell: Ollama)
 * Output-Prüfung
 * begrenzte Korrekturschleifen
 * Fehler-/Statusmeldung an den Realm
 
-**Ollama**
+**KI-Provider (aktuell lokale Standard-/Basislösung: Ollama; später auch externe Provider möglich, siehe §3.1)**
 
 * erzeugt dynamische KI-Antworten und Vorschläge
 * besitzt keine Autorität über den Spielzustand

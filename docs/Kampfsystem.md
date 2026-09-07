@@ -182,6 +182,8 @@ Die genaue Berechnung und der spätere Abbau des XP-Malus werden separat festgel
 
 Bereits erreichte Charakterstufen werden durch den Tod nicht direkt verändert.
 
+Tod, Wiederbelebung und Todesmalus in diesem Abschnitt beschreiben das reguläre (`normal`-)Ruleset. Andere Rulesets (z. B. ein späterer Hardcore-Realm) können abweichende Todesregeln definieren; diese sind noch nicht festgelegt (siehe Realm-Rulesets in `Login_Realm_Architektur.md`).
+
 ---
 
 ## 12. Fraktionskämpfe innerhalb einer Gruppe

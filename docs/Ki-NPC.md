@@ -19,7 +19,7 @@ NPCs sollen:
 * unter bestimmten Bedingungen Spielern oder Gruppen helfen können
 * nach einem Ereignis wieder zu ihrem normalen Aufenthaltsort zurückkehren
 
-Ollama soll später Persönlichkeit, Dialoge und begrenzte Entscheidungen ermöglichen.
+Die Runtime-KI (lokal aktuell: Ollama) soll später Persönlichkeit, Dialoge und begrenzte Entscheidungen ermöglichen.
 
 Die Wahrheit über die Spielwelt bleibt jedoch immer beim Gameserver.
 
@@ -201,7 +201,7 @@ Ein NPC darf nur auf Informationen reagieren, die:
 * von einem Spieler erzählt wurden
 * über ein anderes zulässiges Weltereignis erhalten wurden
 
-Ollama darf keine Fakten über die Welt erfinden.
+Die Runtime-KI darf keine Fakten über die Welt erfinden.
 
 Wenn Borin nicht weiß, dass ein Spieler in einem Raid steckt, darf sein KI-Dialog diese Information nicht kennen.
 
@@ -423,7 +423,7 @@ Ein Spieler kommt zur Schmiede.
 
 Borin ist unterwegs.
 
-Ein Lehrling könnte über Ollama sagen:
+Ein Lehrling könnte über die Runtime-KI sagen:
 
 > Borin ist vor einer Weile Richtung Nordstraße aufgebrochen.
 
@@ -433,11 +433,11 @@ Der Lehrling darf dies nur sagen, wenn er entsprechende Informationen besitzt.
 
 ---
 
-# 12. Ollama-Aufgabe
+# 12. Runtime-KI-Aufgabe (lokal aktuell: Ollama; providerunabhängig, siehe `Coordinator.md` §3.1)
 
-Ollama ist NICHT die Datenbank und NICHT die Wahrheit der Welt.
+Die Runtime-KI ist NICHT die Datenbank und NICHT die Wahrheit der Welt.
 
-Ollama darf verwendet werden für:
+Die Runtime-KI darf verwendet werden für:
 
 * natürlich formulierte Dialoge
 * Persönlichkeit
@@ -459,7 +459,7 @@ Der Gameserver entscheidet:
 * Straftaten
 * erlaubte Aktionen
 
-Ollama bekommt ausschließlich relevante strukturierte Informationen.
+Die Runtime-KI bekommt ausschließlich relevante strukturierte Informationen.
 
 Beispiel:
 
@@ -477,7 +477,7 @@ Player asks:
 "Wo willst du hin?"
 ```
 
-Ollama darf daraus natürliche Sprache erzeugen.
+Die Runtime-KI darf daraus natürliche Sprache erzeugen.
 
 Es darf aber keine neuen Weltfakten erzeugen.
 
@@ -540,14 +540,14 @@ Das MMO soll später viele Spieler und NPCs unterstützen.
 
 Deshalb:
 
-* keine permanenten Ollama-Aufrufe für jeden NPC
+* keine permanenten KI-Provider-Aufrufe für jeden NPC
 * keine KI-Berechnung pro Server-Tick
 * keine vollständige Pathfinding-Simulation für unbeobachtete NPCs
 * Ereignisse bevorzugen
 * KI nur dann aufrufen, wenn eine Entscheidung oder ein Dialog wirklich benötigt wird
 * Ergebnisse sinnvoll zwischenspeichern, wenn möglich
 
-Die grundlegende Weltlogik muss auch funktionieren, wenn Ollama zeitweise nicht erreichbar ist.
+Die grundlegende Weltlogik muss auch funktionieren, wenn der KI-Provider zeitweise nicht erreichbar ist.
 
 ---
 
@@ -560,7 +560,7 @@ Berücksichtige mindestens:
 * Raid endet, bevor Borin ankommt
 * Borin ist bereits für ein anderes Ereignis reserviert
 * Server startet während einer NPC-Reise neu
-* Ollama antwortet nicht
+* der KI-Provider antwortet nicht
 * Zielgebiet ist nicht verfügbar
 * Spieler verlässt den Raid
 * mehrere Spieler versuchen gleichzeitig denselben NPC auszulösen
@@ -606,4 +606,4 @@ Datei/Modul → Verantwortung
 
 Wenn du während der Implementierung bemerkst, dass ein Modul mehrere unabhängige Verantwortlichkeiten übernimmt, refaktoriere es in getrennte Module.
 
-Die Architektur soll langfristig erweiterbar sein, weil später weitere NPC-Berufe, Beziehungen, Reisen, Ereignisse, Informationsketten und Ollama-gesteuerte Verhaltensweisen hinzukommen werden.
+Die Architektur soll langfristig erweiterbar sein, weil später weitere NPC-Berufe, Beziehungen, Reisen, Ereignisse, Informationsketten und KI-gesteuerte Verhaltensweisen hinzukommen werden.

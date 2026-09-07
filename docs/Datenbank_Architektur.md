@@ -95,10 +95,10 @@ Zum Beispiel:
 * Sessions
 * Login-Tokens
 * registrierte Realms
-* registrierte World-Server
-* World-Server-Credentials
+* (LEGACY: registrierte World-Server — kein separater Worldserver mehr)
+* (LEGACY: World-Server-Credentials — kein separater Worldserver mehr)
 * Serverfreigaben
-* Realm-Metadaten
+* Realm-Metadaten (inkl. Realm-Ruleset: genau ein Ruleset je Realm, regulär `normal`)
 * Fresh-Start-Konfiguration
 * Transferregeln
 * Heartbeat-/Online-Informationen
@@ -677,7 +677,7 @@ Er darf nicht automatisch auf eine andere Datenbank ausweichen.
 
 ## 16. Coordinator besitzt keine Datenbankrechte
 
-Der Coordinator ist ausschließlich die zentrale Schnittstelle für KI-/Ollama-Anfragen.
+Der Coordinator ist ausschließlich die zentrale Schnittstelle für KI-Provider-Anfragen (angeschlossener lokaler Provider: Ollama; Architektur providerunabhängig, siehe `docs/Coordinator.md`).
 
 Er besitzt keinerlei direkten Datenbankzugriff.
 
@@ -692,7 +692,7 @@ Er darf:
 
 * KI-Jobs entgegennehmen
 * Jobs priorisieren
-* Ollama ansprechen
+* den KI-Provider ansprechen (aktuell: Ollama)
 * Eingaben prüfen
 * Antworten prüfen
 * Korrekturversuche durchführen
@@ -1110,6 +1110,8 @@ Dadurch führt eine Kompromittierung des Coordinators nicht automatisch zu direk
 * Realmzustände
 
 Der Realm validiert weiterhin alle KI-Ergebnisse, bevor daraus spielmechanische Aktionen entstehen.
+
+Provider-Zugangsdaten (API-Keys, Tokens) sind Service-Secrets des KI-Systems und werden nicht unnötig in Realm-/Gameplay-Datenbanken gespeichert (Details: `docs/Coordinator.md`, §28).
 
 ---
 

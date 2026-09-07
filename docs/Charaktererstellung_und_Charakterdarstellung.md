@@ -41,7 +41,7 @@ Der Server prüft lediglich, ob die übermittelten Werte für die jeweilige Char
 
 ## Serverseitige Charakterdaten
 
-Der World-Server kennt beispielsweise:
+Der Realm-Server kennt beispielsweise:
 
 ```text
 character_id
@@ -75,7 +75,7 @@ Wie Haarvariante 2 tatsächlich aussieht, ist für den Server bedeutungslos.
 Nach der Charaktererstellung funktioniert die Appearance-Übertragung für die Darstellung als One-Way-Verfahren.
 
 ```text
-World-Server
+Realm-Server
       │
       │ kanonische Charakterdaten
       ▼
@@ -89,7 +89,7 @@ World-Server
 grafische Darstellung
 ```
 
-Der World-Server liefert die benötigten Charakterdaten an den Client.
+Der Realm-Server liefert die benötigten Charakterdaten an den Client.
 
 Der Client interpretiert diese Daten anschließend anhand seiner lokal vorhandenen Character-Sets.
 
@@ -202,13 +202,13 @@ Ein Mod darf die grafische Interpretation eines Charakters verändern.
 
 Er darf jedoch keine serverseitigen Charakterdaten verändern.
 
-Der World-Server muss weder wissen noch überprüfen, welches lokale Character-Set installiert oder aktiviert wurde.
+Der Realm-Server muss weder wissen noch überprüfen, welches lokale Character-Set installiert oder aktiviert wurde.
 
 ---
 
 ## Keine Übertragung von Character-Set-Informationen
 
-Folgende Informationen werden grundsätzlich nicht an den World-Server übertragen:
+Folgende Informationen werden grundsätzlich nicht an den Realm-Server übertragen:
 
 ```text
 selected_character_set

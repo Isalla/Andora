@@ -92,7 +92,7 @@ Realm-Server (Rust) Scene Engine
       ↓
 Lua Scene Definition
       ↓
-AI / Ollama optional
+Runtime-KI optional (lokal: Ollama)
       ↓
 Godot Darstellung
 ```
@@ -126,7 +126,7 @@ Definiert:
 * AI-Prompt-Fragmente
 * Content-spezifische Regeln
 
-## AI / Ollama
+## Runtime-KI (lokal: Ollama)
 
 Kann ausdrücklich freigegebene Dialogteile improvisieren und personalisieren.
 
@@ -480,7 +480,7 @@ Nicht jede Cutscene benötigt KI.
 
 Eine Szene kann vollständig fest definiert sein.
 
-Alternativ können bestimmte Dialogbereiche durch AI/Ollama personalisiert werden.
+Alternativ können bestimmte Dialogbereiche durch die Runtime-KI personalisiert werden.
 
 ```text
 Scene Engine
@@ -493,9 +493,9 @@ fester Abschnitt
 AI-Abschnitt
      ↓
 AI Context
-     ↓
-Ollama
-     ↓
+      ↓
+Runtime-KI
+      ↓
 personalisierter Dialog
 
      ↓
@@ -534,7 +534,7 @@ Godot stellt diese Entscheidungen dar.
 
 Lua definiert den Content.
 
-AI/Ollama kann Dialoge innerhalb des erlaubten Rahmens improvisieren.
+Die Runtime-KI kann Dialoge innerhalb des erlaubten Rahmens improvisieren.
 
 ---
 

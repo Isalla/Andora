@@ -77,7 +77,7 @@ Beispielsweise:
 
 Der autoritative Server prüft anschließend Fähigkeiten, Ziel, Reichweite, Cooldowns, Zustand usw.
 
-Freie NPC-Gespräche laufen getrennt über das normale größere Ollama-Dialogmodell.
+Freie NPC-Gespräche laufen getrennt über das normale größere Dialogmodell der Runtime-KI (lokal: Ollama).
 
 NPC-KI und Lua
 
@@ -86,7 +86,7 @@ Auch die heute besprochene Lua-Idee gehört unbedingt dazu:
 Realm-Server (Rust) = Engine + Autorität
 Lua        = Gameplay + NPC-/KI-Definitionen
 MariaDB    = persistenter Weltzustand
-Ollama     = Sprache, Persönlichkeit und Interpretation
+Runtime-KI (lokal: Ollama) = Sprache, Persönlichkeit und Interpretation
 
 Lua kann pro NPC unter anderem Persönlichkeit, Prompt-Bausteine, erlaubte Verhaltensweisen, Dienste und Dialogregeln definieren.
 
@@ -95,3 +95,13 @@ Der Server ergänzt den Prompt mit dem tatsächlichen Weltzustand und dem tatsä
 Grundregel:
 
 NPCs dürfen nur auf Informationen reagieren, die sie tatsächlich erhalten haben. Die KI darf keine Weltfakten erzeugen. Ein NPC darf jedoch bewusst lügen, täuschen, manipulieren oder Informationen verschweigen, wenn Persönlichkeit, Wissen und Situation dies erlauben.
+
+## Ruleset-spezifische Tonalitätsschicht
+
+Das Ruleset des Realms ergänzt die NPC-Definition um eine übergeordnete Verhaltens-, Kommunikations- und Tonalitätsschicht für dynamisch generierte KI-Kommunikation (Details in `ai_system.md`).
+
+Dabei gilt:
+
+* Die NPC-Persönlichkeit (Rolle, Wissen, Beziehungen, individuelle Eigenschaften) bleibt unabhängig vom Ruleset erhalten und wird nicht ersetzt.
+* Es werden keine separaten vollständigen NPC-Prompt-Sammlungen pro Ruleset gepflegt.
+* Die Schicht beeinflusst ausschließlich dynamisch generierte Kommunikation und Reaktionen; fest definierte Inhalte (Questtexte, Questdialoge, Storytexte, Lore, Bücher, Briefe, Cutscene-Dialoge) bleiben unberührt und auf allen Rulesets identisch.

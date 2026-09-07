@@ -14,12 +14,12 @@ Der Schwerpunkt liegt nicht nur auf klassischen MMORPG-Systemen wie Quests, Craf
 
 **Name:** Andora
 **Genre:** 2D Fantasy MMORPG
-**Client:** Godot Engine 3.5
+**Client:** Godot Engine 3.5 (verbindlicher Gameplay-Referenzclient / Godot-First); langfristig mehrere offizielle Clients möglich (Browser, möglicher Unreal-PC-Client, weitere) – gemeinsame Realms, identische Inhalte, Unterschiede nur in Darstellung (Details: `Mehrere_Offizielle_Clients.md`)
 **Server:** fünf getrennte Andora-Serverdienste (API/Auth in Go, Login, Realm in Rust, Coordinator, Voice)
 **Datenbank:** MariaDB (auth, realm_state_<realm>; keine zentrale world_data)
 **Zielplattformen:** linux-amd64 und linux-arm64 (Debian/Linux)
 **Content/Scripting:** Lua
-**KI:** Ollama / lokale Sprachmodelle
+**KI:** providerunabhängige Runtime-KI über den Coordinator; lokale Standard-/Basislösung: Ollama / lokale Sprachmodelle (externe KI-Provider später anbindbar, keine Cloud-Pflicht)
 
 ---
 
@@ -34,9 +34,13 @@ Der Raspberry Pi ist die primäre Referenz für die Leistungsanforderungen des C
 
 Die Webversion soll dieselbe Spielwelt und dieselben serverseitigen Systeme verwenden. Gameplay- und Weltlogik dürfen deshalb nicht von einer bestimmten Clientplattform abhängig sein.
 
+Andora darf langfristig mehrere offizielle Clients besitzen (beispielsweise Godot-Client für Raspberry Pi, Browser-Client, möglicher Unreal-Engine-PC-Client, weitere zukünftige Clients). Diese sind keine unterschiedlichen Versionen des Spiels: Alle Clients verbinden sich mit denselben normalen Realms, es gibt keine getrennten PC-, Pi-, Browser- oder UE-Realms, und Spieler unterschiedlicher Clients spielen gemeinsam in derselben Welt. Alle offiziellen Clients bieten identische Inhalte; Unterschiede gelten ausschließlich für Darstellung und Präsentation. Der Godot-/Raspberry-Pi-Client ist der verbindliche Gameplay-Referenzclient (Godot-First: Realm → Godot-Referenzclient → weitere Clients). Die verbindliche Entscheidung steht in `Mehrere_Offizielle_Clients.md`.
+
 Die Andora-Serverdienste laufen unabhängig von den Clientplattformen auf Debian-/Linux-Servern. Sie können eigenständig auf unterschiedlichen Servern betrieben werden. Die Zielarchitekturen sind mindestens `linux-amd64` und `linux-arm64`. Die Serverdienste, ihre Trennung und der Betrieb sind in `architecture.md`, `Auth_API_Architektur.md`, `Login_Realm_Architektur.md` und `Deployment_Betriebsarchitektur.md` beschrieben.
 
-Pi und Web sind unterschiedliche Zugänge zu derselben persistenten Andora-Welt.
+Pi, Web und weitere Clients sind unterschiedliche Zugänge zu derselben persistenten Andora-Welt.
+
+Ebenso gilt: Alle unterstützten offiziellen Clients eines Realms verwenden dasselbe Ruleset. Es gibt keine Godot-, Browser- oder UE-spezifischen Rulesets (siehe Realm-Rulesets in `Login_Realm_Architektur.md`).
 
 ---
 
@@ -86,6 +90,10 @@ Dazu gehören unter anderem:
 Der Client stellt diese Informationen dar und sendet Spieleraktionen an den Server.
 
 > **Der Server ist die Quelle der Wahrheit.**
+
+Der Realm definiert damit die tatsächliche Spielwelt und das Gameplay; die Clients stellen denselben Realm-Zustand unterschiedlich dar.
+
+> **Der Realm ist Andora. Die Clients sind verschiedene Fenster in dieselbe Welt.**
 
 ---
 
@@ -234,7 +242,9 @@ Ein Schmied, bei dem ein Spieler regelmäßig arbeitet und einkauft, kann diesen
 
 # 11. KI-System
 
-KI wird serverseitig über Ollama angebunden.
+KI wird serverseitig zentral über den Coordinator an KI-Provider angebunden; im lokalen Betrieb ist Ollama die Standard-/Basislösung.
+
+Die Runtime-KI-Architektur ist providerunabhängig dokumentiert (Details: `ai_system.md`, `Coordinator.md`): Später können auch externe KI-Provider über deren API angebunden werden, ohne Realm oder Gameplay-Systeme grundlegend umbauen zu müssen und ohne eine zwingende Cloud-Abhängigkeit zu erzeugen.
 
 Sie dient unter anderem für:
 
@@ -479,14 +489,16 @@ Lua
 MariaDB
 → persistenter Zustand
 
-Ollama
+KI-Provider (lokal: Ollama)
 → Sprache, Interpretation und kontrollierte Improvisation
 
-Godot
+Godot (Referenzclient)
 → Client und Darstellung
 ```
 
 Diese Trennung soll ermöglichen, Inhalte später zu erweitern, ohne zentrale Servermechaniken ständig verändern zu müssen.
+
+Weitere offizielle Clients (Browser, möglicher Unreal-PC-Client, weitere) folgen derselben Trennung; Details in `Mehrere_Offizielle_Clients.md`.
 
 ---
 
@@ -501,13 +513,13 @@ Dafür gelten unter anderem folgende Prinzipien:
 * begrenzte Clientdarstellung
 * KI niemals pro Tick
 * KI eventbasiert
-* asynchrone Ollama-Anfragen
+* asynchrone KI-Provider-Anfragen
 * serverseitige AI-Budgets
 * persistente Daten nur dort speichern, wo sie benötigt werden
-* Weltlogik funktioniert auch ohne Ollama
-* **Performance-Grundsatz:** 60 FPS als Ziel, Untergrenze 30 FPS unter definierter hoher Last (Raspberry Pi 4 als primäre Referenzplattform; „definierte hohe Last" bezieht sich auf die Client-Schutzmechanismen in `architecture.md`)
+* Weltlogik funktioniert auch ohne verfügbaren KI-Provider
+* **Performance-Grundsatz:** 60 FPS als Ziel, Untergrenze 30 FPS unter definierter hoher Last (Raspberry Pi 4 als primäre Referenzplattform für den Godot-Referenzclient; „definierte hohe Last" bezieht sich auf die Client-Schutzmechanismen in `architecture.md`)
 
-Die verbindlichen Darstellungs- und Performance-Grundlagen (2D-Welt, 3D-Akzente, hybride Effekte, spielerwählbare 2D-/3D-Darstellung gleicher Effekte inklusive strikter Trennung von Darstellung und Gameplay, Referenzliteratur) stehen in `Clientdarstellung_und_Performance.md`.
+Die verbindlichen Darstellungs- und Performance-Grundlagen (2D-Welt, 3D-Akzente, hybride Effekte, spielerwählbare 2D-/3D-Darstellung gleicher Effekte inklusive strikter Trennung von Darstellung und Gameplay, Referenzliteratur) stehen in `Clientdarstellung_und_Performance.md`. Diese gelten für den Godot-Referenzclient; weitere offizielle Clients sind nicht auf die Raspberry-Pi-Leistung beschränkt, dürfen aber keine gameplayrelevanten Unterschiede erzeugen (`Mehrere_Offizielle_Clients.md`).
 
 ---
 

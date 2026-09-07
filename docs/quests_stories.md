@@ -30,7 +30,7 @@ MariaDB
 Godot
 → Darstellung und Spielerinteraktion
 
-AI / Ollama
+Runtime-KI (lokal: Ollama)
 → optionale Dialoge und Interpretation
 ```
 
@@ -461,7 +461,7 @@ beeinflussen.
 
 # 20. KI-Integration
 
-AI/Ollama kann Quests erzählerisch unterstützen.
+Die Runtime-KI kann Quests erzählerisch unterstützen.
 
 Beispiele:
 
@@ -662,7 +662,7 @@ Das Quest-System orchestriert Ziele, dupliziert aber nicht die Mechanik anderer 
 
 > **Lua beschreibt die Aufgabe. Der Realm-Server (Rust) prüft die Aufgabe. MariaDB merkt sich den Fortschritt. Godot zeigt ihn dem Spieler.**
 
-AI/Ollama kann die Geschichte und Gespräche lebendiger machen, besitzt aber keine Autorität über Questzustände.
+Die Runtime-KI kann die Geschichte und Gespräche lebendiger machen, besitzt aber keine Autorität über Questzustände.
 
 ---
 

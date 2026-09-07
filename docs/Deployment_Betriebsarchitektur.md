@@ -37,8 +37,8 @@ Die Andora-Serverdienste sind bewusst voneinander getrennt:
 
 - **API/Auth-Service (Go)** – einziger Dienst mit direktem Auth-DB-Zugriff.
 - **Login-Service** – separate Login-Komponente.
-- **Realm-Server (Rust)** – Spiel-Autorität (Combat, Loot, AH, NPC-AI via Coordinator/Ollama); verwaltet seine Realm-Datenbank `realm_state_<realm>` inklusive statischer Inhaltsversion.
-- **Coordinator** – zentrale KI-Queue-/Ollama-Schnittstelle ohne Datenbankrechte.
+- **Realm-Server (Rust)** – Spiel-Autorität (Combat, Loot, AH, NPC-AI via Coordinator/KI-Provider (lokal: Ollama)); verwaltet seine Realm-Datenbank `realm_state_<realm>` inklusive statischer Inhaltsversion.
+- **Coordinator** – zentrale KI-Queue-/Provider-Schnittstelle ohne Datenbankrechte (angeschlossener lokaler Provider: Ollama; Architektur providerunabhängig, siehe `docs/Coordinator.md`).
 - **Voice-Service** – Voice-Komponente (späterer Release, Teil der Zielarchitektur).
 
 Jeder Dienst kann eigenständig auf einem eigenen Debian-/Linux-Server betrieben werden.
@@ -226,6 +226,8 @@ Event
 
 Jede Realm-Version kann einen eigenen Inhalts- und Datenstand besitzen und wird unabhängig aktualisiert.
 
+**Hinweis:** Realm-Versionen (Live, Classic, Test, Event) sind Inhaltsversionen eines Realms, keine clientgespezifischen Realms. Es gibt keine PC-, Pi-, Browser- oder UE-Realms; alle offiziellen Clients verbinden sich mit denselben Realms (`Mehrere_Offizielle_Clients.md`).
+
 ---
 
 ## 8. Verhältnis zur bisherigen lokalen Monitoring-Doku
@@ -259,3 +261,5 @@ Die Vorlagen unter `deploy/` (systemd-Unit-Vorlagen usw.) beschreiben den bisher
 > Ein Realm-Update erzwingt keinen Neustart anderer Realms.
 
 > Realm-Versionen (Live, Classic, Test, Event) können parallel und unabhängig betrieben werden.
+
+> Client-Plattformen ändern die Server-Zielarchitektur nicht: alle offiziellen Clients verbinden sich mit denselben Realms (`Mehrere_Offizielle_Clients.md`).

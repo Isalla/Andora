@@ -118,7 +118,7 @@ NPC-/Combat-System
 
 Das kleine Modell interpretiert nur die Absicht. Es führt keine Spielaktion selbst aus. Der autoritative Server prüft anschließend Fähigkeiten, Ziel, Reichweite, Cooldowns, Zustand usw.
 
-Freie NPC-Gespräche laufen getrennt über das normale größere Ollama-Dialogmodell.
+Freie NPC-Gespräche laufen getrennt über das normale größere Dialogmodell der Runtime-KI (lokal: Ollama).
 
 ---
 
