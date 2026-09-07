@@ -95,6 +95,23 @@ Panel und Agent kommunizieren über einen **dedizierten Port** des Servers mit *
 
 Entschlüsselung, Betrieb und Zertifikatsverwaltung bleiben Teil der definierten Betriebskonfiguration.
 
+### Umsetzungsstand (Debug-Build)
+
+Erste Implementierung unter `src/agent/` (Go, Stdlib-only, `go test`):
+verwaltete Dienste (Units), systemctl/journalctl via `sudo -n` (feste
+sudoers-Regel, `deploy/sudoers/andora-agent`), Health/Version-Proben,
+Logs mit Zeilen-/Byte-Obergrenzen. Authentifizierung ist die aufgeführte
+**Zwischenlösung** Token (`X-Andora-Token`, fail-closed bei fehlendem
+`AGENT_TOKEN`); mTLS ist konfigurationsseitig und serverseitig
+(`RequireAndVerifyClientCert`) vorbereitet. Das PHP-Panel
+(`web/andora-monitor`, `lib/agent.php`) nutzt den Agent als bevorzugten
+Weg mit Legacy-Fallback (`via: agent|systemd`). Noch nicht umgesetzt:
+Update- und Realm-Update-Abläufe (Aufgaben des künftigen
+`andora-updater`).
+
+Der Agent verwaltet ausschließlich die für diesen Server konfigurierten
+Andora-Units — kein generisches systemctl, keine Shell.
+
 ---
 
 ## 5. Nicht-Root-Benutzer `andora`
@@ -107,9 +124,19 @@ andora
 
 Es gelten:
 
-- kein Root und kein sudo für Andora-Komponenten,
-- das Panel führt keine Root-Systembefehle aus,
-- der Agent verwaltet ausschließlich Andora-eigene Dienste und Dateien im Bereich dieses Benutzers,
+- Komponenten laufen mit diesem Benutzer; kein generischer Root-Zugriff.
+- Das lokale Panel führt **keine Root-Systembefehle** aus. Es spricht
+  ausschließlich den Agenten an (Übergang: Legacy-Fallback auf die enge,
+  weiter unten definierte sudo-Regel für `systemctl`-Steuerung).
+- Der Agent erhebt Root-Rechte **nur** über eine eng begrenzte, fixierte
+  sudo-Regel (`deploy/sudoers/andora-agent`): exakte `systemctl
+  start|stop|restart`- und `journalctl`-Befehle für feste
+  Andora-Units, ohne Shell, ohne generisches systemctl. Alle Lese-Zugriffe
+  (Status, Health, Version) laufen ohne sudo.
+- Das ist eine bewusste **Übergangslösung** (Debug-Build): Die Zielarchitektur
+  sieht „kein sudo für Andora-Komponenten" vor; sobald alle Verwaltungs- und
+  Update-Aufgaben über den Agenten laufen (inkl. `andora-updater`), wird die
+  sudo-Regel zurückgebaut.
 - systemd-Units (falls eingesetzt) starten die Dienste mit diesem Benutzer.
 
 Systemnahe Änderungen (Pakete, Firewall, Benutzeranlage) sind bewusst und manuell vom Serververantwortlichen durchzuführen und gehören nicht zu den Rechten von Panel, Agent oder Updater.

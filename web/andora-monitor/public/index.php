@@ -13,6 +13,7 @@ $ROOT = __DIR__ . '/../';
 require_once $ROOT . 'lib/config.php';
 $cfg = panel_config();
 require_once $ROOT . 'lib/envconfig.php';
+require_once $ROOT . 'lib/agent.php';
 
 // Fehlerbehandlung: alle Outputs als JSON, keine rohen Meldungen an Client
 // Warnings/Notices werden geloggt und nicht als 500 beantwortet (z.B. @-unterdrückte
@@ -116,18 +117,27 @@ switch ($path) {
         // Systemd-Status prüfen (ohne sudo, falls is-active)
         $isActive = check_service_active($cfg['gameServerService']);
         $sudoOk = check_sudo_rule_installed($cfg['sudoersPath']);
-        
+
+        // Andora-Agent: Detailstatus des konfigurierten Service-Keys (falls aktiv)
+        $agent = ['enabled' => false];
+        if (agent_enabled($cfg)) {
+            $agent = agent_service_status($cfg);
+            $agent['enabled'] = $agent['connected'];
+        }
+
         send_json(200, [
             'ok' => true,
             'panel' => [
                 'game_server_service' => $cfg['gameServerService'],
                 'sudo_rule_installed' => $sudoOk,
-                'token_required' => !!$cfg['token']
+                'token_required' => !!$cfg['token'],
+                'agent_enabled' => agent_enabled($cfg)
             ],
             'systemd' => [
                 'state' => $isActive ? 'active' : 'inactive',
                 'active' => $isActive
             ],
+            'agent' => $agent,
             'game_server' => $status ?? ['offline' => true],
             'player_list' => $players
         ]);
@@ -161,7 +171,27 @@ switch ($path) {
         if (!in_array($action, $allowed) || !$confirm) {
             send_json(400, ['ok' => false, 'error' => 'Ungültige Aktion oder Bestätigung fehlt (start/stop/restart, confirm=true)']);
         }
-        // systemctl ausführen (sudo -n)
+
+        // Agent-First: Wenn der Andora-Agent konfiguriert ist, Aktion darüber ausführen.
+        if (agent_enabled($cfg)) {
+            $viaAgent = agent_service_action($cfg, $action);
+            if ($viaAgent['ok']) {
+                send_json(200, [
+                    'ok' => true,
+                    'action' => $action,
+                    'via' => 'agent',
+                    'state' => $viaAgent['state'],
+                    'active' => $viaAgent['active'],
+                    'key' => $viaAgent['key'],
+                    'unit' => $viaAgent['unit'],
+                    'output' => $viaAgent['state']
+                ]);
+                exit();
+            }
+            error_log('Agent-Aktion ' . $action . ' fehlgeschlagen: ' . ($viaAgent['error'] ?? '?') . ' -> Legacy-Fallback');
+        }
+
+        // Legacy-Fallback: systemctl über sudo -n
         $out = run_systemctl($action, $cfg['gameServerService']);
         if ($out['exitCode'] !== 0) {
             error_log('systemctl ' . $action . ' fehlgeschlagen, exitCode=' . $out['exitCode'] . ' stderr=' . $out['stderr']);
@@ -169,7 +199,15 @@ switch ($path) {
             exit();
         }
         $output = trim($out['stdout'] ?? '');
-        send_json(200, ['ok' => true, 'action' => $action, 'output' => $output]);
+        $newActive = check_service_active($cfg['gameServerService']);
+        send_json(200, [
+            'ok' => true,
+            'action' => $action,
+            'via' => 'systemd',
+            'state' => $newActive ? 'active' : 'inactive',
+            'active' => $newActive,
+            'output' => $output
+        ]);
         exit();
 
     case '/api/config':

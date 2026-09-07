@@ -6,6 +6,7 @@ installiert. Auf dem Entwicklungsrechner wurde **nichts** installiert.
 > Produktions-Root-Beispiel (anpassen!): `/opt/andora`
 > - `/opt/andora/server`    = das komplette `src/realm/`-Verzeichnis (inkl. `build/`, `config.env`)
 > - `/opt/andora/monitor`   = das komplette `web/andora-monitor/`-Verzeichnis (PHP-Panel)
+> - `/opt/andora/agent`     = `src/agent/` gebaut + `config.env` (Andora-Agent, Management-API)
 > - Das Repository selbst bleibt auf dem Dev-Rechner; nur Build-Artefakte landen bei Produktion.
 
 ---
@@ -35,14 +36,24 @@ IPv4-mapped-IPv6-Sockets vertraut (plattformabhängig).
 |---|---|
 | `src/realm/` (inkl. `build/`, `config.env`) | `/opt/andora/server/` |
 | `web/andora-monitor/` (PHP-Panel) | `/opt/andora/monitor/` |
+| `src/agent/` + Binär `agent` | `/opt/andora/agent/` |
 | `deploy/systemd/andora-monitor-fpm.service` | `/etc/systemd/system/andora-monitor-fpm.service` |
 | `deploy/systemd/andora-monitor-apache.service` | `/etc/systemd/system/andora-monitor-apache.service` |
 | `deploy/systemd/andora-server.service` | `/etc/systemd/system/andora-server.service` |
+| `deploy/systemd/andora-agent.service` | `/etc/systemd/system/andora-agent.service` |
 | `deploy/conf/monitor.conf` | `/opt/andora/monitor/monitor.conf` |
 | `deploy/conf/monitor-fpm.conf` | `/opt/andora/monitor/monitor-fpm.conf` |
 | `deploy/conf/monitor-apache.conf` | `/opt/andora/monitor/monitor-apache.conf` |
 | `deploy/conf/andora-monitor-site.conf` | `/opt/andora/monitor/andora-monitor-site.conf` |
+| `deploy/conf/agent.conf` | `/opt/andora/agent/config.env` |
 | `deploy/sudoers/andora-monitor` | `/etc/sudoers.d/andora-monitor` |
+| `deploy/sudoers/andora-agent` | `/etc/sudoers.d/andora-agent` |
+
+Agent-Binary selbst bauen und mitkopieren:
+```bash
+cd src/agent && .tmp/go/go-toolchain/bin/go build -o agent .
+# agent + config.env (aus agent.conf) wandern nach /opt/andora/agent/
+```
 
 Vorher auf dem Zielsystem (Pakete):
 ```bash
@@ -74,14 +85,20 @@ sudo chmod 700 /opt/andora/monitor/data
 sudo mkdir -p /run/andora-monitor /var/log/andora-monitor
 sudo chown pi:pi /run/andora-monitor /var/log/andora-monitor
 
-# systemd-Units: root-eigenn, standard Rechte
-sudo chown root:root /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service
-sudo chmod 644 /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service
+# Andora-Agent (läuft als User "andora")
+sudo chown -R andora:andora /opt/andora/agent
+sudo chmod 755 /opt/andora/agent
+sudo chmod 600 /opt/andora/agent/config.env   # enthält AGENT_TOKEN
 
-# sudoers-Datei: root-eigenn, genau 0440 (wichtig!)
-sudo chown root:root /etc/sudoers.d/andora-monitor
-sudo chmod 0440 /etc/sudoers.d/andora-monitor
+# systemd-Units: root-eigenn, standard Rechte
+sudo chown root:root /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
+sudo chmod 644 /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
+
+# sudoers-Dateien: root-eigenn, genau 0440 (wichtig!)
+sudo chown root:root /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
+sudo chmod 0440 /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
 sudo visudo -cf /etc/sudoers.d/andora-monitor   # Syntax-Check
+sudo visudo -cf /etc/sudoers.d/andora-agent     # Syntax-Check
 ```
 
 ---
@@ -92,15 +109,25 @@ sudo visudo -cf /etc/sudoers.d/andora-monitor   # Syntax-Check
 sudo cp deploy/systemd/andora-server.service            /etc/systemd/system/andora-server.service
 sudo cp deploy/systemd/andora-monitor-fpm.service       /etc/systemd/system/andora-monitor-fpm.service
 sudo cp deploy/systemd/andora-monitor-apache.service    /etc/systemd/system/andora-monitor-apache.service
+sudo cp deploy/systemd/andora-agent.service             /etc/systemd/system/andora-agent.service
 sudo cp deploy/conf/monitor.conf monitor-fpm.conf monitor-apache.conf andora-monitor-site.conf /opt/andora/monitor/
+sudo cp deploy/conf/agent.conf                          /opt/andora/agent/config.env
 sudo cp deploy/sudoers/andora-monitor       /etc/sudoers.d/andora-monitor
+sudo cp deploy/sudoers/andora-agent         /etc/sudoers.d/andora-agent
 
 sudo systemctl daemon-reload
-sudo systemctl enable andora-server andora-monitor-fpm andora-monitor-apache
+sudo systemctl enable andora-server andora-monitor-fpm andora-monitor-apache andora-agent
 sudo systemctl start andora-server
 sudo systemctl start andora-monitor-fpm
 sudo systemctl start andora-monitor-apache
+sudo systemctl start andora-agent
 ```
+
+**Agent nach dem Start prüfen:** `AGENT_TOKEN` in `/opt/andora/agent/config.env`
+setzen, sonst verweigert der Agent alle Management-Requests (fail-closed). Bei
+Nutzung des Panels über den Agent müssen dieselben Werte in `/opt/andora/monitor/
+monitor.conf` stehen: `ANDORA_AGENT_URL`, `ANDORA_AGENT_TOKEN`,
+`ANDORA_AGENT_SERVICE_KEY` (Standard `realm`).
 
 **Reihenfolge/Bind-Modus:** Vor dem Start den gewünschten `Listen`-Block in
 `/opt/andora/monitor/andora-monitor-site.conf` aktivieren (Standard [1],
@@ -124,13 +151,39 @@ pi ALL=(root) NOPASSWD: /usr/bin/systemctl start andora-server.service, \
 - Der User in der Regel muss zum `User=pi` in `andora-monitor-fpm.service` passen.
 - Alle anderen sudo-Aufrufe bleiben wie gehabt.
 
+**Andora-Agent** (`deploy/sudoers/andora-agent`): erlaubt `User=andora`
+genau diese Befehle (NOPASSWD) für die konfigurierten „Standard"-Units:
+
+```
+andora ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl start andora-server.service, ... restart ..., \
+  ... andora-coordinator.service ...,
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-server.service, \
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-coordinator.service
+```
+
+- Exakt die gelisteten Befehle + Units; kein generisches `systemctl`,
+  keine Shell. Zeilenzahl für Logs ist serverseitig begrenzt
+  (`AGENT_LOG_LINE_LIMIT`, 1–10000).
+- **sudoers-Glob-Härtung:** Muster enden auf einem exakten Token
+  (`... restart <unit>` bzw. `-u <unit>`); `--lines` steht in der Mitte
+  mit reinem Ziffern-Glob `[0-9]*`. Ein nachgestelltes `*` würde in
+  sudoers auch weitere Argumente (andere `-u`-Units, `-o`, `--since`)
+  erlauben — das wird so verhindert. Der Agent ruft exakt
+  `journalctl --no-pager --lines <n> -u <unit>`.
+- Der Agent selbst läuft **ohne** `NoNewPrivileges` (sudo/setuid wird
+  benötigt); weitere Setuid-Programme werden nicht genutzt.
+- Units hier nach Bedarf ergänzen/entfernen (z. B. wenn
+  `andora-monitor-{fpm,apache}.service` mit verwaltet werden sollen) —
+  sie müssen zur `AGENT_SERVICES`-Liste in `agent.conf` passen.
+
 ---
 
 ## 5. Verifikation
 
 ```bash
 # Services laufen?
-sudo systemctl status andora-server andora-monitor-fpm andora-monitor-apache
+sudo systemctl status andora-server andora-monitor-fpm andora-monitor-apache andora-agent
 
 # Sudo-Regel ohne Passwort (sollte "active" liefern):
 sudo -n systemctl is-active andora-server.service
@@ -139,11 +192,22 @@ sudo -n systemctl is-active andora-server.service
 curl -s http://127.0.0.1:3002/health
 curl -s http://127.0.0.1:3002/status
 
+# Andora-Agent (Management-API, Token setzen!)
+curl -s http://127.0.0.1:9443/health
+curl -s http://127.0.0.1:9443/status
+curl -s -H 'X-Andora-Token: <token>' http://127.0.0.1:9443/api/v1/services
+curl -s -H 'X-Andora-Token: <token>' http://127.0.0.1:9443/api/v1/services/realm
+
 # Panel (URL, Bind + Token beachten) — Apache bevorzugt bei Aufruf auf 127.0.0.1:
 curl -s http://127.0.0.1:3003/api/status
 curl -s http://127.0.0.1:3003/api/config
 curl -s http://127.0.0.1:3003/api/history
 curl -s http://127.0.0.1:3003/          # Dashboard
+
+# Panel via Agent (Status-Block "agent" + Control via "via": "agent"):
+curl -s http://127.0.0.1:3003/api/status | grep -o '"agent":{[^}]*}'
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"action":"restart","confirm":true}' http://127.0.0.1:3003/api/control
 
 # Dual-Stack: bei Block [4] beide Familien prüfen
 curl -s http://127.0.0.1:3003/api/status
@@ -159,12 +223,13 @@ curl -s -g "http://[::1]:3003/api/status"
 ## 6. Rollback (Zurückführen)
 
 ```bash
-sudo systemctl stop andora-monitor-apache andora-monitor-fpm andora-server
-sudo systemctl disable andora-monitor-apache andora-monitor-fpm andora-server
+sudo systemctl stop andora-monitor-apache andora-monitor-fpm andora-server andora-agent
+sudo systemctl disable andora-monitor-apache andora-monitor-fpm andora-server andora-agent
 sudo rm /etc/systemd/system/andora-monitor-apache.service /etc/systemd/system/andora-monitor-fpm.service
 sudo rm /etc/systemd/system/andora-server.service
-sudo rm /etc/sudoers.d/andora-monitor
-sudo rm -r /opt/andora/monitor /opt/andora/server
+sudo rm /etc/systemd/system/andora-agent.service
+sudo rm /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
+sudo rm -r /opt/andora/monitor /opt/andora/server /opt/andora/agent
 sudo systemctl daemon-reload
 ```
 
@@ -177,6 +242,10 @@ sudo systemctl daemon-reload
 | Panel zeigt Game-Server als offline, aber `systemctl status` ist aktiv | `ANDORA_GAME_SERVER_URL` / `PORT_HTTP` in `monitor.conf` prüfen |
 | `/api/config` POST schreibt falsche Datei | `ANDORA_SERVER_CONFIG` fehlt/zeigt nicht auf die Server-`config.env` |
 | Start/Stop/Restart im Panel schlägt fehl | sudo-Regel fehlt oder User-Fehler: `sudo -l -U pi` |
+| Panel meldet `agent.enabled=false` | `ANDORA_AGENT_URL` in `monitor.conf` fehlt |
+| Status-Block `agent` zeigt `connected=false` | Agent läuft nicht / Token falsch: `curl http://127.0.0.1:9443/health`, `ANDORA_AGENT_TOKEN` abgleichen |
+| Agent verweigert alle Management-Requests („fail-closed") | `AGENT_TOKEN` in `/opt/andora/agent/config.env` fehlt oder leer |
+| Agent-Aktion im Panel scheitert, falls Unit unbekannt | Services-Registry: `AGENT_SERVICES`/`AGENT_SERVICE_<KEY>_UNIT` in `agent.conf` (auch sudoers-Liste) |
 | Apache startet nicht / Port belegt | `Listen`-Block gewählt? `journalctl -u andora-monitor-apache -e` |
 | FPM liefert 502 / `proxy:unix`-Socket fehlt | FPM läuft? `ls -l /run/andora-monitor/php-fpm.sock`, `journalctl -u andora-monitor-fpm -e` |
 | Panel meldet leere History | `data/history.json` erst nach erstem `/api/status`; Rechte auf `data/` prüfen |

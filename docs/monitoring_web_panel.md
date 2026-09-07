@@ -44,6 +44,15 @@ Node-Panel bleibt als Legacy-Referenz erhalten (siehe `deploy/README.md`).
 | 3001 | Gameserver | WebSocket (Spieler) |
 | 3002 | Gameserver | `GET /health`, `GET /status`, `GET /players` |
 | 3003 | Panel | `GET /` Dashboard, `GET/POST /api/*` |
+| 9443 | Andora-Agent | `GET /health`, `GET /status`, `GET /api/v1/services…` (Management-API, Token-Auth) |
+
+Der **Andora-Agent** (`src/agent`) ist der lokale Verwaltungsdaemon
+(Management-Port strikt getrennt von den Spiel-/Service-Ports). Er wird
+über einen Token authentifiziert (`AGENT_TOKEN`, Zwischenlösung; mTLS ist
+architektonisch vorbereitet) und steuert Start/Stop/Restart, Status,
+Healths, Logs und Versionen nur für konfigurierte Andora-Units. Das Panel
+nutzt ihn als bevorzugten Weg (`via: agent`), mit Legacy-Fallback auf
+`sudo -n systemctl` (`via: systemd`), sobald `ANDORA_AGENT_URL` gesetzt ist.
 
 Panel-Bindung: default `127.0.0.1:3003` (weder LAN noch public);
 `ANDORA_MONITOR_BIND` wählt die Interfaces (`""`/`auto` = 127.0.0.1,
@@ -86,6 +95,14 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   - PHP-Implementierung: fehlgeschlagene `systemctl`-Aktionen melden `ok=false`
     mit generischer Fehlermeldung; interne Fehler werden nur intern protokolliert,
     nicht an den Client weitergegeben. Exit-Code wird geprüft (fail-closed).
+  - **Agent-Pfad**: Ist `ANDORA_AGENT_URL` gesetzt, wird die Aktion zuerst über
+    den Andora-Agent ausgeführt (POST `/api/v1/services/<key>/<action>`).
+    Antwort enthält `via: "agent"` plus `state`/`active`. Schlägt der Agent fehl
+    (nicht erreichbar/HTTP-Fehler), fällt das Panel auf `sudo -n systemctl`
+    zurück (`via: "systemd"`) und meldet den Folgezustand der Unit.
+  - `/api/status` liefert zusätzlich den Block `agent` mit
+    `enabled`, `connected`, `key`, `unit`, `state`, `healthy`, `version`,
+    `health_url` (nur wenn `ANDORA_AGENT_URL` gesetzt, sonst `enabled: false`).
 - **Verlauf**: `GET /api/history` (Datei-basiert in `data/history.json`,
   max. 360 Punkte, 5-Sekunden-Drosselung anhand letzten Timestamp).
   - PHP-Implementierung: speichert echte Werte des abgefragten Serverstatus
@@ -122,17 +139,32 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   - `lib/config.php` — Laden der Panel-Konfiguration
   - `lib/envconfig.php` — Lese-/Schreib-Logik für `config.env` (Whitelist-basiert,
     validateChanges, writeChanges, read_env_file)
+  - `lib/agent.php` — HTTP-Client für den Andora-Agent (`ANDORA_AGENT_URL`,
+    `ANDORA_AGENT_TOKEN`, `ANDORA_AGENT_SERVICE_KEY`, `ANDORA_AGENT_TIMEOUT_MS`);
+    Status-/List-/Action-Helfer, `via: agent|systemd`
   - `data/` — History-Datenverzeichnis (history.json, Datei-basiert, CAP 360)
   - `config.php` — Projektkonfiguration (Umgebungsvariablen, sensible Defaults)
   - `public/index.html` — Dashboard-HTML
+- `src/agent/` — Andora-Agent (Go, `package main`, Stdlib-only, Debug-Build):
+  - `config.go`, `bind.go`, `urlutil.go`, `controller.go`, `security.go`,
+    `server.go` — Konfiguration (fail-closed, Token-Pflicht, Services-Registry),
+    dual-stack Listener, Controller-Abstraktion (systemctl/journalctl via `sudo -n`,
+    Health/Version-Proben), Auth (Token, constant-time)/Rate-Limit/Logging,
+    HTTP-API + main
+  - `config_test.go`, `controller_test.go`, `handler_test.go` — go test/vet
+  - `config.env.example`, `README.md`
 - `deploy/` — Vorlagen (NUR Vorlagen, nicht installiert):
   - `deploy/systemd/andora-server.service`, `andora-monitor-fpm.service`,
     `andora-monitor-apache.service` (Produktionsbetrieb: Apache + PHP-FPM)
+  - `deploy/systemd/andora-agent.service` (Agent als systemd-Unit; ohne
+    `NoNewPrivileges`, da `sudo -n` erforderlich)
   - `deploy/conf/monitor.conf` (EnvironmentFile des Panels)
+  - `deploy/conf/agent.conf` (Konfigurationsvorbild des Agent)
   - `deploy/conf/monitor-fpm.conf` (PHP-FPM-Pool, Unix-Socket)
   - `deploy/conf/monitor-apache.conf` + `andora-monitor-site.conf`
     (Apache-Instance inkl. expliziter Listen für Bind/Dual-Stack)
   - `deploy/sudoers/andora-monitor` (3 Befehle, passwordless, nur eine Unit)
+  - `deploy/sudoers/andora-agent` (start/stop/restart + journalctl, feste Units)
   - `deploy/README.md` (Installation, Rechte, systemd-Befehle, Verifikation, Rollback)
 
 ### Geändert
@@ -186,3 +218,9 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
     die History wird mit echten Serverstatus-Werten gespeichert (keine
     pauschal `online=true`/`players=0`), und der Token-fail-closed-Schutz
     wird case-insensitiv auf den `x-api-token`-Header angewendet.
+9. **Agent-Authentifizierung (Zwischenlösung)**: Der Andora-Agent
+   authentifiziert den Panel-Zugriff aktuell per Token (`AGENT_TOKEN`,
+   versioniert über `X-Andora-Token`/`x-api-token`). Archivziel bleibt mTLS
+   (CA-/Client-Zertifikate sind konfigurationsseitig bereits vorbereitet:
+   `AGENT_CA_FILE`, `AGENT_CLIENT_CERT_FILE`, `AGENT_CLIENT_KEY_FILE`,
+   Server-Einstellung `RequireAndVerifyClientCert`).

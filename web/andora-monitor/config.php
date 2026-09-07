@@ -96,6 +96,12 @@ function panel_config(): array {
     $sudoUnit = andora_env_str('ANDORA_SUDO_UNIT', 'andora-monitor');
     $sudoDir = andora_env_str('ANDORA_SUDO_DIR', '/etc/sudoers.d');
 
+    // Andora-Agent (Management-API, src/agent); leer = deaktiviert (Legacy-Fallback)
+    $agentUrl = andora_env_str('ANDORA_AGENT_URL', '');
+    $agentToken = andora_env_str('ANDORA_AGENT_TOKEN', '');
+    $agentServiceKey = andora_env_str('ANDORA_AGENT_SERVICE_KEY', 'realm');
+    $agentTimeoutMs = andora_env_int('ANDORA_AGENT_TIMEOUT_MS', 2500);
+
     // Listen-Pläne aus Bind-Host ableiten (entsprechend Node listenPlans)
     $listenPlans = listen_plans($bindHost);
 
@@ -110,6 +116,12 @@ function panel_config(): array {
         'listenPlans' => $listenPlans,
         'configWhitelist' => CONFIG_WHITELIST,
         'configVisible' => CONFIG_VISIBLE,
+        'agent' => [
+            'url' => $agentUrl,
+            'token' => $agentToken,
+            'serviceKey' => $agentServiceKey,
+            'timeoutMs' => $agentTimeoutMs,
+        ],
         'sudo' => [
             'user' => $sudoUser,
             'unit' => $sudoUnit,

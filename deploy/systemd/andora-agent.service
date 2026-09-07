@@ -1,0 +1,35 @@
+# andora-agent.service — Andora-Agent (Go, src/agent)
+#
+# Verwaltungsdaemon für Andora-Komponenten dieses Servers. Management-Port
+# 9443 ist strikt von den Spiel-/Service-Ports getrennt.
+#
+# Hinweis zu NoNewPrivileges: bewusst NICHT gesetzt. Der Agent führt
+# start/stop/restart und journalctl-Abfragen über die NOPASSWD-sudo-Regel
+# (deploy/sudoers/andora-agent) aus — setuid/sudo erfordert privilege
+# elevation. Keine weiteren Setuid-Programme werden genutzt.
+# ProtectSystem/ProtectHome bleiben aktiv; Restart auf Fehler.
+# Startreihenfolge im Betrieb: database -> login -> realm -> coordinator
+# -> monitor -> agent (der Agent selbst greift nur lesend/steuernd zu).
+
+[Unit]
+Description=Andora Agent Service (lokaler Verwaltungsdaemon, Go)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=andora
+Group=andora
+WorkingDirectory=/opt/andora/agent
+EnvironmentFile=/opt/andora/agent/config.env
+ExecStart=/opt/andora/agent/agent /opt/andora/agent/config.env
+Restart=on-failure
+RestartSec=5
+ProtectSystem=true
+ProtectHome=true
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

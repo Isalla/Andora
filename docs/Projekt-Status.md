@@ -23,3 +23,4 @@ Implementierungsstands automatisch selbst (Pflicht laut `docs/ai_jobs.md`).
 | 9 | Realm (Node.js) | Legacy | Übergang, wird durch den Rust-Realm abgelöst |
 | 10 | Monitor-/Web-Panel | Eingebaut | PHP-Panel unter `web/andora-monitor` funktionsfähig (Status/Spieler/History/Config/Control); Node-Panel Legacy |
 | 11 | Protokoll-/i18n-Module (shared) | Grundgerüst | Gemeinsame Protokoll-IDs und Übersetzungsrahmen |
+| 12 | Andora-Agent | Eingebaut | Go-Dienst `src/agent`: lokaler Verwaltungsdaemon (systemctl/journalctl via `sudo -n`, Health/Version, Token-Auth Zwischenlösung, mTLS-Vorbereitung, Tests); Panel-Anbindung in `web/andora-monitor` (`via: agent`, Legacy-Fallback) |

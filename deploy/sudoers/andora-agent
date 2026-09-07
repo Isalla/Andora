@@ -1,0 +1,28 @@
+# andora-agent — beschränkte sudo-Regel für den Andora-Agent
+#
+# Diese Datei kommt in /etc/sudoers.d/ (Dateiname = andora-agent).
+# Sie erlaubt NUR die explizit gelisteten systemctl/journalctl-Befehle,
+# ohne Passwort, auf genau den definierten Andora-Units. Kein Shell,
+# keine weiteren Befehle, kein generisches systemctl.
+#
+# WICHTIG zu sudoers-Glob: Ein '*' am Ende eines Kommandomusters matcht
+# in sudoers auch NACHFOLGENDE Argumente. Deshalb enden alle Muster auf
+# einem exakten Token (Unit bzw. Verb+Unit) — und '--lines' steht in der
+# Mitte mit einem reinen Ziffern-Muster '[0-9]*'. So sind keine weiteren
+# Argumente (z. B. andere '-u'-Units, '-o', '--since') anhängbar.
+# Der Agent ruft daher genau: journalctl --no-pager --lines <n> -u <unit>.
+#
+# Ergänzt bzw. reduziert hier nach Bedarf: andora-monitor-{fpm,apache}.service
+# hinzufügen oder entfernen, wenn diese am Ziel nicht betrieben werden.
+#
+# User anpassen: 'andora' muss zum [Service] User=andora der
+# andora-agent.service passen.
+andora ALL=(root) NOPASSWD: \
+  /usr/bin/systemctl start andora-server.service, \
+  /usr/bin/systemctl stop andora-server.service, \
+  /usr/bin/systemctl restart andora-server.service, \
+  /usr/bin/systemctl start andora-coordinator.service, \
+  /usr/bin/systemctl stop andora-coordinator.service, \
+  /usr/bin/systemctl restart andora-coordinator.service, \
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-server.service, \
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-coordinator.service
