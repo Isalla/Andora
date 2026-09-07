@@ -9,7 +9,7 @@ dessen Alt-Architektur-Annahmen.
 
 - **Genau eine Datenbank**: `realm_state_<realm>` (Charaktere + Zustand).
   Keine `character`-/`world_data`-Pools; Migrationen in `migrations/`
-  (001–007, aus den Übergangs-Verzeichnissen zusammengeführt).
+  (001–008, aus den Übergangs-Verzeichnissen zusammengeführt; 008 = Combat V1).
 - **Einstieg per Handoff (fail-closed)**: `HELLO` braucht `handoff_token`
   UND `session_id`. Der `handoff_token` ist einmalig, realm-gebunden
   und wird via `/handoff/validate` verbraucht; die `session_id` muss
@@ -48,9 +48,12 @@ laufen vor Health/WebSocket; Fehler → Exit 1, keine Spieler.
 
 ## Bewusste Folgeschritte (kein Bestandteil dieses Stands)
 
-- Kampf/Loot/Auktion/NPC-Handler (`ATTACK`, `PICKUP`, `NPC_TALK`,
-  `AUCTION_*` — Protokoll-IDs bereits reserviert, Dispatcher meldet
-  `unknown type`).
+- **Combat**: Vertikaler Schnitt V1 ist eingebaut (`ATTACK` start/stop,
+  Auto-Grundangriff, Trefferauflösung, Rüstung/Klassen-Caps, Tod/KILL —
+  vorläufige Balancingwerte via `COMBAT_*`-Config). Als Nächstes: Fähigkeiten
+  (`skill_id`), Gegner/NPC-Angriffe, Loot.
+- **Loot/Auktion/NPC-Handler** (`PICKUP`, `NPC_TALK`, `AUCTION_*` —
+  Protokoll-IDs bereits reserviert, Dispatcher meldet `unknown type`).
 - Coordinator-Anbindung (`OLLAMA_URL`/`RENDER_CAP_DEFAULT` sind
   konfiguriert, aber noch nicht verdrahtet; Fallback-Regeln aus
   `docs/Coordinator.md` gelten dann).

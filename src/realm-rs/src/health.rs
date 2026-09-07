@@ -68,11 +68,14 @@ pub async fn serve(cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
         log::info!("health on {addr} (/health, /status, /players)");
         listeners.push(listener);
     }
-    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> = Vec::with_capacity(listeners.len());
+    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> =
+        Vec::with_capacity(listeners.len());
     for listener in listeners {
         let cfg = cfg.clone();
         let shared = shared.clone();
-        tasks.push(tokio::spawn(async move { accept_loop(listener, cfg, shared).await }));
+        tasks.push(tokio::spawn(async move {
+            accept_loop(listener, cfg, shared).await
+        }));
     }
     let (res, _, rest) = futures_util::future::select_all(tasks).await;
     for t in rest {
@@ -85,9 +88,16 @@ pub async fn serve(cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
     }
 }
 
-async fn accept_loop(listener: tokio::net::TcpListener, cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
+async fn accept_loop(
+    listener: tokio::net::TcpListener,
+    cfg: Arc<Config>,
+    shared: Shared,
+) -> Result<(), String> {
     loop {
-        let (mut sock, _) = listener.accept().await.map_err(|e| format!("health accept: {e}"))?;
+        let (mut sock, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("health accept: {e}"))?;
         let cfg = cfg.clone();
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -100,7 +110,13 @@ async fn accept_loop(listener: tokio::net::TcpListener, cfg: Arc<Config>, shared
             let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
             if method != "GET" {
                 let _ = sock
-                    .write_all(response(405, &serde_json::json!({"ok":false,"error":"method not allowed"})).as_bytes())
+                    .write_all(
+                        response(
+                            405,
+                            &serde_json::json!({"ok":false,"error":"method not allowed"}),
+                        )
+                        .as_bytes(),
+                    )
                     .await;
                 return;
             }
@@ -162,6 +178,7 @@ mod tests {
             },
             migrations_dir: String::new(),
             allow_destructive: false,
+            combat: crate::config::combat_config(&Default::default()),
         }
     }
 

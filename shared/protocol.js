@@ -6,7 +6,7 @@
 export const C2S = {
   HELLO: 1,        // {session_id, handoff_token, char_id, lang}
   MOVE: 2,         // {dir:[x,y], seq}
-  ATTACK: 3,       // {target_id, skill_id}
+  ATTACK: 3,       // {target_id} start / {stop: true} beenden (Combat V1)
   PICKUP: 4,       // {item_id}
   CHAT: 5,         // {channel, text}
   NPC_TALK: 6,     // {npc_id, text}
@@ -22,7 +22,7 @@ export const S2C = {
   SPAWN: 2,     // {id, kind, x, y, face, extra}
   DESPAWN: 3,   // {id}
   STATE: 4,     // {id, x, y, face, anim, hp, max_hp}
-  DAMAGE: 5,    // {id, amount, from_id}
+  DAMAGE: 5,    // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
   KILL: 6,      // {id, killer_id}
   LOOT: 7,      // {item_id, x, y}
   NPC_TEXT: 8,  // {npc_id, text}       (Text = i18n-KEY oder freier Text)

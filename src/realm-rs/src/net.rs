@@ -28,7 +28,13 @@ pub async fn serve(
     parental: SharedParental,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
-    let ctx = Arc::new(Ctx { cfg, db, auth, shared, parental });
+    let ctx = Arc::new(Ctx {
+        cfg,
+        db,
+        auth,
+        shared,
+        parental,
+    });
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
         let listener = tokio::net::TcpListener::bind(addr)
@@ -37,10 +43,13 @@ pub async fn serve(
         log::info!("websocket on {addr}");
         listeners.push(listener);
     }
-    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> = Vec::with_capacity(listeners.len());
+    let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> =
+        Vec::with_capacity(listeners.len());
     for listener in listeners {
         let ctx = ctx.clone();
-        tasks.push(tokio::spawn(async move { accept_loop(listener, ctx).await }));
+        tasks.push(tokio::spawn(
+            async move { accept_loop(listener, ctx).await },
+        ));
     }
     // Erster Fehler beendet den Server; alle Listener-Tasks werden gestoppt.
     let (res, _, rest) = futures_util::future::select_all(tasks).await;
@@ -56,7 +65,10 @@ pub async fn serve(
 
 async fn accept_loop(listener: tokio::net::TcpListener, ctx: Arc<Ctx>) -> Result<(), String> {
     loop {
-        let (sock, _) = listener.accept().await.map_err(|e| format!("websocket accept: {e}"))?;
+        let (sock, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("websocket accept: {e}"))?;
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_conn(ctx, sock).await {
@@ -66,10 +78,7 @@ async fn accept_loop(listener: tokio::net::TcpListener, ctx: Arc<Ctx>) -> Result
     }
 }
 
-async fn handle_conn(
-    ctx: Arc<Ctx>,
-    sock: tokio::net::TcpStream,
-) -> Result<(), String> {
+async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), String> {
     let ws = tokio_tungstenite::accept_async(sock)
         .await
         .map_err(|e| format!("ws handshake: {e}"))?;
@@ -155,8 +164,11 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
                 close_conn(&mut world, conn_id);
             }
         }
-        c2s::HEARTBEAT => handlers::handle_heartbeat(&ctx.shared, tx, conn_id, frame.seq, &data).await,
+        c2s::HEARTBEAT => {
+            handlers::handle_heartbeat(&ctx.shared, tx, conn_id, frame.seq, &data).await
+        }
         c2s::MOVE => handlers::handle_move(&ctx.shared, conn_id, &data, ctx.cfg.tick_ms).await,
+        c2s::ATTACK => handlers::handle_attack(&ctx.shared, conn_id, &data, &ctx.cfg.combat).await,
         c2s::CHAT => {
             handlers::handle_chat(
                 &ctx.parental,
@@ -180,7 +192,7 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
                 parental::handle_message(&ctx.parental, tx, &pid, frame.seq, action, pin).await;
             }
         }
-        // ATTACK / PICKUP / NPC_TALK / AUCTION_* : künftig (wie Übergangsstand).
+        // PICKUP / NPC_TALK / AUCTION_*: künftig (wie Übergangsstand).
         other => log::info!("unknown type {other}"),
     }
 }

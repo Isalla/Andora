@@ -9,7 +9,8 @@ use sqlx::{MySql, Pool};
 use tokio::sync::mpsc;
 
 use crate::auth_api::AuthApi;
-use crate::config::Config;
+use crate::combat::CombatState;
+use crate::config::{CombatCfg, Config};
 use crate::db;
 use crate::parental::{self, SharedParental};
 use crate::protocol::{s2c, Frame};
@@ -24,7 +25,10 @@ pub struct Ctx {
 }
 
 fn get_str(data: &serde_json::Value, key: &str) -> String {
-    data.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    data.get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Einstiegsprüfung (fail-closed), sobald die Auth-API konfiguriert ist:
@@ -102,13 +106,13 @@ pub async fn handle_hello(
     // account-identischer Session, sobald die Auth-API konfiguriert ist
     // (fail-closed; ohne wäre die Elternkontrolle umgehbar). Der Handoff
     // wird dabei verbraucht (einmalig).
-    let account_id =
-        verify_entry(&ctx.auth, ctx.cfg.realm_id, &handoff, &session_id).await?;
+    let account_id = verify_entry(&ctx.auth, ctx.cfg.realm_id, &handoff, &session_id).await?;
 
     let c = db::load_character(&ctx.db, &char_id).await.map_err(|e| {
         log::error!("HELLO load character: {e}");
         "character unavailable".to_string()
     })?;
+    let weapon_skill = db::load_weapon_skill(&ctx.db, &c.id, &ctx.cfg.combat.weapon_skill_id).await;
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -117,14 +121,19 @@ pub async fn handle_hello(
         face: 0.0,
         ping_ms: 0,
         zone_id: 0,
-        hp: 100,
-        max_hp: 100,
+        hp: c.hp,
+        max_hp: c.hp,
         lang,
         account_id,
         session_id: session_id.clone(),
         entities: Default::default(),
         last_activity: Instant::now(),
         tx: tx.clone(),
+        char_class: c.char_class.clone(),
+        level: c.level,
+        armor: c.armor,
+        weapon_skill,
+        combat: None,
     };
     {
         let mut world = ctx.shared.lock().await;
@@ -133,9 +142,7 @@ pub async fn handle_hello(
     }
 
     // Elternkontrolle: BLOCKED am Login -> Einstieg verweigert.
-    if let Err(reason) =
-        parental::attach(&ctx.parental, tx, &c.id, account_id, &session_id).await
-    {
+    if let Err(reason) = parental::attach(&ctx.parental, tx, &c.id, account_id, &session_id).await {
         let mut world = ctx.shared.lock().await;
         world.players.remove(&c.id);
         world.by_conn.remove(&conn_id);
@@ -163,9 +170,7 @@ pub async fn handle_hello(
         let others: Vec<String> = world
             .players
             .values()
-            .filter(|q| {
-                q.id != c.id && (q.x - mx).hypot(q.y - my) <= ctx.cfg.aofb_radius
-            })
+            .filter(|q| q.id != c.id && (q.x - mx).hypot(q.y - my) <= ctx.cfg.aofb_radius)
             .map(|q| q.id.clone())
             .collect();
         for oid in others {
@@ -183,10 +188,7 @@ pub async fn handle_hello(
 /// MOVE: Position serverseitig validiert (Speed-Cap, keine Teleports).
 pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value, tick_ms: u64) {
     let (dx, dy) = match data.get("dir").and_then(|v| v.as_array()) {
-        Some(a) if a.len() >= 2 => (
-            a[0].as_f64().unwrap_or(0.0),
-            a[1].as_f64().unwrap_or(0.0),
-        ),
+        Some(a) if a.len() >= 2 => (a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0)),
         _ => (
             data.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0),
             data.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -202,6 +204,66 @@ pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value
         me.x = x;
         me.y = y;
         me.last_activity = Instant::now();
+    }
+}
+
+/// ATTACK (Combat V1): Auto-Grundangriff starten oder beenden.
+/// Payload: {target_id} = starten, {stop: true} = beenden.
+/// Realm-autoritativ validiert: Ziel existiert, ist nicht selbst, lebt
+/// und liegt in Waffen-Reichweite. Gültige Starts bewaffnen den Angriff;
+/// der erste Schlag folgt sofort (Duration als abgelaufen gesetzt), alle
+/// weiteren im Duration-Takt (siehe combat::combat_tick). Ungültige
+/// Anfragen werden ignoriert (kein Kampfzustand, kein Schaden).
+pub async fn handle_attack(
+    shared: &Shared,
+    conn_id: u64,
+    data: &serde_json::Value,
+    cfg: &CombatCfg,
+) {
+    let mut world = shared.lock().await;
+    let pid = match world.by_conn.get(&conn_id) {
+        Some(pid) => pid.clone(),
+        None => return,
+    };
+    // Stop: bewaffneten Angriff beenden (immer erlaubt).
+    if data.get("stop").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if let Some(me) = world.players.get_mut(&pid) {
+            me.combat = None;
+        }
+        return;
+    }
+    let target_id = data.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
+    if target_id.is_empty() || target_id == pid {
+        return;
+    }
+    // Validierung (immutable): Ziel existiert, nicht tot, in Reichweite,
+    // Angreifer lebt.
+    let valid = {
+        let me = match world.players.get(&pid) {
+            Some(me) => me,
+            None => return,
+        };
+        if me.hp <= 0 {
+            false
+        } else {
+            world
+                .players
+                .get(target_id)
+                .is_some_and(|t| t.hp > 0 && (me.x - t.x).hypot(me.y - t.y) <= cfg.weapon_range)
+        }
+    };
+    if !valid {
+        return; // kein Kampfzustand, kein Schaden.
+    }
+    let now = Instant::now();
+    if let Some(me) = world.players.get_mut(&pid) {
+        me.combat = Some(CombatState {
+            target_id: target_id.to_string(),
+            // Erster Schlag sofort beim nächsten Tick; danach Duration-Takt.
+            last_attack: now
+                .checked_sub(std::time::Duration::from_millis(cfg.weapon_duration_ms))
+                .unwrap_or(now),
+        });
     }
 }
 
@@ -224,8 +286,12 @@ pub async fn handle_chat(
     };
     if !parental::chat_allowed(parental, &pid).await {
         let _ = tx.send(
-            Frame::new(seq, s2c::PARENTAL_RESULT, serde_json::json!({"ok": false, "reason": "chat_locked"}))
-                .encode(),
+            Frame::new(
+                seq,
+                s2c::PARENTAL_RESULT,
+                serde_json::json!({"ok": false, "reason": "chat_locked"}),
+            )
+            .encode(),
         );
         return;
     }
@@ -234,7 +300,10 @@ pub async fn handle_chat(
     if text.is_empty() {
         return;
     }
-    let channel = data.get("channel").and_then(|v| v.as_str()).unwrap_or("local");
+    let channel = data
+        .get("channel")
+        .and_then(|v| v.as_str())
+        .unwrap_or("local");
     let world = shared.lock().await;
     let Some(me) = world.players.get(&pid) else {
         return;
@@ -275,9 +344,7 @@ pub async fn handle_heartbeat(
             }
         }
     }
-    let _ = tx.send(
-        Frame::new(seq, s2c::SYNC, serde_json::json!({"ack_seq": seq})).encode(),
-    );
+    let _ = tx.send(Frame::new(seq, s2c::SYNC, serde_json::json!({"ack_seq": seq})).encode());
 }
 
 #[cfg(test)]
@@ -336,9 +403,7 @@ mod tests {
                             break;
                         }
                         buf.extend_from_slice(&chunk[..n]);
-                        if String::from_utf8_lossy(&buf).contains("\r\n\r\n")
-                            || buf.len() > 8192
-                        {
+                        if String::from_utf8_lossy(&buf).contains("\r\n\r\n") || buf.len() > 8192 {
                             break;
                         }
                     }
@@ -381,7 +446,8 @@ mod tests {
     const HANDOFF_RELM: &str = r#"{"valid":true,"account_id":7,"realm_id":9}"#;
     const SESSION_OK: &str = r#"{"valid":true,"account_id":7,"expires_at":"2030-01-01T00:00:00Z"}"#;
     const SESSION_DEAD: &str = r#"{"valid":false,"account_id":null,"expires_at":null}"#;
-    const SESSION_OTHER: &str = r#"{"valid":true,"account_id":8,"expires_at":"2030-01-01T00:00:00Z"}"#;
+    const SESSION_OTHER: &str =
+        r#"{"valid":true,"account_id":8,"expires_at":"2030-01-01T00:00:00Z"}"#;
 
     #[tokio::test]
     async fn entry_requires_handoff_and_matching_session() {
@@ -438,8 +504,7 @@ mod tests {
         );
         // Auth-API erreichbar, aber Session-Call mit HTTP-Fehler
         // (z. B. 503): Einstieg bleibt verwehrt.
-        let auth =
-            start_stub_status(HANDOFF_OK, 200, SESSION_DEAD, 503).await;
+        let auth = start_stub_status(HANDOFF_OK, 200, SESSION_DEAD, 503).await;
         assert_eq!(
             verify_entry(&auth, 42, "h", "s").await,
             Err("session_unavailable".into())
@@ -456,5 +521,170 @@ mod tests {
             let auth = api("");
             assert_eq!(verify_entry(&auth, 42, "h", "s").await, Ok(0));
         });
+    }
+
+    #[tokio::test]
+    async fn attack_start_stop_and_validation() {
+        let shared = crate::world::new_shared();
+        let cfg = CombatCfg {
+            weapon_skill_id: "schwerter".into(),
+            weapon_damage: 10,
+            weapon_duration_ms: 2000,
+            weapon_range: 2.0,
+            hit_miss_permille: 100,
+            hit_dodge_permille: 100,
+            hit_parry_permille: 50,
+            hit_block_permille: 100,
+            hit_crit_permille: 100,
+            hit_crit_mult_percent: 150,
+            hit_block_reduce_percent: 50,
+            armor_pct_per_point: 2,
+            armor_cap_tank: 50,
+            armor_cap_mage: 20,
+            armor_cap_default: 30,
+            skill_hit_bonus_permille: 5,
+        };
+        // Welt mit zwei Spielern aufbauen (a bei 0,0; b bei 1,0 → in Reichweite).
+        {
+            let mut w = shared.lock().await;
+            let (ta, _) = mpsc::unbounded_channel();
+            let (tb, _) = mpsc::unbounded_channel();
+            w.players.insert(
+                "a".into(),
+                crate::world::Player {
+                    id: "a".into(),
+                    name: "a".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 0,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: ta,
+                    char_class: "Warrior".into(),
+                    level: 1,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                },
+            );
+            w.players.insert(
+                "b".into(),
+                crate::world::Player {
+                    id: "b".into(),
+                    name: "b".into(),
+                    x: 1.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 0,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: tb,
+                    char_class: "Mage".into(),
+                    level: 1,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                },
+            );
+            w.by_conn.insert(7, "a".into());
+        }
+
+        // Ungültig: Ziel existiert nicht → kein Kampfzustand.
+        handle_attack(&shared, 7, &serde_json::json!({"target_id": "ghost"}), &cfg).await;
+        assert!(shared.lock().await.players["a"].combat.is_none());
+
+        // Ungültig: sich selbst anvisieren → kein Kampfzustand.
+        handle_attack(&shared, 7, &serde_json::json!({"target_id": "a"}), &cfg).await;
+        assert!(shared.lock().await.players["a"].combat.is_none());
+
+        // Gültig: b in Reichweite → bewaffnet.
+        handle_attack(&shared, 7, &serde_json::json!({"target_id": "b"}), &cfg).await;
+        {
+            let w = shared.lock().await;
+            let c = w.players["a"].combat.as_ref().expect("bewaffnet");
+            assert_eq!(c.target_id, "b");
+        }
+
+        // Stop → Kampf beendet.
+        handle_attack(&shared, 7, &serde_json::json!({"stop": true}), &cfg).await;
+        assert!(shared.lock().await.players["a"].combat.is_none());
+    }
+
+    #[tokio::test]
+    async fn attack_out_of_range_is_rejected() {
+        let shared = crate::world::new_shared();
+        let cfg = crate::config::combat_config(&Default::default()); // Reichweite 2 m
+        {
+            let mut w = shared.lock().await;
+            let (ta, _) = mpsc::unbounded_channel();
+            let (tb, _) = mpsc::unbounded_channel();
+            w.players.insert(
+                "a".into(),
+                crate::world::Player {
+                    id: "a".into(),
+                    name: "a".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 0,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: ta,
+                    char_class: "Warrior".into(),
+                    level: 1,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                },
+            );
+            w.players.insert(
+                "b".into(),
+                crate::world::Player {
+                    id: "b".into(),
+                    name: "b".into(),
+                    x: 50.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 0,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: tb,
+                    char_class: "Mage".into(),
+                    level: 1,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                },
+            );
+            w.by_conn.insert(7, "a".into());
+        }
+        // b steht 50 m entfernt → kein gültiger Start.
+        handle_attack(&shared, 7, &serde_json::json!({"target_id": "b"}), &cfg).await;
+        assert!(shared.lock().await.players["a"].combat.is_none());
     }
 }

@@ -16,7 +16,7 @@ Implementierungsstands automatisch selbst (Pflicht laut `docs/ai_jobs.md`).
 | 2 | IPv4/IPv6/Dual-Stack | Eingebaut | Alle Server-Dienste; Node-Bestand statisch geprüft (kein Node-Toolchain) |
 | 3 | Sicherheitsebene / Auth | Eingebaut | Einziger Dienst mit direktem Auth-DB-Zugriff |
 | 4 | Loginserver | Eingebaut | Brücke zu Auth, kein eigener DB-Zugriff |
-| 5 | Realm-Grundsystem | Teilweise | Einstieg, Charakter, Chat, Parental fertig; fehlen u. a. persistente Welt, Kampf, Loot, NPC, Auktion |
+| 5 | Realm-Grundsystem | Teilweise | Einstieg, Charakter, Chat, Parental fertig; **Combat V1 eingebaut** (Auto-Grundangriff, Ziel-/Reichweitenvalidierung, Trefferauflösung Miss/Dodge/Parry/Block/Normal/Krit, Waffenschaden, Rüstungsreduktion mit Klassen-Caps, Tod/KILL; vorläufige Balancingwerte via `COMBAT_*`-Config, siehe `Kampfsystem.md`); fehlen u. a. persistente Welt, Loot, NPC, Auktion |
 | 6 | Coordinator | Eingebaut | Go-Dienst `src/coordinator`: dateibasierte KI-Queue, Priorisierung, Cooldown, mehrsprachige Input-/Output-Sperrwortfilter (Sprachdateien), Ollama-Anbindung (angeschlossener lokaler Provider; Architektur providerunabhängig, siehe `docs/Coordinator.md` §3.1), Ergebnis-Callback/Poll; Realm-Anbindung offen |
 | 7 | Voice | Später vorgesehen | Kein Code, kein Dienst |
 | 8 | Client | Grundgerüst | Godot-Rahmen mit Demo; Netzwerk und Login fehlen |

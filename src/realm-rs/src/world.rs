@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 
+use crate::combat::CombatState;
 use crate::protocol::{s2c, Frame};
 
 /// Autoritativer Spieler-State auf dem Server. Felder hp/max_hp/lang
@@ -33,6 +34,15 @@ pub struct Player {
     pub entities: HashSet<String>,
     pub last_activity: Instant,
     pub tx: mpsc::UnboundedSender<String>,
+    /// Klasse (char_class aus der DB; für Rüstungs-Caps im Kampf).
+    pub char_class: String,
+    pub level: u32,
+    /// Aktueller Rüstungswert (relevante physische Rüstung).
+    pub armor: i32,
+    /// Level des relevanten Waffen-/Kampfskills (startet bei 1).
+    pub weapon_skill: u32,
+    /// Aktueller Auto-Angriff (Combat V1): None = nicht im Kampf.
+    pub combat: Option<CombatState>,
 }
 
 impl Player {
@@ -72,7 +82,10 @@ impl World {
 
 /// Verbindungs-ID eines Spielers (für gezielte Socket-Closes).
 pub fn conn_of(world: &World, player_id: &str) -> Option<u64> {
-    world.by_conn.iter().find_map(|(c, p)| (p == player_id).then_some(*c))
+    world
+        .by_conn
+        .iter()
+        .find_map(|(c, p)| (p == player_id).then_some(*c))
 }
 
 /// Socket einer Verbindung schließen (HELLO-Ablehnung, Force-Logout).
@@ -106,7 +119,10 @@ pub fn ensure_visible(o: &mut Player, p: &Player) {
     o.send(&Frame::new(
         0,
         s2c::STATE,
-        serde_json::json!({"id": p.id, "x": p.x, "y": p.y, "face": p.face}),
+        serde_json::json!({
+            "id": p.id, "x": p.x, "y": p.y, "face": p.face,
+            "hp": p.hp, "max_hp": p.max_hp
+        }),
     ));
 }
 
@@ -116,14 +132,14 @@ pub fn ensure_visible(o: &mut Player, p: &Player) {
 /// Borrow-Konflikte zwischen Leser (p) und Schreiber (q) entstehen.
 pub fn world_tick(world: &mut World, aofb_radius: f64) {
     let t0 = Instant::now();
-    let snap: Vec<(String, f64, f64, f64)> = world
+    let snap: Vec<(String, f64, f64, f64, i32, i32)> = world
         .players
         .values()
-        .map(|p| (p.id.clone(), p.x, p.y, p.face))
+        .map(|p| (p.id.clone(), p.x, p.y, p.face, p.hp, p.max_hp))
         .collect();
-    for (qid, qx, qy, _) in &snap {
+    for (qid, qx, qy, _, _, _) in &snap {
         let mut now_visible = HashSet::new();
-        for (pid, px, py, _) in &snap {
+        for (pid, px, py, _, _, _) in &snap {
             if pid == qid {
                 continue;
             }
@@ -134,7 +150,7 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
         let Some(q) = world.players.get_mut(qid.as_str()) else {
             continue;
         };
-        for (pid, px, py, face) in &snap {
+        for (pid, px, py, face, hp, max_hp) in &snap {
             if pid == qid || !now_visible.contains(pid) {
                 continue;
             }
@@ -149,11 +165,18 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
             q.send(&Frame::new(
                 0,
                 s2c::STATE,
-                serde_json::json!({"id": pid, "x": px, "y": py, "face": face}),
+                serde_json::json!({
+                    "id": pid, "x": px, "y": py, "face": face,
+                    "hp": hp, "max_hp": max_hp
+                }),
             ));
         }
-        let stale: Vec<String> =
-            q.entities.iter().filter(|e| !now_visible.contains(*e)).cloned().collect();
+        let stale: Vec<String> = q
+            .entities
+            .iter()
+            .filter(|e| !now_visible.contains(*e))
+            .cloned()
+            .collect();
         for eid in stale {
             q.send(&Frame::new(0, s2c::DESPAWN, serde_json::json!({"id": eid})));
             q.entities.remove(&eid);
@@ -230,6 +253,11 @@ mod tests {
                 entities: HashSet::new(),
                 last_activity: Instant::now(),
                 tx,
+                char_class: "Warrior".into(),
+                level: 1,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
             },
             rx,
         )

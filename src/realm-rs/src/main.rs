@@ -6,6 +6,7 @@
 // dessen Alt-Architektur-Annahmen (keine character-/world_data-Pools;
 // Einstieg per Handoff statt reiner Session).
 mod auth_api;
+mod combat;
 mod config;
 mod db;
 mod handlers;
@@ -51,8 +52,13 @@ async fn async_main() -> Result<(), String> {
     } else {
         PathBuf::from(&cfg.migrations_dir)
     };
-    migrations::apply_migrations(&pool, &cfg.realm_db.database, &mig_dir, cfg.allow_destructive)
-        .await?;
+    migrations::apply_migrations(
+        &pool,
+        &cfg.realm_db.database,
+        &mig_dir,
+        cfg.allow_destructive,
+    )
+    .await?;
 
     let auth = auth_api::AuthApi::new(&cfg.auth_api)?;
     let shared = world::new_shared();
@@ -74,12 +80,16 @@ async fn async_main() -> Result<(), String> {
     let tick_shared = shared.clone();
     let tick_ms = cfg.tick_ms;
     let aofb = cfg.aofb_radius;
+    let combat_cfg = cfg.combat.clone();
+    let mut combat_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
     let ticker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         loop {
             interval.tick().await;
             let mut world = tick_shared.lock().await;
             world::world_tick(&mut world, aofb);
+            let now = std::time::Instant::now();
+            combat::combat_tick(&mut world, &combat_cfg, &mut combat_rng, now, aofb);
         }
     });
 
@@ -90,7 +100,9 @@ async fn async_main() -> Result<(), String> {
     );
 
     // Shutdown: SIGINT/SIGTERM -> Tasks stoppen, Pool schließen.
-    tokio::signal::ctrl_c().await.map_err(|e| format!("signal: {e}"))?;
+    tokio::signal::ctrl_c()
+        .await
+        .map_err(|e| format!("signal: {e}"))?;
     log::info!("shutting down");
     ticker.abort();
     poller.abort();

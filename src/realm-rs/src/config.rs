@@ -58,9 +58,16 @@ pub fn bracket_url_host(raw: &str) -> String {
         let (host_part, port_part) = auth.split_at(li);
         let port_part = &port_part[1..];
         if !port_part.is_empty() && port_part.bytes().all(|b| b.is_ascii_digit()) {
-            if let Ok(ip) = host_part.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+            if let Ok(ip) = host_part
+                .trim_matches(|c| c == '[' || c == ']')
+                .parse::<IpAddr>()
+            {
                 if ip.is_ipv6() {
-                    return format!("{}[{host_part}]:{port_part}{}", &raw[..scheme_end + 3], &rest[auth_end..]);
+                    return format!(
+                        "{}[{host_part}]:{port_part}{}",
+                        &raw[..scheme_end + 3],
+                        &rest[auth_end..]
+                    );
                 }
             }
         }
@@ -85,8 +92,14 @@ pub fn bracket_url_host(raw: &str) -> String {
 pub fn bind_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
     let h = host.to_lowercase();
     match h.trim() {
-        "" | "auto" | "ipv4" | "4" => Ok(vec![SocketAddr::from((IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port))]),
-        "ipv6" | "6" => Ok(vec![SocketAddr::from((IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port))]),
+        "" | "auto" | "ipv4" | "4" => Ok(vec![SocketAddr::from((
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port,
+        ))]),
+        "ipv6" | "6" => Ok(vec![SocketAddr::from((
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+            port,
+        ))]),
         "dual" | "both" => Ok(vec![
             SocketAddr::from((IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port)),
             SocketAddr::from((IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port)),
@@ -143,6 +156,80 @@ pub struct AuthApiConfig {
     pub secret: String,
 }
 
+/// Vorläufige Combat-V1-Balancingwerte (docs/Kampfsystem.md §§4–7, 17).
+/// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
+/// Praxistests angepasst — keine Architekturwerte.
+#[derive(Debug, Clone)]
+pub struct CombatCfg {
+    /// Waffen-/Kampfskill-Schlüssel (skills-Tabelle), Level startet bei 1.
+    pub weapon_skill_id: String,
+    /// Grundschaden der (V1-Platzhalter-)Waffe (docs/Kampfsystem.md §6).
+    pub weapon_damage: i32,
+    /// Zeit zwischen zwei automatischen Grundangriffen in ms (§3).
+    pub weapon_duration_ms: u64,
+    /// Angriffsreichweite der Waffe (§9).
+    pub weapon_range: f64,
+    /// Trefferwahrscheinlichkeiten in Promille (§5, vorläufig).
+    pub hit_miss_permille: u32,
+    pub hit_dodge_permille: u32,
+    pub hit_parry_permille: u32,
+    pub hit_block_permille: u32,
+    pub hit_crit_permille: u32,
+    /// Kritischer Schaden in Prozent (150 = 1,5×).
+    pub hit_crit_mult_percent: u32,
+    /// Schadensreduktion durch Blocken in Prozent (§5).
+    pub hit_block_reduce_percent: u32,
+    /// Prozentpunkt Schadensreduktion je Rüstungspunkt (§7, vorläufig).
+    pub armor_pct_per_point: u32,
+    /// Maximale physische Schadensreduktion je Klassen-Gruppe (§7).
+    pub armor_cap_tank: u32,
+    pub armor_cap_mage: u32,
+    pub armor_cap_default: u32,
+    /// Miss-Reduktion in Promille je Skillpunkt über 1 (§4/§5).
+    pub skill_hit_bonus_permille: u32,
+}
+
+fn num1(env: &HashMap<String, String>, key: &str, def: u64) -> u64 {
+    env.get(key)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(def)
+}
+
+fn numf(env: &HashMap<String, String>, key: &str, def: f64) -> f64 {
+    env.get(key)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(def)
+}
+
+pub fn combat_config(env: &HashMap<String, String>) -> CombatCfg {
+    let g = |k: &str| env.get(k).cloned().unwrap_or_default();
+    CombatCfg {
+        weapon_skill_id: {
+            let s = g("COMBAT_WEAPON_SKILL_ID");
+            if s.is_empty() {
+                "schwerter".to_string()
+            } else {
+                s
+            }
+        },
+        weapon_damage: num1(env, "COMBAT_WEAPON_DAMAGE", 10) as i32,
+        weapon_duration_ms: num1(env, "COMBAT_WEAPON_DURATION_MS", 2000),
+        weapon_range: numf(env, "COMBAT_WEAPON_RANGE", 2.0),
+        hit_miss_permille: num1(env, "COMBAT_HIT_MISS_PERMILLE", 100) as u32,
+        hit_dodge_permille: num1(env, "COMBAT_HIT_DODGE_PERMILLE", 100) as u32,
+        hit_parry_permille: num1(env, "COMBAT_HIT_PARRY_PERMILLE", 50) as u32,
+        hit_block_permille: num1(env, "COMBAT_HIT_BLOCK_PERMILLE", 100) as u32,
+        hit_crit_permille: num1(env, "COMBAT_HIT_CRIT_PERMILLE", 100) as u32,
+        hit_crit_mult_percent: num1(env, "COMBAT_HIT_CRIT_MULT_PERCENT", 150) as u32,
+        hit_block_reduce_percent: num1(env, "COMBAT_HIT_BLOCK_REDUCE_PERCENT", 50) as u32,
+        armor_pct_per_point: num1(env, "COMBAT_ARMOR_PCT_PER_POINT", 2) as u32,
+        armor_cap_tank: num1(env, "COMBAT_ARMOR_CAP_TANK", 50) as u32,
+        armor_cap_mage: num1(env, "COMBAT_ARMOR_CAP_MAGE", 20) as u32,
+        armor_cap_default: num1(env, "COMBAT_ARMOR_CAP_DEFAULT", 30) as u32,
+        skill_hit_bonus_permille: num1(env, "COMBAT_SKILL_HIT_BONUS_PERMILLE", 5) as u32,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Eigene Realm-ID (prüft Handoff-Bindung: handoff.realm_id muss passen).
@@ -167,6 +254,8 @@ pub struct Config {
     pub migrations_dir: String,
     /// Freigabe destruktiver Migrationen (nur nach Backup im Update-Ablauf).
     pub allow_destructive: bool,
+    /// Vorläufige Combat-V1-Balancingwerte.
+    pub combat: CombatCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -186,11 +275,18 @@ pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
 }
 
 fn num(env: &HashMap<String, String>, key: &str, def: u64) -> u64 {
-    env.get(key).and_then(|v| v.parse::<u64>().ok()).filter(|&v| v > 0).unwrap_or(def)
+    env.get(key)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(def)
 }
 
 fn db_config(env: &HashMap<String, String>, prefix: &str, default_db: &str) -> DbConfig {
-    let g = |k: &str| env.get(&format!("{prefix}_{k}")).cloned().unwrap_or_default();
+    let g = |k: &str| {
+        env.get(&format!("{prefix}_{k}"))
+            .cloned()
+            .unwrap_or_default()
+    };
     DbConfig {
         host: g("HOST"),
         port: num(env, &format!("{prefix}_PORT"), 3306) as u16,
@@ -242,7 +338,10 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         missing.push("REALM_ID");
     }
     if !missing.is_empty() {
-        return Err(format!("fehlende Realm-Konfiguration: {}", missing.join(", ")));
+        return Err(format!(
+            "fehlende Realm-Konfiguration: {}",
+            missing.join(", ")
+        ));
     }
     Ok(Config {
         realm_id,
@@ -269,6 +368,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         realm_db,
         migrations_dir: g("REALM_STATE_MIGRATIONS_DIR"),
         allow_destructive: g("ALLOW_DESTRUCTIVE_MIGRATIONS") == "1",
+        combat: combat_config(&env),
     })
 }
 
@@ -277,7 +377,10 @@ mod tests {
     use super::*;
 
     fn env_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -331,9 +434,15 @@ mod tests {
             database: "realm_state_de1".into(),
         };
         assert_eq!(v4.url(), "mysql://u:p@127.0.0.1:3306/realm_state_de1");
-        let v6 = DbConfig { host: "2001:db8::1".into(), ..v4.clone() };
+        let v6 = DbConfig {
+            host: "2001:db8::1".into(),
+            ..v4.clone()
+        };
         assert_eq!(v6.url(), "mysql://u:p@[2001:db8::1]:3306/realm_state_de1");
-        let v6b = DbConfig { host: "[::1]".into(), ..v4 };
+        let v6b = DbConfig {
+            host: "[::1]".into(),
+            ..v4
+        };
         assert_eq!(v6b.url(), "mysql://u:p@[::1]:3306/realm_state_de1");
     }
 
@@ -347,9 +456,18 @@ mod tests {
 
     #[test]
     fn url_host_bracketing() {
-        assert_eq!(bracket_url_host("http://127.0.0.1:8080/x"), "http://127.0.0.1:8080/x");
-        assert_eq!(bracket_url_host("http://[2001:db8::1]:8080/x"), "http://[2001:db8::1]:8080/x");
-        assert_eq!(bracket_url_host("http://2001:db8::1:8080/x"), "http://[2001:db8::1]:8080/x");
+        assert_eq!(
+            bracket_url_host("http://127.0.0.1:8080/x"),
+            "http://127.0.0.1:8080/x"
+        );
+        assert_eq!(
+            bracket_url_host("http://[2001:db8::1]:8080/x"),
+            "http://[2001:db8::1]:8080/x"
+        );
+        assert_eq!(
+            bracket_url_host("http://2001:db8::1:8080/x"),
+            "http://[2001:db8::1]:8080/x"
+        );
         assert_eq!(bracket_url_host("ws://::1:3001/ws"), "ws://[::1]:3001/ws");
         assert_eq!(bracket_url_host("http://::1"), "http://[::1]");
     }
@@ -358,7 +476,10 @@ mod tests {
     fn bind_addrs_explicit_families() {
         use std::net::Ipv4Addr;
         let v4 = bind_addrs("", 3001).unwrap();
-        assert_eq!(v4, vec![SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3001))]);
+        assert_eq!(
+            v4,
+            vec![SocketAddr::from((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 3001))]
+        );
         let ipv6 = bind_addrs("ipv6", 3001).unwrap();
         assert_eq!(ipv6.len(), 1);
         assert!(ipv6[0].is_ipv6());
@@ -366,7 +487,13 @@ mod tests {
         assert_eq!(dual.len(), 2, "dual must yield two listeners");
         assert!(dual[0].is_ipv4() && dual[1].is_ipv6());
         let lit = bind_addrs("127.0.0.1", 3001).unwrap();
-        assert_eq!(lit, vec![SocketAddr::from((IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3001))]);
+        assert_eq!(
+            lit,
+            vec![SocketAddr::from((
+                IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                3001
+            ))]
+        );
         let v6lit = bind_addrs("::1", 3001).unwrap();
         assert_eq!(v6lit.len(), 1);
         assert!(v6lit[0].is_ipv6());

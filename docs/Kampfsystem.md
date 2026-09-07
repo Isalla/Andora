@@ -304,7 +304,15 @@ Es findet keine unnötige Übernahme komplexer Rating-, Expertise- oder Sonderme
 
 Die erste Version soll spielbar und testbar sein. Trefferchancen, Skillprogression, Rüstungsformeln, Caps und andere Zahlenwerte werden anschließend anhand realer Praxistests angepasst (siehe auch Abschnitte 4 bis 7).
 
-> **Noch keine Implementierung des Kampfsystems vornehmen.**
+> **Stand: Combat V1 ist implementiert** (Rust-Realm `src/realm-rs/src/combat.rs`):
+> manuell gestarteter/beendeter Auto-Grundangriff, Ziel-/Reichweitenvalidierung,
+> Waffen-Duration, Trefferauflösung (Miss/Dodge/Parry/Block/Normal/Krit),
+> Waffenschaden, Rüstungsreduktion mit Klassen-Caps, Tod/KILL.
+> Die konkreten Zahlenwerte (Trefferchancen, Schadens-, Duration-, Rüstungs-
+> und Skill-Balancing) sind **vorläufig** und liegen als `COMBAT_*`-Werte in
+> `config.env` (siehe `Projekt-Status.md`). Sie werden anhand realer
+> Praxistests angepasst (§§4–7). Die frühere Anweisung, noch keine
+> Implementierung vorzunehmen, ist damit für Combat V1 überholt.
 
 ---
 

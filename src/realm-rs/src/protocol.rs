@@ -10,7 +10,7 @@
 pub mod c2s {
     pub const HELLO: i64 = 1; // {session_id?, handoff_token?, char_id, lang}
     pub const MOVE: i64 = 2; // {dir:[x,y], seq} oder {x, y}
-    pub const ATTACK: i64 = 3; // {target_id, skill_id} (künftig)
+    pub const ATTACK: i64 = 3; // {target_id} start / {stop: true} beenden (Combat V1)
     pub const PICKUP: i64 = 4; // {item_id} (künftig)
     pub const CHAT: i64 = 5; // {channel, text}
     pub const NPC_TALK: i64 = 6; // {npc_id, text} (künftig)
@@ -30,8 +30,8 @@ pub mod s2c {
     pub const SPAWN: i64 = 2; // {id, kind, x, y, face}
     pub const DESPAWN: i64 = 3; // {id}
     pub const STATE: i64 = 4; // {id, x, y, face}
-    pub const DAMAGE: i64 = 5; // (künftig)
-    pub const KILL: i64 = 6; // (künftig)
+    pub const DAMAGE: i64 = 5; // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
+    pub const KILL: i64 = 6; // {id, killer_id}
     pub const LOOT: i64 = 7; // (künftig)
     pub const NPC_TEXT: i64 = 8; // (künftig)
     pub const CHAT: i64 = 9; // {from, channel, text}
@@ -56,7 +56,11 @@ pub struct Frame {
 
 impl Frame {
     pub fn new(seq: i64, msg_type: i64, data: serde_json::Value) -> Self {
-        Self { seq, msg_type, data }
+        Self {
+            seq,
+            msg_type,
+            data,
+        }
     }
 
     pub fn encode(&self) -> String {
