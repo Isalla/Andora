@@ -480,6 +480,8 @@ Spielweise
 
 Keiner dieser Faktoren soll vollkommen isoliert betrachtet werden.
 
+Ein Levelaufstieg erhöht dabei ausschließlich das mögliche Skillmaximum für Kampfskills; der tatsächliche Skillwert steigt nicht automatisch, sondern nur durch tatsächliche Nutzung der jeweiligen Waffenart bzw. des Schildes (siehe `Kampfsystem.md` Abschnitt 4). Dasselbe Prinzip gilt für die Sammelfertigkeiten (`Sammelsystem.md`).
+
 ---
 
 # 20. Können des Spielers

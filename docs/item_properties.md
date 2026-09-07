@@ -31,14 +31,14 @@ This document describes all properties and characteristics of items in the game 
 ## Equipment-Specific Properties
 
 ### Weapons
-- **damage**: Base damage output
-- **attack_speed**: Rate of attacks per second
+- **damage**: Base damage, specified by the weapon (siehe Kampfsystem.md Abschnitt 6; Grundschaden bestimmt die Schadenshöhe eines Treffers)
+- **duration**: Time between automatic basic attacks (siehe Kampfsystem.md Abschnitt 3 und 6; entspricht der Angriffsgeschwindigkeit bzw. der Zeit zwischen zwei Grundangriffen)
 - **range**: Attack range in tiles
 - **durability**: Maximum uses before breaking
 - **enchantments**: Special effects or bonuses
 
 ### Armor
-- **defense**: Protection value against damage
+- **defense**: Armor value provided by the equipment; the total relevant armor value is converted into a percentage-based physical damage reduction (siehe Kampfsystem.md Abschnitt 7). The exact conversion formula and the class-specific maximum reduction are balancing values.
 - **resistance**: Resistance to specific damage types
 - **movement_speed**: Effect on player movement speed
 - **weight_reduction**: Reduces overall item weight burden

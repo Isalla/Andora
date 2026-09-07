@@ -31,7 +31,7 @@ Zusätzlich kann der Abenteurer im Startgebiet **alle Waffentypen verwenden**.
 
 Dadurch kann der Spieler verschiedene Waffen und Fähigkeiten ausprobieren und anschließend entscheiden, welche Spielweise ihm gefällt.
 
-Mit der späteren Klassenspezialisierung verliert der Charakter diese universellen Vorteile. Danach gelten die Waffen-, Rüstungs- und Fähigkeitsregeln seiner gewählten Klasse.
+Mit der späteren Klassenspezialisierung verliert der Charakter diese universellen Vorteile. Danach gelten die Waffen-, Rüstungs- und Fähigkeitsregeln seiner gewählten Klasse. Welche Waffenarten und Schilde dabei Haupt-, Neben- oder nicht verwendbare Kampfskills sind, legt die Klasse fest (siehe `Kampfsystem.md` Abschnitt 4 und `Klassensystem.md`).
 
 ### Kunsthandwerker
 

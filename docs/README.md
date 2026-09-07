@@ -57,13 +57,13 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 
 ### 4. Charakter, Klasse & Progression
 - **Charaktererstellung_und_Charakterdarstellung.md** – Charaktererstellung + clientseitige Darstellung: serverseitige Daten, kosmetische Character-Sets, Mod-Unterstützung, Architekturgrenzen.
-- **Klassensystem.md** – Klassenbaum: Abenteurer → 4 Grundklassen à 2 Unterklassen, Rollen, nicht rassen-/fraktionsgebunden.
+- **Klassensystem.md** – Klassenbaum: Abenteurer → 4 Grundklassen à 2 Unterklassen, Rollen, nicht rassen-/fraktionsgebunden; Waffenbeherrschung und Haupt-/Nebenskills je Klasse.
 - **Tier-Progression.md** – Progressionsprinzip: keine feste Straße, Level als Ausgleich, Zeit vs. Ausrüstung, Spielertypen (Solo/Gilden), Wege (Dungeon-Finder, Crafting/AH).
 - **Lootsystem.md** – Lootdesign: Berechtigung/Claim, Truhen, Gruppen-Loot (FFA/Group-LE/Würfeln), Tabellen, gebundene Gegenstände.
 - **Erfolge_und_Titel.md** – Verbindliche Grundprinzipien (Konzept-Ebene): Erfolgssystem mit gestaffelten Erfolgen, Titel als kosmetisches Prestige (kein Kampfbonus), Charakterprofil-Anzeige (auch keine Titel), versteckte Titel, dezente Seltenheits-Anzeige, einmalige historische Realm-Titel; Abgrenzung zum Königsamt; keine feste Schwellen-/Effekt-/Datenmodell-Definition.
 
 ### 5. Kampf, Bosse & PvP-Systeme
-- **Kampfsystem.md** – Kampfdesign: Anvisieren, Angriffe, Fähigkeiten, Bewegung, Ressourcen, Tempo, Aggro/Rollen, Tod/Respawn, Fraktionskämpfe.
+- **Kampfsystem.md** – Kampfdesign: Anvisieren, Grundangriff/Duration, Kampfskills und Waffenbeherrschung (Haupt-/Nebenskills, Skillmaximum), physische Trefferauflösung, Waffenschaden und Angriffsgeschwindigkeit, Rüstung und physische Schadensreduktion (Klassen-Caps), Fähigkeiten, Bewegung, Ressourcen, Tempo, Aggro/Rollen, Tod/Respawn, Fraktionskämpfe; Grundsatz der einfachen ersten Implementierung.
 - **Boss-System.md** – Bosskämpfe (Gebiet/Dungeon/Raid): Claim, Respawn, Wellen, Gegner pro Welle, Boss-Loot.
 - **Arena.md** – Arena-System (PvP-Instanz): Match-Kontext im RAM, Sieg-/Niederlagenregeln, 0 HP ≠ Welt-Tod, Söldner, Spectator-Modus.
 - **ai_cutscene_system.md** – Arena-Doku plus Cutscene-/Scene-Lock-Bereich (NPC-Szene sperren, Freigabe). Siehe „Konflikte“ unten.
@@ -76,7 +76,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Handwerksystem.md** – Spezialisierungs-/Handwerksbaum: Startgebiet als Orientierungsphase, Abenteurer/Kunsthandwerker, Berufswahl.
 - **Handwerks_und_Sammelsystem.md** – Handwerk + Sammeln kombiniert: Sammelskills, drei Versuche, Rare-Rohstoffe, Minispiel, Fertigungsqualität.
 - **Sammelsystem.md** – Sammelgrundprinzip: Mindestskill/Erfolgschance, Vorkommen, Leitprinzip.
-- **item_properties.md** – Item-Eigenschaften: Kernattribute, Quality-/Rarity, Equipment-Ausprägungen (Waffen/Rüstung/Amboss), Lifecycle, Bindung.
+- **item_properties.md** – Item-Eigenschaften: Kernattribute, Quality-/Rarity, Equipment-Ausprägungen (Waffen/Rüstung/Zubehör), Lifecycle, Bindung; Waffen (Grundschaden, Duration) und Rüstung (Wert → prozentuale Schadensreduktion) nach Kampfsystem.md.
 - **inventory_system.md** – Inventarsystem: Item-Struktur, Quality-Color-System, Level-Anforderungen, Equipment-Tiers, Rucksack-Expansion, Integration (Boss/Quest/Cutscene/Crafting).
 - **[Auktionshaus und Marktplatz](./Auktionshaus%20und%20Marktplatz)** (Achtung: keine `.md`-Endung) – Design des Auktionshauses/Marktplatzes: Kaufgesuche, (Teil-)Erfüllung, AH-Guthaben, asynchroner/Offline-Handel.
 

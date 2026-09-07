@@ -6,6 +6,8 @@ Andora verwendet ein klassisches MMORPG-Kampfsystem.
 
 Das Kampfsystem soll bewusst übersichtlich und technisch schlank bleiben. Komplexität entsteht später durch Klassen, Fähigkeiten, Ausrüstung, Gegner und das Zusammenspiel der Spieler und nicht durch ein aufwendiges Action-Kampfsystem.
 
+Für die erste Implementierung gilt der Grundsatz in Abschnitt 17: bewusst einfach, spiel- und testbar, ohne unnötige Übernahme komplexer Rating-, Expertise- oder Sondermechaniken anderer MMORPGs. Trefferchancen, Skillprogression, Rüstungsformeln, Caps und andere Zahlenwerte sollen anschließend anhand realer Praxistests angepasst werden können.
+
 ---
 
 ## 2. Anvisieren
@@ -48,7 +50,99 @@ Dadurch können verschiedene Waffen unterschiedliche Angriffsgeschwindigkeiten b
 
 ---
 
-## 4. Fähigkeiten
+## 4. Kampfskills und Waffenbeherrschung
+
+Charaktere besitzen trainierbare Kampfskills, insbesondere für die verwendbaren Waffenarten und Schilde.
+
+Ein grundsätzlich verfügbarer Skill startet mit dem Wert **1**.
+
+Die Klasse bestimmt, welche Waffen-/Kampfskills **Hauptskills**, **Nebenskills** oder **nicht verwendbar** sind.
+
+* **Hauptskills** können das vollständige aktuelle Skillmaximum erreichen.
+* **Nebenskills** können vorläufig maximal **40 % des normalen Skillmaximums** erreichen.
+
+Dadurch kann beispielsweise ein Krieger einen Bogen als Nebenwaffe zum Pullen benutzen, aber niemals dieselbe Beherrschung erreichen wie eine Klasse, für die der Bogen eine Hauptwaffe ist.
+
+### Skillmaximum und Level
+
+Das Charakterlevel erhöht ausschließlich das mögliche Skillmaximum. Der tatsächliche Skillwert steigt niemals automatisch durch einen Levelaufstieg.
+
+Der Skill steigt nur durch tatsächliche, relevante Benutzung.
+
+Je näher ein Skill seinem aktuellen Maximum kommt, desto schwieriger wird der nächste Skillanstieg. Wird durch einen Levelaufstieg neues Skillpotential freigeschaltet, beginnt für diesen neu verfügbaren Bereich wieder eine zunächst leichtere Progression, die zum neuen Maximum hin schwieriger wird.
+
+### Vorläufige Balancingwerte
+
+* Level 1: Skillmaximum 30
+* normales Levelup: +5
+* jedes 10. Level: +10 statt +5
+* Nebenskillmaximum: 40 % des Hauptmaximums
+
+Diese Zahlen sind ausdrücklich **konfigurierbare Balancingwerte** und keine unveränderlichen Architekturwerte.
+
+### Abgrenzung zu Fähigkeiten und Sammelskills
+
+Kampfskills sind nicht identisch mit den aktiven Fähigkeiten (siehe Abschnitt 8) und nicht mit den Sammel-/Handwerkskills (siehe `Sammelsystem.md` bzw. `Handwerks_und_Sammelsystem.md`). Kampfskills betreffen ausschließlich die Beherrschung von Waffenarten und Schilden.
+
+---
+
+## 5. Physische Trefferauflösung
+
+Für die erste Version bleibt die physische Trefferauflösung bewusst einfach.
+
+Grundsätzlich mögliche Ergebnisse:
+
+* Verfehlen
+* Ausweichen
+* Parieren
+* Blocken
+* normaler Treffer
+* kritischer Treffer
+
+Der Waffenskill ist ein wesentlicher Bestandteil der Trefferwahrscheinlichkeit.
+
+**Blocken** reduziert grundsätzlich Schaden und stellt nicht einfach dasselbe Ergebnis wie vollständiges Ausweichen oder Parieren dar.
+
+Konkrete Wahrscheinlichkeiten und Formeln werden nicht endgültig festgelegt und sollen später anhand von Praxistests gebalanced werden.
+
+---
+
+## 6. Waffenschaden und Angriffsgeschwindigkeit
+
+Der Grundschaden wird durch die verwendete Waffe vorgegeben.
+
+Jede Waffe besitzt außerdem eine **Duration**, welche die Zeit zwischen automatischen Grundangriffen bestimmt (siehe Abschnitt 3).
+
+Langsame Waffen wie Zweihandschwerter können höheren Grundschaden besitzen.
+
+Schnelle Waffen wie Dolche verursachen geringeren Schaden pro Treffer, greifen dafür häufiger an.
+
+Konkrete Schadenswerte und Durationswerte sind Balancingdaten.
+
+---
+
+## 7. Rüstung und physische Schadensreduktion
+
+Ausrüstung liefert Rüstungswerte.
+
+Aus dem gesamten relevanten Rüstungswert wird eine prozentuale physische Schadensreduktion berechnet.
+
+Die genaue Umrechnungsformel wird noch nicht festgelegt und soll später durch Praxistests bestimmt und angepasst werden können.
+
+Klassen besitzen unterschiedliche maximale physische Schadensreduktionen.
+
+Vorläufige Beispiele:
+
+* Tank: maximal 50 %
+* Magier: maximal 20 %
+
+Auch diese Werte sind Balancingwerte und später anpassbar.
+
+Der Rüstungswert selbst darf über den für die Klasse notwendigen Wert hinausgehen; begrenzt wird die daraus resultierende effektive Schadensreduktion.
+
+---
+
+## 8. Fähigkeiten
 
 Fähigkeiten werden vom Spieler aktiv über seine Aktionsleiste ausgelöst.
 
@@ -60,7 +154,7 @@ Dadurch können spätere Klassen und Fähigkeiten unterschiedliche Mechaniken ve
 
 ---
 
-## 5. Bewegung im Kampf
+## 9. Bewegung im Kampf
 
 ### Nahkampf
 
@@ -84,7 +178,7 @@ Weitere Eigenschaften eines Zaubers werden über die jeweilige Fähigkeit defini
 
 ---
 
-## 6. Ressourcen
+## 10. Ressourcen
 
 Alle Spielercharaktere verwenden grundsätzlich nur zwei zentrale Ressourcen:
 
@@ -100,7 +194,7 @@ Auf zusätzliche klassenspezifische Grundressourcen wie Wut, Energie oder Fokus 
 
 ---
 
-## 7. Kampftempo
+## 11. Kampftempo
 
 Andora verwendet ein klassisches MMORPG-Kampftempo.
 
@@ -114,7 +208,7 @@ Die visuelle Darstellung von Fähigkeiten, Zaubern und Kampfeffekten wird hier n
 
 ---
 
-## 8. Aggro und Gruppenrollen
+## 12. Aggro und Gruppenrollen
 
 Gegner verwenden ein klassisches Aggro- bzw. Bedrohungssystem.
 
@@ -134,7 +228,7 @@ Der Tank ist nicht automatisch dafür verantwortlich, sämtliche Gegner zu kontr
 
 ---
 
-## 9. Tod und Wiederbelebung
+## 13. Tod und Wiederbelebung
 
 Sinken die HP eines Spielers auf null, stirbt der Charakter.
 
@@ -158,7 +252,7 @@ Der Charakter wird anschließend zum nächstgelegenen Respawnpunkt versetzt.
 
 ---
 
-## 10. Respawnpunkte
+## 14. Respawnpunkte
 
 Jedes größere Gebiet besitzt mehrere Respawnpunkte.
 
@@ -170,7 +264,7 @@ Respawnpunkte werden entsprechend über die Gebiete verteilt und sind Teil der j
 
 ---
 
-## 11. Todesmalus
+## 15. Todesmalus
 
 Sterben soll eine Konsequenz besitzen, ohne den Spieler übermäßig zu bestrafen.
 
@@ -186,7 +280,7 @@ Tod, Wiederbelebung und Todesmalus in diesem Abschnitt beschreiben das reguläre
 
 ---
 
-## 12. Fraktionskämpfe innerhalb einer Gruppe
+## 16. Fraktionskämpfe innerhalb einer Gruppe
 
 Für Kämpfe zwischen verfeindeten Fraktionen gelten die bereits definierten Gruppenregeln.
 
@@ -202,15 +296,36 @@ Nach Ende des Fraktionskampfes wird die normale Gruppeninteraktion wiederhergest
 
 ---
 
+## 17. Grundsatz für die erste Implementierung
+
+Das Kampfsystem soll zunächst bewusst einfach implementiert werden.
+
+Es findet keine unnötige Übernahme komplexer Rating-, Expertise- oder Sondermechaniken anderer MMORPGs statt.
+
+Die erste Version soll spielbar und testbar sein. Trefferchancen, Skillprogression, Rüstungsformeln, Caps und andere Zahlenwerte werden anschließend anhand realer Praxistests angepasst (siehe auch Abschnitte 4 bis 7).
+
+> **Noch keine Implementierung des Kampfsystems vornehmen.**
+
+---
+
 # Abgrenzung zu anderen Systemen
 
-Das allgemeine Kampfsystem definiert ausschließlich die grundlegenden Regeln eines Kampfes.
+Das allgemeine Kampfsystem definiert die grundlegenden Regeln eines Kampfes.
 
-Folgende Bereiche werden separat ausgearbeitet:
+Dazu gehören neben den bereits festgelegten Grundelementen (Anvisieren, Grundangriff/Duration, Fähigkeiten, Bewegung, Ressourcen, Tempo, Aggro, Tod/Respawn, Fraktionskämpfe) seit den heutigen Festlegungen auch:
+
+* Kampfskills und Waffenbeherrschung (Haupt-/Nebenskills, Skillmaximum, Abschnitt 4)
+* die grundsätzliche physische Trefferauflösung (Abschnitt 5)
+* die Grundsätze für Waffenschaden und Angriffsgeschwindigkeit (Abschnitt 6)
+* Rüstung und physische Schadensreduktion mit Klassen-Caps (Abschnitt 7)
+
+Die konkreten Zahlenwerte dieser Bereiche sind bewusst Balancingdaten und werden bei der anschließenden Implementierung und über Praxistests festgelegt beziehungsweise angepasst.
+
+Folgende Bereiche werden separat ausgearbeitet, ohne das Grundkampfsystem zu verändern:
 
 * konkrete Fähigkeiten und deren Eigenschaften
-* Klassenmechaniken
-* Waffen- und Ausrüstungswerte
+* Klassenmechaniken und die konkrete Zuordnung von Haupt-/Nebenskills je Klasse
+* konkrete Schadens-, Duration-, Rüstungs- und Skill-Balancingwerte
 * Attribute und Kampfwerte
 * Gegner und deren Fähigkeiten
 * normale Bosse

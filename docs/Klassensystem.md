@@ -227,12 +227,28 @@ Seine wichtigste Aufgabe bleibt unabhängig von der Waffenwahl die Unterstützun
 
 ---
 
+## Waffenbeherrschung und Haupt-/Nebenskills
+
+Die Klasse bestimmt, welche Waffen-/Kampfskills für sie **Hauptskills**, **Nebenskills** oder **nicht verwendbar** sind.
+
+* **Hauptskills** können das vollständige aktuelle Skillmaximum erreichen.
+* **Nebenskills** können vorläufig maximal **40 % des normalen Skillmaximums** erreichen.
+* Nicht verwendbare Waffenarten besitzen für die Klasse keinen nutzbaren Kampfskill.
+
+Beispiel: Ein **Krieger** kann einen Bogen als Nebenwaffe zum Pullen benutzen, erreicht aber niemals dieselbe Beherrschung wie eine Klasse, für die der Bogen eine Hauptwaffe ist.
+
+Die konkrete Zuordnung der Haupt-/Nebenskills je Grund- und Unterklasse sowie die Unterschiede bei der maximalen physischen Schadensreduktion (siehe `Kampfsystem.md` Abschnitt 7) werden bei der jeweiligen Klasse beziehungsweise als Balancingwerte festgelegt.
+
+Die vollständigen Regeln zu Skillmaximum, Level-Zusammenhang und Skillprogression stehen in `Kampfsystem.md` (Abschnitt 4).
+
+---
+
 ## Zentrale Designregel
 
 **Die Rasse bestimmt nicht die Klasse.**
 
 Rasse und Fraktion geben dem Charakter Herkunft, Kultur und Identität. Die Wahl seiner Klasse und damit seiner Spielweise liegt beim Spieler.
 
-Das Klassensystem bleibt bewusst klassisch und übersichtlich. Andora verzichtet auf ein komplexes System, bei dem sich Fähigkeiten ausschließlich anhand verwendeter Waffen, Rüstungen oder Zauber entwickeln.
+Das Klassensystem bleibt bewusst klassisch und übersichtlich. Andora verzichtet auf ein komplexes System, bei dem sich die **Klassen-Fähigkeiten** ausschließlich anhand verwendeter Waffen, Rüstungen oder Zauber entwickeln. Die Kampfskills für Waffenarten und Schilde (siehe `Kampfsystem.md` Abschnitt 4) sind davon abgegrenzt: Sie bilden die trainierbare Waffenbeherrschung eines Charakters, während die Rolle und die Fähigkeiten weiterhin durch die gewählte Grund- und Unterklasse bestimmt werden.
 
 Stattdessen sorgen klar definierte Grund- und Unterklassen für verständliche Rollen, überschaubares Balancing und einen für einen Solo-Entwickler realistisch beherrschbaren Entwicklungsumfang.

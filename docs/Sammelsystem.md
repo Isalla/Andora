@@ -18,6 +18,8 @@ Jede Sammelfertigkeit besitzt einen eigenen Skillwert und beginnt bei **Skill 1*
 
 Der Skill wird nicht durch verteilbare Punkte erhöht, sondern durch die tatsächliche Nutzung der jeweiligen Sammelfertigkeit.
 
+> Hinweis: Dieses Dokument beschreibt die Sammelskills. Die davon getrennten **Kampfskills** für Waffenarten und Schilde (inkl. Haupt-/Nebenskills und Skillmaximum) sind in `Kampfsystem.md` Abschnitt 4 festgelegt.
+
 Beispiel:
 
 * Bergbau 1 → Kupfer kann abgebaut werden
