@@ -91,7 +91,13 @@ Der Client stellt diese Informationen dar und sendet Spieleraktionen an den Serv
 
 # 5. Welt
 
-Andora ist grundsätzlich eine 2D-Spielwelt.
+> **2D trägt die Welt. 3D setzt die Akzente.**
+
+Andora ist grundsätzlich eine 2D-Spielwelt. Die dauerhaft dargestellte Welt ist überwiegend 2D bzw. aus vorgerenderten Assets; es gibt keine volle Low-Poly-3D-Welt als permanentes Rendermodell.
+
+Stilrichtung ist eine detailreiche, atmosphärische 2D-Welt (Richtung klassischer, vorgerenderter bzw. isometrischer Fantasy-Welten), in der die gesparte Laufzeitleistung für Reichhaltigkeit und Atmosphäre genutzt wird.
+
+3D dient ausdrücklich auch als **Produktionswerkzeug**: 3D-Modelle können aus festgelegten Perspektiven zu 2D-Sprites bzw. 2D-Animationen vorgerendert werden.
 
 Die Darstellung kann durch Techniken wie:
 
@@ -105,9 +111,11 @@ Die Darstellung kann durch Techniken wie:
 
 räumlicher wirken.
 
-Echte 3D-Technik soll nur dort verwendet werden, wo sie einen konkreten Vorteil bietet.
+Fähigkeiten, Zauber und kurzlebige Effekte werden nach einem **hybriden Ansatz** dargestellt: 2D-Animationen, vorgerenderte 3D-Effekte als 2D-Animation oder leichte echte Laufzeit-3D-Effekte. Für geeignete Effekte kann der Spieler die bevorzugte Darstellung (z. B. 2D oder 3D) desselben Effekts selbst in den Client-Grafikoptionen wählen. Diese Wahl ist rein clientseitig und hat keinerlei Auswirkung auf Schaden, Heilung, Reichweite, Wirkungsradius, Trefferberechnung, Cooldown, Ressourcenverbrauch, Zielauswahl oder serverseitige Kampfregeln – der Realm bleibt für die tatsächliche Spielmechanik autoritativ. Eine 3D-Darstellung ist keine Voraussetzung, um einen Effekt korrekt wahrzunehmen oder darauf reagieren zu können. Details in `Clientdarstellung_und_Performance.md` (§4).
 
 Die eigentliche Welt- und Gameplaylogik bleibt unabhängig davon, ob ein Gebiet isometrisch oder klassisch von oben dargestellt wird.
+
+Die verbindliche Darstellungsvorgabe, die Stil- und Performance-Grundsätze sowie die technische Referenzierung stehen in `Clientdarstellung_und_Performance.md`.
 
 ---
 
@@ -152,6 +160,8 @@ Mögliche Questziele umfassen:
 Questdefinitionen können über Lua bereitgestellt werden.
 
 Der tatsächliche Questfortschritt wird serverseitig kontrolliert und persistent gespeichert.
+
+Die Storytelling-Ebenen (Hauptstory, Nebenmissionen, Rätsel und Weltgeheimnisse, spielerausgelöste Realm-Ereignisse), Bücher als Gameplay, verborgene Questketten und variable persönliche Rätsel sind in `Storytelling_und_Weltgeheimnisse.md` verbindlich definiert.
 
 ---
 
@@ -379,6 +389,8 @@ World Events können:
 * Szenen auslösen
 * Spieler zusammenführen
 
+Vorbereitete, durch Spieler-Entdeckungen oder -Handlungen ausgelöste Realm-Ereignisse und die individuellen Realm-Chroniken (jeder Realm erzählt dieselbe Welt, aber durch seine eigene Geschichte) sind in `Storytelling_und_Weltgeheimnisse.md` (§ 10–11) verbindlich definiert.
+
 ---
 
 # 18. Dynamic Scene System
@@ -493,6 +505,9 @@ Dafür gelten unter anderem folgende Prinzipien:
 * serverseitige AI-Budgets
 * persistente Daten nur dort speichern, wo sie benötigt werden
 * Weltlogik funktioniert auch ohne Ollama
+* **Performance-Grundsatz:** 60 FPS als Ziel, Untergrenze 30 FPS unter definierter hoher Last (Raspberry Pi 4 als primäre Referenzplattform; „definierte hohe Last" bezieht sich auf die Client-Schutzmechanismen in `architecture.md`)
+
+Die verbindlichen Darstellungs- und Performance-Grundlagen (2D-Welt, 3D-Akzente, hybride Effekte, spielerwählbare 2D-/3D-Darstellung gleicher Effekte inklusive strikter Trennung von Darstellung und Gameplay, Referenzliteratur) stehen in `Clientdarstellung_und_Performance.md`.
 
 ---
 

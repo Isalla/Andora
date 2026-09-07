@@ -1,0 +1,42 @@
+# andora-monitor-apache.service — Dedizierte Apache-Instance für das Monitoring/Panel
+#
+# Bedient HTTP auf Port 3003 und leitet PHP an den FPM-Pool weiter
+# (SetHandler "proxy:unix:...|fcgi://localhost").
+# Abhängigkeit: andora-monitor-fpm.service (FPM muss laufen).
+#
+# WICHTIG (Bind-Host/Dual-Stack): Ein einzelner Prozess kann nur EINEN
+# Listener je Socket abhören. Dual-Stack = ZWEI explizite Listen-Direktiven
+# in der Site-/Port-Konfiguration (deploy/conf/andora-monitor-site.conf):
+#   - Bind ""/auto/127.0.0.1        -> only 127.0.0.1:3003
+#   - Bind ipv4/4                   -> Listen 0.0.0.0:3003
+#   - Bind ipv6/6                   -> Listen [::]:3003 (IPv6-only)
+#   - Bind dual/both                -> Listen 0.0.0.0:3003 UND [::]:3003
+# Es wird NICHT auf implizite IPv4-mapped-IPv6-Sockets vertraut (plattformabhängig).
+#
+# Diese Unit ist eine dokumentierte Eigen-Implementierung, damit das Panel
+# nicht den globalen system Apache/php-fpm verändert und als eigenständiger
+# nicht-root-Prozess läuft. Alternativ kann der Betreiber auch den
+# systemeigenen apache2/php-fpm mit denselben Konfigurationsblöcken nutzen.
+
+[Unit]
+Description=Andora Monitoring-Panel Apache-Instance
+After=andora-monitor-fpm.service network.target
+Requires=andora-monitor-fpm.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+# Apache-Main-Config dieser Instance (definiert ServerRoot/-Name, Logs).
+ExecStart=/usr/sbin/apache2 -f /opt/andora/monitor/monitor-apache.conf -DFOREGROUND
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

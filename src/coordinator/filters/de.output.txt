@@ -1,0 +1,7 @@
+# Deutsche Ergänzungen (output side).
+# Strukturbeispiel analog zu de.input.txt; Output-Filter sind getrennt
+# von den Input-Filtern. Aktiv gegen ALLE Antworten, unabhängig von der
+# Client-Sprache. Phrasen (Einträge mit Leerzeichen) werden nur als
+# ganze Wortfolge erkannt.
+#
+filterumgehung

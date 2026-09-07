@@ -11,7 +11,7 @@ API/Auth-Service (Go, src/api)
 Login-Service (Go, src/login — implementiert)
 Realm-Server (Rust, src/realm-rs — implementiert; Node.js/TS-Übergangsstand
   src/realm bleibt aktiv, bis die Ablösung abgeschlossen ist)
-Coordinator (detailliert spezifiziert, Implementierung folgt)
+Coordinator (Go, src/coordinator — implementiert; Realm-Anbindung offen)
 Voice-Service (späterer Release)
 Andora-Agent
 andora-updater

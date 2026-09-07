@@ -22,6 +22,8 @@ src/api/authapi
 src/api/build/
 src/login/login
 src/login/config.env
+src/coordinator/coordinator
+src/coordinator/config.env
 src/realm-rs/target/
 src/realm-rs/config.env
 web/andora-monitor/data/

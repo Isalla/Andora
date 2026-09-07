@@ -1,0 +1,10 @@
+# Deutsche Ergänzungen (input side).
+# Strukturbeispiel. Die englische Masterliste (en.input.txt) ist die
+# maßgebliche Ausgangsbasis für Übersetzungen; diese Datei enthält
+# zusätzlich Begriffe, die nur im deutschen Sprachgebrauch relevant
+# sind. Aktiv gegen ALLE Jobs, unabhängig von der Client-Sprache.
+# Neue Sprachen: Datei <lang>.input.txt anlegen und (später) aus der
+# englischen Masterliste übersetzen; keine Codeänderung nötig.
+# Siehe docs/Coordinator.md Abschnitt 9.
+#
+niemalsnimmer

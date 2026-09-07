@@ -1,3 +1,4 @@
+Schaue nach, ob unter references Informationen zu diesem Auftrag sind und wende sie an
 # Andora – Inhaltsverzeichnis der Projektdokumentation
 
 **ZWECK:** Zentraler Einstiegspunkt für KI-/Coding-Aufgaben. Zuerst diese Übersicht lesen, danach nur die für die Aufgabe relevanten Dokumente öffnen. Keine Dokumente anfangen, bevor die passende Kategorie unten identifiziert ist.
@@ -20,15 +21,16 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 ## Kategorien
 
 ### 1. KI-Backend & Dev-Prozess
-- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt, OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation). Außerdem die Kurzregeln zur OpenCode-Session- und Datenbankpflege (Details in `OpenCode_Session_Pflege.md`).
+- **ai_jobs.md** – Verhaltensregeln für die Entwicklungs-KI bei langen Aufträgen: autonom weiterarbeiten bei Fehlern/leeren Anfragen, nur bei zwingenden fachlichen Entscheidungen fragen, Kontextreserve (~20k Tokens) vor dem Limit wiederherstellen. Enthält außerdem die Toolchain-/Temporärdatei-Regeln: Go-Toolchain liegt im Projekt unter `.tmp/go` (jeder neue Auftrag nutzt sie für gofmt/vet/build/test; temporäre Toolchains und Downloads ausschließlich unter `.tmp/`), `/etc` wird für Coden und Kompilieren NICHT benutzt, dauerhafte Projektdateien nie in `/tmp` (kurzlebige Zwischendaten dürfen `/tmp/opencode` bzw. systemweites `/tmp` nutzen, Details in `docs/Temporäre_Dateien.md`), OS-Info via `.tmp/os-release` statt `/etc/os-release`; Test-Binärdateien ARM64, Produktions-Binärdateien ARM64 UND AMD64 (Cross-Compilation). Außerdem die Kurzregeln zur OpenCode-Session- und Datenbankpflege (Details in `OpenCode_Session_Pflege.md`).
 - **OpenCode_Session_Pflege.md** – Pflege der OpenCode-Sessions/Datenbank (`~/.local/share/opencode/opencode.db`): Sessions sind temporäre Arbeitsdaten; automatische Löschung ohne Rückfrage bei letzter Aktivität älter als 3 Tage, Ausnahme bei nicht in Git gesicherter relevanter Projektarbeit; Datenbankpflege nur ohne parallelen OpenCode-Prozess (Backup, Freelist-/Kompaktierungsprüfung, Integritätsprüfung, Teststart); offizielle OpenCode-Löschmechanismen haben Vorrang; keine Konfiguration, Skills, Provider-/Modell-Einstellungen oder sonstigen nicht sessionspezifischen Daten entfernen.
 - **ai_system.md** – Zentrale KI-Architektur von Andora (Interpreter-Prinzip, Kontexte, asynchrone Verarbeitung, spezialisierte KI-Module).
-- **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, dateibasierte Queue, Recovery, Crafting-Zuordnung.
-- **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **PHP-Implementierung in `web/andora-monitor` (fertiggestellt) und Node-Legacy-Referenz (`monitor/`)**, Ports 3001–3003, `/status`/`/players`, systemd-Start, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.
+- **Coordinator.md** – KI-Queue-/Ollama-Service: Sicherheitsgrenze, Priorisierung, Spam- und Kontextbudget-Schutz, mehrsprachige globale Sperrwortfilter (englische Masterliste + Sprachdateien), dateibasierte Queue, Recovery, Crafting-Zuordnung. **Umsetzung:** `src/coordinator` (Go, 2026-09).
+- **monitoring_web_panel.md** – Doku des Admin-/Monitoring-Web-Panels: **PHP-Implementierung in `web/andora-monitor` (aktueller Stand; Dev via `php -S`, Produktion via Apache + PHP-FPM) und Node-Legacy-Referenz (`monitor/`)**, Ports 3001–3003, `/status`/`/players`, Produktions-Deploy, offene Punkte; Zielarchitektur (zentrales Panel + Agent) in `Deployment_Betriebsarchitektur.md`.
 - **Deployment_Betriebsarchitektur.md** – Verbindliche Betriebs-/Deployment-Architektur: fünf getrennte Serverdienste (eigenständig betreibbar, linux-amd64 + linux-arm64), zentrales Admin-/Deployment-Panel, Andora-Agent pro Server (mTLS, ohne Remote-Shell), Nicht-Root-Benutzer `andora`, `andora-updater` (signierte Manifeste, Prüfsummen, Healthchecks, Rollback, inkl. Agent), automatisierte Realm-Updates (Wartungsmodus → Shutdown → Backup → Update → Migration → Healthcheck → Freigabe) und parallele Realm-Versionen (Live, Classic, Test, Event).
 
 ### 2. Architektur, Auth & Datenbank
 - **architecture.md** – Technische Gesamtarchitektur (siehe Einstieg).
+- **Clientdarstellung_und_Performance.md** – Verbindliche Client-Darstellung & Performance: „2D trägt die Welt. 3D setzt die Akzente.“ (dauerhaft 2D/vorgerenderte Welt, 3D als Akzente & Produktionswerkzeug; für geeignete Fähigkeiten, Zauber und kurzlebige Kampfeffekte spielerwählbare 2D-/3D-Darstellung gleicher Effekte in den Grafikoptionen – rein clientseitig, ohne Gameplay-Auswirkung, Realm autoritativ, 3D keine Voraussetzung für Gameplay; hybride Effekte; nicht jeder Effekt braucht zwei Varianten), Performance-Grundsatz 60 FPS Ziel / 30 FPS Untergrenze unter definierter hoher Last (Raspberry Pi 4) und Referenzbibliothek-Hinweise.
 - **Deployment_Betriebsarchitektur.md** – Betriebs-/Deployment-Architektur der fünf Serverdienste (Panel, Agent, mTLS, Updater, Realm-Updates; siehe auch Kategorie 1).
 - **Auth_API_Architektur.md** – Go-Auth-/API-Sicherheitsservice: Service-Auth, Berechtigungen, Datenminimierung, Secrets, Auth-DB-Migrationen.
 - **Login_Realm_Architektur.md** – Account-, Login- und Realm-Architektur: Account-DB, World-Server-Auth, Realm-Auswahl, Realm-Versionen, Charakter-Transfer, Fresh-Start-Sperre.
@@ -50,12 +52,14 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md** – Gildenstadt-/Wirtschaftssystem (Exp 2): Gebäudeausbau, Steuern, Handel, Transport/Karren, Spieleraufträge.
 - **exp2_Region_Mandalonien_Ruf_und Woechentliches_Event.md** – Ruf-/Patrouillen-/Wochen-Event (Exp 2): persönlicher/Gildenruf, wöchentlicher Zyklus, Angriffsarmee, Belagerung.
 - **MMO-Systeme-Ideensammlung.md** – Ideensammlung für spätere Systeme (Backlog, keine Entwicklungsreihenfolge): Skills, Lore, Explorations-, Fraktions-, PvE-/Raid- und Wirtschaftsideen.
+- **Storytelling_und_Weltgeheimnisse.md** – Verbindliche Grundprinzipien (Konzept-Ebene): vier Ebenen des Storytellings (Hauptstory, Nebenmissionen, Rätsel und Weltgeheimnisse, spielerausgelöste Realm-Ereignisse), Bücher als Gameplay, verborgene Questketten, variable persönliche Rätsel, Realm-Chroniken (jeder Realm erzählt dieselbe Welt, Classic ausgenommen); keine technische Implementierung.
 
 ### 4. Charakter, Klasse & Progression
 - **Charaktererstellung_und_Charakterdarstellung.md** – Charaktererstellung + clientseitige Darstellung: serverseitige Daten, kosmetische Character-Sets, Mod-Unterstützung, Architekturgrenzen.
 - **Klassensystem.md** – Klassenbaum: Abenteurer → 4 Grundklassen à 2 Unterklassen, Rollen, nicht rassen-/fraktionsgebunden.
 - **Tier-Progression.md** – Progressionsprinzip: keine feste Straße, Level als Ausgleich, Zeit vs. Ausrüstung, Spielertypen (Solo/Gilden), Wege (Dungeon-Finder, Crafting/AH).
 - **Lootsystem.md** – Lootdesign: Berechtigung/Claim, Truhen, Gruppen-Loot (FFA/Group-LE/Würfeln), Tabellen, gebundene Gegenstände.
+- **Erfolge_und_Titel.md** – Verbindliche Grundprinzipien (Konzept-Ebene): Erfolgssystem mit gestaffelten Erfolgen, Titel als kosmetisches Prestige (kein Kampfbonus), Charakterprofil-Anzeige (auch keine Titel), versteckte Titel, dezente Seltenheits-Anzeige, einmalige historische Realm-Titel; Abgrenzung zum Königsamt; keine feste Schwellen-/Effekt-/Datenmodell-Definition.
 
 ### 5. Kampf, Bosse & PvP-Systeme
 - **Kampfsystem.md** – Kampfdesign: Anvisieren, Angriffe, Fähigkeiten, Bewegung, Ressourcen, Tempo, Aggro/Rollen, Tod/Respawn, Fraktionskämpfe.
@@ -78,6 +82,8 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 ### 7. Quests & Story
 - **Quest-System.md** – Quest-Architektur: Lua-/Realm-Server-(Rust)-/MariaDB-Aufteilung, Questzustände, eventbasierter Fortschritt, dynamische Verfügbarkeit, Klassen-/Gruppenquests.
 - **quests_stories.md** – Quest-/Story-Inhalt: Hauptgeschichte, Questdefinitionen, strukturierte Ziele (Kill/Collect/Talk/…), Fortschritt, Belohnungen, KI-/Scene-Integration.
+- **Storytelling_und_Weltgeheimnisse.md** – Verbindliche Storytelling-/Weltgeheimnis-Grundprinzipien: vier Ebenen (Hauptstory, Nebenmissionen, Rätsel/Weltgeheimnisse, spielerausgelöste Realm-Ereignisse), Bücher als Gameplay, verborgene Questketten, variable persönliche Rätsel, Realm-Chroniken (Classic ausgenommen).
+- **Erfolge_und_Titel.md** – Verbindliche Erfolgs-/Titel-Grundprinzipien: gestaffelte Erfolge, Titel als kosmetisches Prestige, versteckte Titel, Seltenheits-Anzeige, historische Realm-Titel, Abgrenzung zum Königsamt.
 
 ### 8. NPC, KI-Dialog & Szenen
 - **Ki-NPC.md** – Doku/Aufgabe für dynamisches NPC-, Informations- und Beziehungssystem: NPCs als Einmal-Personen, Beziehungs-/Wissens-/Nachrichten-/Reisesystem, Raid-Übergang, Ollama-Aufgabe, Fehlerfälle.
@@ -91,8 +97,11 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 
 ## Enge Dokumentepaare / Cluster (zusammen lesen)
 - **KI-Layer:** ai_system.md (Zentralarchitektur) ↔ Coordinator.md (Queue/Ollama-Runner) ↔ Ki-NPC.md (Detail-Aufgabe) ↔ ai_cutscene_system.md (Cutscene-/Scene-Lock).
+- **Client-Darstellung & Performance:** Clientdarstellung_und_Performance.md (verbindliche Darstellungs-/Performance-Grundlagen inkl. spielerwählbarer 2D-/3D-Effektdarstellung und strikter Trennung von Darstellung und Gameplay) ↔ architecture.md (Client-Schutz: RENDER_CAP, auto perf_mode, Chunk-Texture-Batching) ↔ project_overview.md (§5 Welt, §23 Technisches Ziel) ↔ Kampfsystem.md (Fähigkeiten, Effekte, Realm-Autorität über Kampf).
 - **Crafting:** Crafting_Grundprinzip.md + Crafting.md + Handwerksystem.md + Handwerks_und_Sammelsystem.md + Sammelsystem.md (eines impliziert die anderen).
 - **Items:** item_properties.md + inventory_system.md + Crafting.md (Quality-System dreht sich um dieselben Stufen).
+- **Storytelling & Realm:** Storytelling_und_Weltgeheimnisse.md (verbindliche Grundprinzipien) + Quest-System.md (Architektur) + quests_stories.md (Inhalt) + MMO-Systeme-Ideensammlung.md (Quell-Backlog) + Projekt-Übersicht §7/§17 + exp2_Region_Mandalonien_Ruf_und Woechentliches_Event.md (Beispiel für spieler-ausgelöste Weltereignis).
+- **Erfolge & Titel:** Erfolge_und_Titel.md (verbindliche Grundprinzipien) + MMO-Systeme-Ideensammlung.md (Quell-Backlog) + Politik-Herrschaftssystem.md (Königsamt ≠ Achievement-Titel) + Storytelling_und_Weltgeheimnisse.md (Realm-Chroniken als Einbettungskontext).
 - **Quests:** Quest-System.md (Architektur) + quests_stories.md (Inhalt).
 - **Rassen & Fraktionen:** Rassen-Fraktionen.md (Rahmen) + Rasse_*.md / exp*_Rasse_*.md (Details) + Politik-Herrschaftssystem.md (PvP-Phase).
 - **Auth/DB:** Auth_API_Architektur.md + Login_Realm_Architektur.md + Datenbank_Architektur.md + Deployment_Betriebsarchitektur.md + parental_control.md.
@@ -108,6 +117,8 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Fraktionen/Politik:** `Rassen-Fraktionen.md` (3 Fraktionen, spielernah) vs. `Politik-Herrschaftssystem.md` (spätere PvP-/Königsphase) – unterschiedliche Entwicklungsphasen; nicht parallel implementieren.
 - **Quests:** `Quest-System.md` (Zustände/Ausführung) und `quests_stories.md` (Ziele/Story) definieren beide Questziele – bei Zieltypen-Diskrepanz `Quest-System.md` als Architektur-Anker nehmen.
 - **AI-Job-Verhalten:** `ai_jobs.md` (Meta-/Dev-Ebene) ↔ `Coordinator.md` (Runtime-Queue) ↔ `ai_system.md` (§ Fehlerbehandlung): inhaltlich überlappend, aber bewusst getrennt – `ai_jobs.md` gilt für die Entwicklungs-KI, die anderen für das Runtime-KISystem.
+- **MMO-Backlog vs. Binding Docs:** `MMO-Systeme-Ideensammlung.md` bleibt eine Ideensammlung/Backlog. Die verbindlichen Grundprinzipien für Storytelling (Hauptstory, Nebenmissionen, Weltgeheimnisse, Bücher, verborgene Questketten, Realm-Ereignisse/Chroniken) stehen in `Storytelling_und_Weltgeheimnisse.md`, die für Erfolge und Titel in `Erfolge_und_Titel.md`. Bei Widersprüchen haben die verbindlichen Dokumente Vorrang. Die MMO-Liste bleibt als offene Ideenquelle erhalten und wird nicht zurückgenommen.
+- **Königsamt vs. Achievement-Titel:** `Politik-Herrschaftssystem.md` (§12) und `Erfolge_und_Titel.md` (§9.1) grenzen sich explizit voneinander ab: Das Königsamt ist eine aktive politische Position, kein dauerhafter Achievement-Titel. Kein Widerspruch.
 
 ## Hinweise
 - `Auktionshaus und Marktplatz` hat KEINE `.md`-Endung (Link o. a. entsprechend).

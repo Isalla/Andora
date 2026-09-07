@@ -31,9 +31,11 @@ Es gibt zwei lokale Panel-Implementierungen:
    - History-Speicherung in `data/history.json` mit 5-Sekunden-Drosselung und echten Serverstatus-Werten
    - Control: fehlgeschlagene systemctl-Aktionen melden `ok=false` mit generischer Fehlermeldung, interne Fehler werden nur intern protokolliert
 
-2. **Node-Panel** (`monitor/`): Laufender Node-Prozess (systemd-Unit `andora-monitor.service`). Überlebt einen Gameserver-Crash (zeigt dann Offline + Neustart-Button). Startet/stoppt den Gameserver nur über `sudo -n systemctl start|stop|restart andora-server.service` — keine Shell-Freiheit, keine Root-Berechtigung des Panels (sudoers-Vorlage in `deploy/sudoers/andora-monitor`, nur diese drei Befehle, passwordless). Dashboard-HTML unter `public/index.html`.
+2. **Node-Panel** (`monitor/`): Legacy-Referenz (Node-Prozess). In Produktion
+   wird es nicht mehr eingesetzt; der Betrieb läuft über das PHP-Panel.
 
-Das PHP-Panel ist die aktuell fertiggestellte Umsetzung; das Node-Panel bleibt als Legacy-Referenz erhalten.
+Das PHP-Panel ist die aktuell umgesetzte und produktive Variante; das
+Node-Panel bleibt als Legacy-Referenz erhalten (siehe `deploy/README.md`).
 
 ## Ports & Endpunkte
 
@@ -78,7 +80,7 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
 ## Funktionen des Panels
 
 - Dashboard (ein HTML-File, kein Framework): Status, Auslastung, Spieler,
-  Verlauf (~10 min, In-Memory Ring-Buffer, Poll 2 s), Steuerung, Config.
+  Verlauf (~10 min, Datei-basiert, Poll 2 s), Steuerung, Config.
 - **Steuerung**: Start / Stop / Restart — erst nach zweiter Bestätigung
   (POST `/api/control` mit `confirm: true`).
   - PHP-Implementierung: fehlgeschlagene `systemctl`-Aktionen melden `ok=false`
@@ -115,17 +117,21 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
 - `src/realm/src/metrics.ts` — Tick-Statistik + CPU/Heap/RSS
 - `src/realm/src/events.ts` — Event-Loop-Lag-Messung
 
-- `web/andora-monitor/` — PHP-Implementierung des lokalen Monitoring-Admin-Panels (fertiggestellt):
+- `web/andora-monitor/` — PHP-Implementierung des lokalen Monitoring-Admin-Panels:
   - `public/index.php` — Front-Controller, Routing, API-Endpunkte
   - `lib/config.php` — Laden der Panel-Konfiguration
   - `lib/envconfig.php` — Lese-/Schreib-Logik für `config.env` (Whitelist-basiert,
     validateChanges, writeChanges, read_env_file)
-  - `data/` — History-Datenverzeichnis (history.json, ggf. .lastpoint)
+  - `data/` — History-Datenverzeichnis (history.json, Datei-basiert, CAP 360)
   - `config.php` — Projektkonfiguration (Umgebungsvariablen, sensible Defaults)
-  - `public/index.html` — Dashboard-HTML für den PHP-Built-In-Server
+  - `public/index.html` — Dashboard-HTML
 - `deploy/` — Vorlagen (NUR Vorlagen, nicht installiert):
-  - `deploy/systemd/andora-server.service`, `andora-monitor.service`
+  - `deploy/systemd/andora-server.service`, `andora-monitor-fpm.service`,
+    `andora-monitor-apache.service` (Produktionsbetrieb: Apache + PHP-FPM)
   - `deploy/conf/monitor.conf` (EnvironmentFile des Panels)
+  - `deploy/conf/monitor-fpm.conf` (PHP-FPM-Pool, Unix-Socket)
+  - `deploy/conf/monitor-apache.conf` + `andora-monitor-site.conf`
+    (Apache-Instance inkl. expliziter Listen für Bind/Dual-Stack)
   - `deploy/sudoers/andora-monitor` (3 Befehle, passwordless, nur eine Unit)
   - `deploy/README.md` (Installation, Rechte, systemd-Befehle, Verifikation, Rollback)
 
@@ -142,8 +148,14 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
 
 ```bash
 cd src/realm && npm run dev      # Gameserver (3001 WS, 3002 Health/Status)
-cd monitor && node server.js      # Panel auf 127.0.0.1:3003
+cd web/andora-monitor
+php -S 127.0.0.1:3003 -t public public/index.php   # Panel auf 127.0.0.1:3003
 ```
+
+> `php -S` ist ausschließlich für die lokale Entwicklung gedacht (ein
+> Listener pro Prozess, kein echtes Dual-Stack). Produktionsbetrieb:
+> Apache + PHP-FPM über `deploy/`-Vorlagen — siehe `deploy/README.md`
+> (Units `andora-monitor-fpm.service` + `andora-monitor-apache.service`).
 
 Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
 
@@ -168,6 +180,9 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
    `andora`-Nicht-Root-Benutzer, `andora-updater`, signierte Manifeste und
    automatisierte Realm-Updates) ist verbindlich in
    `docs/Deployment_Betriebsarchitektur.md` dokumentiert.
-8. **PHP-spezifische Optimierungen**: Die 5-Sekunden-Drosselung der History
-   und der Token-fail-closed-Schutz wurden in der PHP-Implementierung
-   nachgerüstet (siehe `monitoring_web_panel.md`.
+ 8. **PHP-spezifische Optimierungen (Bugfix/Review durchgeführt)**: Die
+    History-Drosselung erfolgt ausschließlich über den Timestamp des letzten
+    Punkts in `data/history.json` (kein separates `.lastpoint`-File mehr),
+    die History wird mit echten Serverstatus-Werten gespeichert (keine
+    pauschal `online=true`/`players=0`), und der Token-fail-closed-Schutz
+    wird case-insensitiv auf den `x-api-token`-Header angewendet.

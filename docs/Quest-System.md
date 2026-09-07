@@ -8,6 +8,10 @@ Das Quest-System von Andora soll klassische Aufgaben ebenso unterstützen wie dy
 
 Quests sollen nicht nur Aufgabenlisten sein, sondern auf Charakter, Klasse, Beziehungen und Ereignisse der Welt reagieren können.
 
+Die verbindlichen Storytelling-Grundprinzipien (Hauptstory, Nebenmissionen, Weltgeheimnisse, Bücher, verborgene Questketten, variable persönliche Rätsel, spielerausgelöste Realm-Ereignisse, Realm-Chroniken) stehen in `Storytelling_und_Weltgeheimnisse.md`.
+Titel und Erfolge sind in `Erfolge_und_Titel.md` definiert.
+Dieses Dokument definiert nur die Ausführung: Zustände, serverseitige Prüfung, Fortschritt und Belohnung.
+
 ---
 
 # 2. Grundarchitektur
@@ -732,11 +736,14 @@ Die gleiche Architektur soll später auch verwendet werden können für:
 * Klassenquests
 * Tier-Klassenquests
 * Questketten
+* verborgene Questketten (ohne sichtbaren Questgeber)
 * Regionsquests
 * World-Event-Quests
+* Realm-Event-Quests
 * NPC-Beziehungsquests
 * Craftingquests
 * Entdeckungsquests
+* Rätsel-Quests
 * zeitlich begrenzte Quests
 * Dynamic-Scene-Quests
 * besondere Storyquests

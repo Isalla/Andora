@@ -83,6 +83,8 @@ Die endgültigen Mechaniken werden später festgelegt.
 * wiederholbare Aufgaben
 * Entscheidungen und mögliche Konsequenzen
 
+> Die verbindlichen Grundprinzipien für Hauptstory, Nebenmissionen, Weltgeheimnisse, Bücher als Gameplay, verborgene Questketten, variable persönliche Rätsel, spielerausgelöste Realm-Ereignisse und Realm-Chroniken stehen in `Storytelling_und_Weltgeheimnisse.md`. Die technischen Details des Quest-Systems bleiben in `Quest-System.md` und `quests_stories.md`.
+
 ---
 
 # Lore und Weltgeschichte
@@ -104,6 +106,8 @@ Die endgültigen Mechaniken werden später festgelegt.
 # Bücher und Schriften
 
 In der Welt auffindbare Texte können die Hintergrundgeschichte erzählen.
+
+Bücher dürfen dabei mehr sein als Lore-Träger: Sie können Orte beschreiben, indirekte Handlungsanweisungen enthalten und als Hinweise in der Welt wirken (verbindlich in `Storytelling_und_Weltgeheimnisse.md`, § 6 „Bücher als Gameplay“).
 
 Mögliche Inhalte:
 
@@ -572,6 +576,9 @@ Mögliche Benachrichtigungen:
 * NPC-Reaktionen
 * Event-Quests
 * Dynamic Scenes
+* durch Spieler-Entdeckungen ausgelöste Realm-Ereignisse
+
+> Vorbereitete, durch Spieler-Entdeckungen oder -Handlungen ausgelöste Realm-Ereignisse und die individuellen Realm-Chroniken sind verbindlich in `Storytelling_und_Weltgeheimnisse.md` (§ 10–11) definiert.
 
 ---
 
@@ -688,6 +695,8 @@ Mögliche Kategorien:
 * besondere versteckte Erfolge
 
 Achievements können Titel, kosmetische Belohnungen oder Sammlungsfortschritt freischalten.
+
+> Die verbindlichen Grundprinzipien für Erfolge und Titel (Prestige-Logik, versteckte Titel, Seltenheits-Anzeige, individuelle historische Realm-Titel) stehen in `Erfolge_und_Titel.md`. Die konkrete technische Umsetzung (Schwellen, Effekte, Seltenheitsstufen) wird später mit dem Erfolgs-/Eventsystem festgelegt.
 
 ---
 

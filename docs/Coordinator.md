@@ -1,5 +1,12 @@
 # Coordinator – KI-Queue und Ollama-Schnittstelle
 
+> **Umsetzungsstand (2026-09):** Implementiert als eigenständiger Go-Dienst
+> in `src/coordinator` (Endpunkte, Betrieb und Konfiguration:
+> `src/coordinator/README.md`, `deploy/systemd/andora-coordinator.service`,
+> `deploy/conf/coordinator.conf`). Das Realm (Rust) ist noch nicht an den
+> Coordinator angeschlossen; die Fallback-Regeln der Abschnitte 13/24/25
+> gelten dann.
+
 ## 1. Zweck
 
 Der Coordinator ist die zentrale Schnittstelle zwischen den Andora-Realmservern und Ollama.
@@ -201,6 +208,49 @@ Die Prüfung kann beispielsweise erkennen:
 
 Der Coordinator entscheidet dabei nicht über Realm-Spielzustände.
 
+### 9.1 Mehrsprachige globale Sperrwortfilter
+
+Die zentralen Wortregeln liegen sprachdateibasiert unter
+`COORDINATOR_FILTER_DIR` (Standard `filters`) — eine Datei je Sprache und
+Richtung:
+
+```
+filters/en.input.txt    englische Masterliste   (Input; von uns gepflegt)
+filters/en.output.txt   englische Masterliste   (Output)
+filters/de.input.txt    deutsche Ergänzungen    (Input)
+filters/de.output.txt   deutsche Ergänzungen    (Output)
+```
+
+Regeln:
+
+1. Die englische Datei ist die maßgebliche **Masterliste** und die
+   Ausgangsbasis für spätere Übersetzungen. Weitere Sprachdateien können
+   daraus übersetzt und zusätzlich sprachspezifisch ergänzt werden.
+2. Beim Start lädt der Coordinator **alle vorhandenen Sprachdateien
+   gemeinsam in den Speicher**. Es gibt keine Konfiguration für
+   „aktive Sprachen" — jede vorhandene Datei zählt.
+3. Die Filterung läuft immer gegen **alle geladenen Sprachen** und ist
+   **nicht von der Client-/Spielersprache abhängig**. Ein Wechsel der
+   Client-Sprache kann Filter daher nicht umgehen.
+4. **Input und Output sind getrennt:** `*.input.txt` greift auf die
+   Spielereingabe (§9), `*.output.txt` auf Ollamas Antwort (§10).
+5. `INPUT_DENY_WORDS`/`OUTPUT_DENY_WORDS` bleiben als **zusätzliche
+   Betreiber-Einträge** erhalten und verschmelzen mit den Dateiregeln.
+6. Format: eine Regel je Zeile (niedrig geschrieben), `#`-Zeilen sind
+   Kommentare. Einzelwörter werden Wort-genau gematcht (kein Teilstring),
+   Phrasen (mit Leerzeichen) nur als ganze Wortfolge; Matching ist
+   case-insensitiv und Unicode-fähig (Umlaute/Akzente).
+7. Fehlende oder leere Filterdateien sind erlaubt — die jeweilige Seite
+   bleibt dann leer bzw. nur durch die Betreiber-Einträge belegt.
+
+**Neue Sprache ergänzen** (keine Codeänderung):
+
+1. Aus der englischen Masterliste übersetzen.
+2. `filters/<lang>.input.txt` und `filters/<lang>.output.txt` anlegen
+   und ggf. sprachspezifische Begriffe ergänzen.
+3. Coordinator starten — die Datei wird automatisch geladen und gilt ab
+   dann für alle Jobs.
+
 ---
 
 ## 10. Output-Prüfung
@@ -352,11 +402,16 @@ Grundprinzip:
 
 Bei einem Absturz während des Schreibens bleibt dadurch möglichst die vorherige gültige Version erhalten.
 
-Für sämtliche temporären Dateien gelten die allgemeinen Andora-Projektregeln.
+Für sämtliche temporären Dateien gelten die allgemeinen Andora-Projektregeln
+(`docs/Temporäre_Dateien.md`).
 
-Es darf kein systemweites `/tmp` verwendet werden.
-
-Temporäre Dateien gehören ausschließlich in den projektinternen `.tmp`-Bereich.
+Kurzlebige Zwischendaten dürfen systemweites `/tmp`-bzw. `/tmp/opencode`
+nutzen; temporäre Dateien eines atomaren Schreibvorgangs in der Queue
+gehören jedoch dorthin, wo der atomare Vorgang stattfindet
+(`COORDINATOR_DATA_DIR/queue/jobs/.tmp-*`) — ein Umweg über ein fremdes
+Dateisystem würde die rename-/Persistenzgarantie brechen. Dauerhafte
+Projektdateien gehören ausschließlich in den Projektbereich (`.tmp/` bzw.
+den jeweiligen Datenordner), niemals in systemweites `/tmp`.
 
 ---
 

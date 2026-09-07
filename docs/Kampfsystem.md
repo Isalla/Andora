@@ -110,6 +110,8 @@ Positionierung, Zielwahl, Fähigkeiten, Ausrüstung und das Zusammenspiel der Gr
 
 Das vergleichsweise ruhige Kampfsystem unterstützt gleichzeitig das Ziel, den Client auch auf leistungsschwacher Hardware wie dem Raspberry Pi betreiben zu können.
 
+Die visuelle Darstellung von Fähigkeiten, Zaubern und Kampfeffekten wird hier nicht vorgegeben, sondern folgt dem Darstellungsprinzip in `Clientdarstellung_und_Performance.md`: hybrider Ansatz (2D-Animationen, vorgerenderte 3D-Effekte als 2D-Animation, leichte echte 3D-Effekte im Performance-Budget); für geeignete Effekte kann der Client unterschiedliche Darstellungen derselben Fähigkeit unterstützen – die bevorzugte 2D-/3D-Darstellung wählt der Spieler in den Client-Grafikoptionen. Diese Auswahl ist rein clientseitig und hat keinerlei Auswirkung auf Schaden, Heilung, Reichweite, Wirkungsradius, Hitbox, Trefferberechnung, Dauer, Cooldown, Ressourcenverbrauch, Zielauswahl, Anzahl getroffener Ziele oder serverseitige Kampfregeln. Der Realm bleibt für die tatsächliche Spielmechanik autoritativ; Spieler mit 2D- und 3D-Darstellung erleben spielmechanisch exakt dasselbe Kampfgeschehen.
+
 ---
 
 ## 8. Aggro und Gruppenrollen

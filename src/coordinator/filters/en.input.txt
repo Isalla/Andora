@@ -1,0 +1,11 @@
+# English master list (input side) — maintained by us.
+# Structure example only. Real entries are added later. Each entry is
+# one denylist rule per line, lower case, optional '#' comments.
+# This file is loaded at startup together with every other language
+# file and applies to ALL jobs regardless of the player/client locale.
+# A new language is added by creating <lang>.input.txt and
+# <lang>.output.txt — no code change needed. See docs/Coordinator.md
+# section 9.
+#
+nevernever
+rollbackworld

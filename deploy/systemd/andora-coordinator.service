@@ -1,0 +1,29 @@
+# andora-coordinator.service — Coordinator-Service (Go, src/coordinator)
+#
+# Reihenfolge im Betrieb: database → login → realm → coordinator → ollama.
+# Der Coordinator ist lastfrei, wenn Ollama nicht läuft; ein Scheme
+# "start OLLAMA dann coordinator" erzwingt die Reihenfolge nicht — der
+# Coordinator startet auch ohne Ollama und meldet QUEUE_FULL/AI_UNAVAILABLE
+# sauber ans Realm zur Fallback-Reaktion.
+
+[Unit]
+Description=Andora Coordinator Service (KI-Queue, Go)
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=andora
+Group=andora
+WorkingDirectory=/opt/andora/coordinator
+ExecStart=/opt/andora/coordinator/coordinator /opt/andora/coordinator/config.env
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=true
+ProtectHome=true
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

@@ -105,8 +105,11 @@ Rust-Toolchain:
 Jeder NEUE Coding-Auftrag (gofmt, vet, build, test für Go; cargo build/test für Rust, Downloads temporärer Toolchains) MUSS die jeweils passende projektinterne Toolchain unter `.tmp/` verwenden. Der systemweite Rust-Pfad `~/.cargo` wird NICHT verwendet.
 
 Regeln:
-- `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt.
-- Temporäre Toolchains, Downloads und temporäre Artefakte landen ausschließlich in `.tmp/`
+- `/etc` und (dauerhafte Projektdateien in) `/tmp` werden für Coden und Kompilieren NICHT benutzt.
+- Kurzlebige Arbeits- und Zwischendaten dürfen in `/tmp/opencode` bzw. systemweites `/tmp`
+  (z. B. Buch-/EPUB-Extraktionen, temporäre Analysedaten, Session-Artefakte); dauerhafte
+  Projektdateien dort sind verboten (Details: `docs/Temporäre_Dateien.md`).
+- Temporäre Toolchains, Downloads und temporäre Artefakte ohne Bestand landen ausschließlich in `.tmp/`
   (relativ zum Projektroot, z. B. `.tmp/go` für eine neu geladene Toolchain).
 - Das Operating System des Projekts lässt sich über `.tmp/os-release` (relativ zum Projektroot)
   prüfen (aktuell Debian GNU/Linux 13 (trixie), ARM64). Diese Datei ersetzt das systemweite

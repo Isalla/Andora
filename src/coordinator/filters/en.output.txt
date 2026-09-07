@@ -1,0 +1,6 @@
+# English master list (output side) — maintained by us.
+# Structure example only, see en.input.txt and docs/Coordinator.md
+# section 9. Phrases (entries with spaces) are matched only as whole
+# delimited sequences.
+#
+leakthesystem

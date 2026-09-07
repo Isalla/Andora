@@ -1,0 +1,41 @@
+# andora-monitor-fpm.service — Dedizierter PHP-FPM-Master für das Monitoring/Panel
+#
+# Produktionsbetrieb des PHP-Panels (web/andora-monitor):
+#   - andora-monitor-fpm.service   = PHP-FPM (führt public/index.php aus)
+#   - andora-monitor-apache.service = Apache-Instance, die Port 3003 bedient
+#   - php -S ist NUR für die lokale Entwicklung gedacht (ein Listener pro
+#     Prozess, kein echtes Dual-Stack) und NICHT für den Produktionsbetrieb.
+#
+# Diese Unit gehört zum Produktions-Deploy (Vorlage, manuell installieren).
+# Läuft als eigener nicht-root-Benutzer (User=pi an Zielserver anpassen).
+
+[Unit]
+Description=Andora Monitoring-Panel PHP-FPM (eigener Pool)
+# Läuft unabhängig vom Gameserver; überlebt einen Game-Server-Crash.
+After=network.target
+
+[Service]
+Type=simple
+# FPM-Master läuft NICHT als root; der Pool-User unten wird auf denselben
+# User gesetzt, damit er die Daten-Dateien (data/history.json) schreiben kann.
+User=pi
+Group=pi
+# FPM-Master-Konfiguration (Enthält den Pool; siehe deploy/conf/monitor-fpm.conf).
+ExecStart=/usr/sbin/php-fpm8.2 --nodaemonize --fpm-config /opt/andora/monitor/monitor-fpm.conf
+# php-fpm braucht den Pid-Pfad aus der Konfiguration.
+RuntimeDirectory=andora-monitor
+# Panel-Umgebungsvariablen (Bind-Host/Port, Token, Zielpfad, ...) —
+# siehe deploy/conf/monitor.conf. clear_env=no im Pool reicht diese
+# Variablen bis ins PHP-Skript (getenv) durch.
+EnvironmentFile=-/opt/andora/monitor/monitor.conf
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

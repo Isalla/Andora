@@ -1,25 +1,58 @@
 ## Temporäre Dateien
 
-Für sämtliche temporären Dateien des Projekts ist ausschließlich der vorhandene projektinterne Ordner
+Für **dauerhafte Projektdateien, Toolchains, persistente Caches und bewusst
+über Arbeitsschritte/Sessions erhaltene lokale Hilfsmittel** ist
+ausschließlich der projektinterne Ordner
 
 `.tmp`
 
-(relativ zum Projektroot, dem Root des aktuell geöffneten Andora-Repositories) zu verwenden.
+(relativ zum Projektroot, dem Root des aktuell geöffneten Andora-Repositories)
+zu verwenden.
 
-Systemweite temporäre Verzeichnisse wie `/tmp`, `/var/tmp` oder vergleichbare Verzeichnisse außerhalb des Projekts dürfen nicht verwendet werden.
+Dauerhafte Projektdateien dürfen den Projektroot nicht verlassen und
+dürfen nicht in systemweiten temporären Verzeichnissen abgelegt werden.
+
+### Kurzlebige Arbeits- und Zwischendaten
+
+Für **kurzlebige** Arbeits- und Zwischendaten, die keiner dauerhaften
+Aufbewahrung bedürfen, sind systemweite temporäre Verzeichnisse zulässig —
+`/tmp/opencode` bzw. systemweites `/tmp`. Beispiele:
+
+* Buch-, EPUB- oder sonstige Medienextraktionen als Session-Zwischenschritt
+* temporäre Analysedaten
+* vergleichbare Session-Artefakte, die nach der Session keinen Wert mehr haben
+
+Es gelten zwei Grenzen:
+
+* **Keine dauerhaften Projektdateien** in `/tmp` — alles, was später noch
+  gebraucht wird (Toolchains, Caches, Hilfsmittel, generierte Dateien mit
+  Bestand), wohnt unter `<Projektroot>/.tmp/` oder im Projektverzeichnis.
+* **Atomare projektinterne Schreibvorgänge** bleiben an ihrem jeweiligen Ort:
+  temporäre Dateien, die Teil einer sicheren Rename-/Persistenzlogik sind,
+  werden weiterhin dort erzeugt, wo der atomare Vorgang stattfindet
+  (z. B. die `.tmp-*`-Write-Dateien der Coordinator-Queue unter
+  `COORDINATOR_DATA_DIR`). Ein Umweg über `/tmp` würde die atomic-rename-
+  Garantie auf demselben Dateisystem brechen.
+
+Projekt-Toolchains (`.tmp/go`, `.tmp/rust`, Mod-/Build-Caches) sind
+ausdrücklich **kein** Fall für `/tmp`: sie liegen dauerhaft im Projekt.
+
+Systemweite Installationen oder sonstige persistente Änderungen außerhalb
+des Projektroots bleiben weiterhin zustimmungspflichtig (siehe
+`OpenCode_Session_Pflege.md`).
+
+### Einschlägige Fälle im Projekt
 
 Dies gilt insbesondere für:
 
-* temporäre Arbeitsdateien
-* Zwischenstände
-* atomare Schreibvorgänge
+* temporäre Arbeitsdateien und Zwischenstände
 * generierte temporäre Konfigurationen
 * Build-/Hilfsdateien, sofern deren Speicherort steuerbar ist
-* temporäre Queue- und Recovery-Dateien
+* temporäre Queue- und Recovery-Dateien (zwingend projektintern, siehe oben)
 
-Bei Bedarf sind innerhalb von `.tmp/` geeignete Unterverzeichnisse anzulegen.
-
-Temporäre Dateien dürfen den Projektroot nicht verlassen.
+→ Diese liegen in `.tmp/` (bei Bedarf mit passenden Unterverzeichnissen)
+bzw. am Ort des jeweiligen atomaren Schreibvorgangs, **nie** als
+dauerhaftes Artefakt in `/tmp`.
 
 ## Projekt-Toolchains in `.tmp/`
 

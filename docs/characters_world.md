@@ -27,3 +27,5 @@
 - Hauptgeschichte
 - Nebengeschichten
 - Quests
+
+Die vier Ebenen des Storytellings (Hauptstory, Nebenmissionen, Rätsel und Weltgeheimnisse, spielerausgelöste Realm-Ereignisse) sowie Bücher, verborgene Questketten, variable persönliche Rätsel und Realm-Chroniken sind in `Storytelling_und_Weltgeheimnisse.md` verbindlich definiert. Erfolge und Titel sind in `Erfolge_und_Titel.md` definiert.

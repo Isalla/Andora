@@ -8,6 +8,9 @@ Das Quest-System verbindet Spieler mit den Geschichten, NPCs und Ereignissen der
 
 Quests werden nicht als isolierte Aufgaben betrachtet, sondern können mit NPC-Wissen, Beziehungen, World Events und dem Dynamic Scene System verbunden sein.
 
+Die verbindlichen Grundprinzipien für Storytelling-Ebenen, Weltgeheimnisse, Bücher als Gameplay, verborgene Questketten, variable persönliche Rätsel, spielerausgelöste Realm-Ereignisse und Realm-Chroniken stehen in `Storytelling_und_Weltgeheimnisse.md`.
+Das Erfolgssystem und Titel sind in `Erfolge_und_Titel.md` definiert.
+
 ---
 
 # 1. Grundprinzip
@@ -43,19 +46,21 @@ Grundstruktur:
 
 ```text
 Einführung in die Welt
-        ↓
+         ↓
 Entdeckung der Regionen und Bewohner
-        ↓
+         ↓
 zentrale Handlung entwickelt sich
-        ↓
+         ↓
 größere Konflikte und World Events
-        ↓
+         ↓
 Endgame-Inhalte
 ```
 
 Die Hauptgeschichte muss nicht bedeuten, dass jeder Spieler exakt denselben Weg nimmt.
 
 Neben der zentralen Handlung können regionale Geschichten, NPC-Geschichten und persönliche Questketten existieren.
+
+> Die Ausgestaltung der Hauptstory über mehrere Veröffentlichungen hinweg (Geheimnisse, die zunächst nicht beantwortet werden und später gelöst oder durch größere Geheimnisse ersetzt werden können) ist verbindlich in `Storytelling_und_Weltgeheimnisse.md` (§ 4) definiert.
 
 ---
 
@@ -284,6 +289,8 @@ Erlebe den Abschluss eines World Events.
 ```
 
 Das Quest-System kann auf entsprechende Events reagieren.
+
+Vorbereitete, durch Spieler-Entdeckungen oder -Handlungen ausgelöste Realm-Ereignisse und die daraus entstehenden Realm-Chroniken sind in `Storytelling_und_Weltgeheimnisse.md` (§ 10–11) verbindlich definiert. Quests können auf solche Realm-Ereignisse reagieren, ohne deren Zustandsmodell zu hinterfragen.
 
 ---
 
@@ -670,3 +677,5 @@ bestehen.
 Sie sollen mit der persistenten Welt verbunden werden können.
 
 NPCs, Beziehungen, Informationen, Reisen, World Events und Dynamic Scenes können gemeinsam dafür sorgen, dass eine Quest als Teil der Welt wahrgenommen wird und nicht als isolierter Eintrag im Questlog.
+
+Die vier Ebenen des Storytellings (Hauptstory, Nebenmissionen, Rätsel und Weltgeheimnisse, spielerausgelöste Realm-Ereignisse) sowie Bücher, verborgene Questketten und variable persönliche Rätsel sind in `Storytelling_und_Weltgeheimnisse.md` verbindlich definiert.

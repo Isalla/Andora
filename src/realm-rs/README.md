@@ -55,5 +55,4 @@ laufen vor Health/WebSocket; Fehler → Exit 1, keine Spieler.
   konfiguriert, aber noch nicht verdrahtet; Fallback-Regeln aus
   `docs/Coordinator.md` gelten dann).
 - Charaktertransfer zwischen Realms (kontrollierte DB-zu-DB-Migration).
-- Coordinator-Service (`src/coordinator`, nur spezifiziert) und
-  Voice-Service (späterer Release) sind separate Dienste.
+- Voice-Service (späterer Release) ist ein separater Dienst.
