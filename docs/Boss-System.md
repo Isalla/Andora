@@ -46,19 +46,17 @@ Scheitert die ursprüngliche Gruppe vollständig oder bricht sie den Kampf ab, w
 
 Stattdessen beginnt der **Boss-Reset**.
 
+Der Boss-Reset ist die Boss-Anwendung der einheitlichen Evade-/Return-Regel aus `Kampfsystem.md` (Abschnitt 20): ein Combat-Reset, weder Tod noch Respawn.
+
 Der Boss:
 
 1. beendet den aktuellen Kampf,
-2. ignoriert weitere Angriffe,
+2. ist während des Rückwegs **nicht angreifbar** und erleidet keinen Schaden,
 3. kehrt zu seiner Ausgangsposition zurück,
-4. wird vollständig zurückgesetzt,
+4. wird vollständig zurückgesetzt (volle HP-/Mana-Regeneration, vollständiger Cooldown-Reset),
 5. verliert den bisherigen Claim.
 
-Während des Rückwegs können andere Spieler den Boss weiterhin angreifen und ihm Schaden zufügen.
-
-Der Boss reagiert während des Resets jedoch nicht darauf und beginnt keinen neuen Kampf.
-
-Sollte der Boss während seines Resets trotzdem getötet werden, erhält **niemand Loot, XP oder andere Belohnungen**.
+Während des Resets kann kein neuer Kampf mit dem Boss begonnen werden; der Reset ist nicht durch Angriffe unterbrechbar. Ein Respawn-Timer startet durch den Reset nicht, da der Boss dabei nicht gestorben ist (siehe Abschnitt 6).
 
 Erst nachdem der vollständige Reset abgeschlossen wurde, ist der Boss wieder frei und kann neu geclaimt werden.
 
@@ -105,6 +103,8 @@ wieder erscheinen.
 Der Respawn-Timer beginnt nach dem tatsächlichen Tod des Bosses.
 
 Ein normaler Boss-Reset startet keinen Respawn-Timer, da der Boss dabei nicht gestorben ist.
+
+Langfristige Boss-Respawnzustände müssen Realm-Neustarts überstehen (Persistenz: `Datenbank_Architektur.md`; Werte aus Content/Lua beziehungsweise Spawn-/DB-Daten, siehe `Kampfsystem.md`, Abschnitt 21).
 
 ---
 
@@ -343,6 +343,8 @@ Spieler ziehen durch andere Gebiete und untersuchen:
 Da normale Respawns und tatsächliche Bosswellen bewusst nicht eindeutig voneinander unterscheidbar sind, bleibt diese Suche unsicher.
 
 Ein gefundenes Muster garantiert nicht, dass dasselbe Muster an einem anderen Ort funktioniert.
+
+Versteckte Bosse sind damit Teil der Erkundungsprogression der Unterwelt: Größere und komplexere Ebenen bieten mehr Raum für unentdeckte Spawnketten (siehe `exp1_Unterwelt.md`, Abschnitt 57).
 
 ---
 

@@ -379,6 +379,8 @@ Die genaue Trennung zwischen Inventory, Bank und Materiallager wird später fest
 * Dungeon-Loot
 * mögliche dynamische Ereignisse innerhalb von Dungeons
 
+Verbindliche Encounter-/Pull-Designprinzipien (Geometrie als Encounter-Mechanik, Patrouillengefahr, Progression, Größenprogression) stehen in `exp1_Unterwelt.md` (Abschnitte 51–55).
+
 ---
 
 # Raids
@@ -595,7 +597,7 @@ Mögliche spätere Systeme:
 * Veränderungen durch World Events
 * Auswirkungen von Spielern auf lokale Populationen
 
-Ob Andora eine echte simulierte Ökologie erhält oder klassische Respawn-Systeme verwendet, wird später entschieden.
+Ob Andora darüber hinaus eine echte simulierte Ökologie erhält, wird später entschieden. Der grundlegende Respawn-Mechanismus für Gegner/Monster ist bereits verbindlich festgelegt (Respawnzeiten als Contentwerte, Timer ab tatsächlichem Tod, langfristige Zustände restartfest; siehe `Kampfsystem.md`, Abschnitt 21 und `Boss-System.md`, Abschnitt 6).
 
 ---
 

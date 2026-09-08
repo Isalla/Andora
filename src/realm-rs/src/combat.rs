@@ -8,7 +8,7 @@
 // (CombatCfg) und werden anhand späterer Praxistests angepasst.
 // Die Trefferentscheidung ist eine reine Funktion mit injizierbarem,
 // reproduzierbarem RNG — damit in Tests deterministisch testbar.
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::CombatCfg;
 use crate::protocol::{s2c, Frame};
@@ -80,7 +80,7 @@ impl CombatRng for SplitMix64 {
 /// Rüstungs-Cap je Klasse (docs/Kampfsystem.md §7): Tank 50 %, Magier 20 %,
 /// Sonstige (vorläufig) 30 %. Klassennamen aus dem DB-Attribut char_class;
 /// legacy-Werte (Warrior/Mage) und deutsche Klassennamen werden erkannt.
-fn class_cap(cfg: &CombatCfg, class: &str) -> u32 {
+pub fn class_cap(cfg: &CombatCfg, class: &str) -> u32 {
     let c = class.trim().to_lowercase();
     const TANK: &[&str] = &["krieger", "paladin", "kämpfer", "kampfer", "warrior"];
     const MAGE: &[&str] = &["magier", "hexer", "mentalist", "mage"];
@@ -173,18 +173,27 @@ fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 }
 
 /// Welt-Tick des Kampfs (nach world_tick): verarbeitet alle bewaffneten
-/// Auto-Angriffe. Regeln (docs/Kampfsystem.md §§3, 7, 9, 13):
+/// Auto-Angriffe. Ziel kann ein Spieler (Combat V1) oder ein NPC/Monster
+/// (Combat V2) sein — ein gemeinsamer Kampfkern, keine separate Engine
+/// (docs/Kampfsystem.md §21). Regeln (docs/Kampfsystem.md §§3, 7, 9, 13):
 /// - Angriff läuft, solange ein gültiges, lebendes, erreichbares Ziel
 ///   besteht und die Waffen-Duration verstrichen ist.
 /// - Außer Reichweite → Tick übersprungen, Angriff bleibt aktiv (pausiert).
 /// - Ziel tot/weg → Auto-Angriff endet (auch für alle, die dasselbe Ziel
 ///   anvisieren). Bei 0 HP: KILL-Broadcast, HP nie unter 0.
+/// - NPC-Ziele: nur wenn `attackable` und nicht in Evade/Return (§18/§20).
+/// - Boss-Claim (Boss-System.md §2): erster Schadensverursacher (Schaden
+///   positiv) an freiem Boss erhält den Claim; andere zufügter Schaden
+///   übernimmt den Claim nicht.
+/// - NPC-Tod: Status Dead, Respawn-Timer startet (respawn_after, §21),
+///   Claim wird gelöscht; Respawn übernimmt npc::npc_tick.
 /// Sender: DAMAGE (+ hp via world_tick-STATE) und KILL an alle Sichtbaren.
 pub fn combat_tick(
     world: &mut World,
     cfg: &CombatCfg,
     rng: &mut dyn CombatRng,
     now: Instant,
+    wall_now: SystemTime,
     aofb: f64,
 ) {
     // 1) Bewaffnete Angriffe als Snapshot (vermeidet Borrow-Konflikte).
@@ -209,9 +218,16 @@ pub fn combat_tick(
         }
     }
 
+    /// Ziel-Art für die Ergebnisverarbeitung.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum TargetKind {
+        Player,
+        Npc,
+    }
+
     // 2) Je Tick auswertbar? (noch lebendiges, erreichbares Ziel, Duration
     //    abgelaufen). Ergebnis wird je Angreifer aufgezeichnet.
-    let mut outcomes: Vec<(String, String, f64, f64, HitResult, i32)> = Vec::new();
+    let mut outcomes: Vec<(String, String, f64, f64, HitResult, i32, TargetKind)> = Vec::new();
     for (aid, tid, skill) in &armed {
         let Some(a) = world.players.get(aid) else {
             continue;
@@ -225,43 +241,113 @@ pub fn combat_tick(
         if elapsed < Duration::from_millis(cfg.weapon_duration_ms) {
             continue;
         }
-        let Some(t) = world.players.get(tid) else {
+        if let Some(t) = world.players.get(tid) {
+            if t.hp <= 0 {
+                // Ziel tot → Auto-Angriff beendet.
+                if let Some(a) = world.players.get_mut(aid) {
+                    a.combat = None;
+                }
+                continue;
+            }
+            if dist(a.x, a.y, t.x, t.y) > cfg.weapon_range {
+                continue; // außer Reichweite: pausieren, Angriff bleibt aktiv.
+            }
+            let cap = class_cap(cfg, &t.char_class);
+            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, t.armor, cap);
+            outcomes.push((
+                aid.clone(),
+                tid.clone(),
+                a.x,
+                a.y,
+                result,
+                dmg,
+                TargetKind::Player,
+            ));
+        } else if let Some(n) = world.npcs.get(tid) {
+            // NPC-Ziel: nur attackable + nicht in Evade/Return (§18/§20).
+            if n.status != crate::npc::NpcStatus::Alive || !n.effective_attackable() {
+                if let Some(a) = world.players.get_mut(aid) {
+                    a.combat = None;
+                }
+                continue;
+            }
+            if dist(a.x, a.y, n.x, n.y) > cfg.weapon_range {
+                continue;
+            }
+            // NPCs nutzen denselben Kampfkern; Rüstungs-Cap: Default
+            // (NPCs haben keine Klasse; vorläufig §7).
+            let cap = cfg.armor_cap_default;
+            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, n.armor, cap);
+            outcomes.push((
+                aid.clone(),
+                tid.clone(),
+                a.x,
+                a.y,
+                result,
+                dmg,
+                TargetKind::Npc,
+            ));
+        } else {
             // Ziel weg → Auto-Angriff beendet.
             if let Some(a) = world.players.get_mut(aid) {
                 a.combat = None;
             }
-            continue;
-        };
-        if t.hp <= 0 {
-            // Ziel tot → Auto-Angriff beendet.
-            if let Some(a) = world.players.get_mut(aid) {
-                a.combat = None;
-            }
-            continue;
         }
-        if dist(a.x, a.y, t.x, t.y) > cfg.weapon_range {
-            continue; // außer Reichweite: pausieren, Angriff bleibt aktiv.
-        }
-        let cap = class_cap(cfg, &t.char_class);
-        let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, t.armor, cap);
-        outcomes.push((aid.clone(), tid.clone(), a.x, a.y, result, dmg));
     }
 
     // 3) Schaden anwenden (eigene Schleife, keine konkurrierenden Borrows).
     //    Broadcasts werden erst nach den Mutations gesammelt und versendet.
     let mut kills: Vec<(String, String)> = Vec::new();
     let mut broadcasts: Vec<(String, f64, f64, Frame)> = Vec::new();
-    for (aid, tid, ax, ay, result, dmg) in &outcomes {
+    for (aid, tid, ax, ay, result, dmg, target_kind) in &outcomes {
         if let Some(a) = world.players.get_mut(aid) {
             if let Some(c) = a.combat.as_mut() {
                 c.last_attack = now;
             }
         }
-        let killed = if let Some(t) = world.players.get_mut(tid) {
-            t.hp = (t.hp - dmg).max(0);
-            t.hp == 0
-        } else {
-            false
+        let killed = match target_kind {
+            TargetKind::Player => {
+                if let Some(t) = world.players.get_mut(tid) {
+                    t.hp = (t.hp - dmg).max(0);
+                    t.hp == 0
+                } else {
+                    false
+                }
+            }
+            TargetKind::Npc => {
+                let was_alive = world
+                    .npcs
+                    .get(tid)
+                    .is_some_and(|n| n.status == crate::npc::NpcStatus::Alive);
+                if let Some(n) = world.npcs.get_mut(tid) {
+                    if was_alive && n.status == crate::npc::NpcStatus::Alive {
+                        // Boss-Claim (§2): erster Schadensverursacher eines
+                        // freien Bosses erhält den Claim.
+                        if n.is_boss() && n.claimed_by.is_none() && *dmg > 0 {
+                            n.claimed_by = Some(aid.clone());
+                        }
+                        n.hp = (n.hp - dmg).max(0);
+                        if n.hp == 0 {
+                            n.status = crate::npc::NpcStatus::Dead;
+                            n.target_id = None;
+                            n.no_link_since = None;
+                            // Respawn: Contentwert (§21) — Definition-Wert
+                            // oder Default je Kategorie.
+                            let respawn_ms = n.respawn_ms.max(0) as u64;
+                            n.respawn_after = Some(wall_now + Duration::from_millis(respawn_ms));
+                            // Boss-Tod: Claim ungültig.
+                            n.claimed_by = None;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            }
         };
         let hit = result.key();
         broadcasts.push((
@@ -329,6 +415,11 @@ mod tests {
         fn next(&mut self) -> f64 {
             self.0.pop_front().expect("scripted rng exhausted")
         }
+    }
+
+    /// Feste Wallclock für deterministische Respawn-Tests.
+    fn wall() -> SystemTime {
+        SystemTime::UNIX_EPOCH
     }
 
     fn test_cfg() -> CombatCfg {
@@ -498,7 +589,14 @@ mod tests {
 
         // Erster Angriff sofort (Duration als abgelaufen gesetzt).
         let t1 = now + Duration::from_millis(1);
-        combat_tick(&mut w, &cfg, &mut ScriptedRng::from(&[0.8, 0.9]), t1, 20.0);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            t1,
+            wall(),
+            20.0,
+        );
         let msgs = drain(&mut rb);
         assert_eq!(msgs.len(), 1, "DAMAGE-Broadcast erwartet");
         assert!(msgs[0].contains("\"type\":5") && msgs[0].contains("\"amount\":100"));
@@ -506,7 +604,14 @@ mod tests {
 
         // Noch innerhalb der Duration → kein Folgeangriff.
         let t2 = t1 + Duration::from_millis(1000);
-        combat_tick(&mut w, &cfg, &mut ScriptedRng::from(&[0.8, 0.9]), t2, 20.0);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            t2,
+            wall(),
+            20.0,
+        );
         assert!(
             drain(&mut rb).is_empty(),
             "kein Angriff vor Duration-Ablauf"
@@ -515,7 +620,14 @@ mod tests {
 
         // Nach der Duration → Folgeangriff.
         let t3 = t1 + Duration::from_millis(2000);
-        combat_tick(&mut w, &cfg, &mut ScriptedRng::from(&[0.8, 0.9]), t3, 20.0);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            t3,
+            wall(),
+            20.0,
+        );
         assert_eq!(drain(&mut rb).len(), 1);
     }
 
@@ -537,6 +649,7 @@ mod tests {
             &cfg,
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
+            wall(),
             20.0,
         );
         assert!(drain(&mut rb).is_empty());
@@ -560,6 +673,7 @@ mod tests {
             &cfg,
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
+            wall(),
             20.0,
         );
         assert!(
@@ -579,6 +693,7 @@ mod tests {
             &cfg,
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
+            wall(),
             20.0,
         );
         assert!(w.players["a"].combat.is_none());
@@ -606,6 +721,7 @@ mod tests {
             &cfg,
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
             now + Duration::from_millis(10),
+            wall(),
             20.0,
         );
 
@@ -653,6 +769,7 @@ mod tests {
             &cfg,
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
+            wall(),
             20.0,
         );
         assert!(drain(&mut rb).is_empty());

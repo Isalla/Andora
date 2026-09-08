@@ -308,6 +308,7 @@ Zum Beispiel:
 * Expansion-/Content-Fortschritt
 * persistente NPC-Zustände
 * persistente NPC-Positionen
+* persistente Monster-/Respawn-Zustände (laufende Respawn-Timer, auch langfristige über Realm-Neustarts hinweg; Werte aus Content/Lua beziehungsweise Spawn-/DB-Daten, siehe `Kampfsystem.md`, Abschnitt 21)
 * Weltveränderungen
 * regionale Zustände
 * Eventzustände
@@ -857,6 +858,12 @@ item_definitions
 → realm_state_<realm>
 
 monster_definitions
+→ realm_state_<realm>
+
+monster_spawns
+→ realm_state_<realm>
+
+monster_instances
 → realm_state_<realm>
 
 npc_definitions

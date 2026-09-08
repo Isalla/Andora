@@ -41,6 +41,7 @@ Dazu gehören beispielsweise:
 * Trigger
 * i18n-Keys
 * klassenspezifische Ziele
+* kontextgebundene Kampf-Überschreibungen (Angriffserlaubnis, Aggressivität, Verhalten; an Quest-/Dialogkontext gebunden, laufen mit Phasenende automatisch aus; Details in `Kampfsystem.md`, Abschnitt 19)
 
 Lua verändert jedoch nicht direkt den persistenten Spielzustand.
 

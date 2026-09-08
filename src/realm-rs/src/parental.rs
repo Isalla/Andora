@@ -86,7 +86,10 @@ pub struct Parental {
 pub type SharedParental = Arc<Parental>;
 
 pub fn new_shared(auth: AuthApi) -> SharedParental {
-    Arc::new(Parental { states: Mutex::new(HashMap::new()), auth })
+    Arc::new(Parental {
+        states: Mutex::new(HashMap::new()),
+        auth,
+    })
 }
 
 fn send_to(tx: &mpsc::UnboundedSender<String>, frame: &Frame) {
@@ -108,7 +111,14 @@ pub async fn attach(
     }
     let s = parental
         .auth
-        .parental_status(account_id, if session_id.is_empty() { None } else { Some(session_id) })
+        .parental_status(
+            account_id,
+            if session_id.is_empty() {
+                None
+            } else {
+                Some(session_id)
+            },
+        )
         .await
         .map_err(|e| {
             log::error!("parental status at hello: {e}");
@@ -118,13 +128,24 @@ pub async fn attach(
     st.apply_api(&s);
     // State immer speichern (wie Übergangsstand); STATUS nur bei
     // beaufsichtigten Spielern senden.
-    parental.states.lock().await.insert(player_id.to_string(), st.clone());
+    parental
+        .states
+        .lock()
+        .await
+        .insert(player_id.to_string(), st.clone());
     if !st.enabled {
         return Ok(());
     }
     send_to(tx, &st.status_frame());
     if st.blocked || st.force_logout {
-        send_to(tx, &Frame::new(0, s2c::PARENTAL_BLOCKED, serde_json::json!({"reason": "blocked"})));
+        send_to(
+            tx,
+            &Frame::new(
+                0,
+                s2c::PARENTAL_BLOCKED,
+                serde_json::json!({"reason": "blocked"}),
+            ),
+        );
         return Err("blocked".to_string());
     }
     Ok(())
@@ -168,7 +189,8 @@ pub async fn handle_message(
     action: &str,
     pin: &str,
 ) {
-    let result = |data: serde_json::Value| send_to(tx, &Frame::new(seq, s2c::PARENTAL_RESULT, data));
+    let result =
+        |data: serde_json::Value| send_to(tx, &Frame::new(seq, s2c::PARENTAL_RESULT, data));
     let mut states = parental.states.lock().await;
     let Some(st) = states.get_mut(player_id) else {
         result(serde_json::json!({"ok": false, "reason": "not_supervised"}));
@@ -202,26 +224,28 @@ pub async fn handle_message(
                 }
             }
         },
-        "unlock_chat" | "unlock_voice" => match parental.auth.verify_pin(st.account_id, pin).await {
-            Ok(v) if v.valid => {
-                if action == "unlock_chat" {
-                    st.temp_chat = true;
-                } else {
-                    st.temp_voice = true;
+        "unlock_chat" | "unlock_voice" => {
+            match parental.auth.verify_pin(st.account_id, pin).await {
+                Ok(v) if v.valid => {
+                    if action == "unlock_chat" {
+                        st.temp_chat = true;
+                    } else {
+                        st.temp_voice = true;
+                    }
+                    send_to(tx, &st.status_frame());
+                    result(serde_json::json!({"ok": true, "unlocked": action}));
                 }
-                send_to(tx, &st.status_frame());
-                result(serde_json::json!({"ok": true, "unlocked": action}));
-            }
-            Ok(_) => result(serde_json::json!({"ok": false, "reason": "bad_pin"})),
-            Err(e) => {
-                if e.status() == Some(401) {
-                    result(serde_json::json!({"ok": false, "reason": "bad_pin"}));
-                } else {
-                    log::error!("parental action: {e}");
-                    result(serde_json::json!({"ok": false, "reason": "service_unavailable"}));
+                Ok(_) => result(serde_json::json!({"ok": false, "reason": "bad_pin"})),
+                Err(e) => {
+                    if e.status() == Some(401) {
+                        result(serde_json::json!({"ok": false, "reason": "bad_pin"}));
+                    } else {
+                        log::error!("parental action: {e}");
+                        result(serde_json::json!({"ok": false, "reason": "service_unavailable"}));
+                    }
                 }
             }
-        },
+        }
         _ => result(serde_json::json!({"ok": false, "reason": "unknown_action"})),
     }
 }
@@ -242,14 +266,23 @@ pub async fn poll_once(parental: &SharedParental, shared: &Shared) {
             .values()
             .filter_map(|p| {
                 states.get(&p.id).filter(|st| st.enabled).map(|_| {
-                    (p.id.clone(), p.account_id, p.session_id.clone(), p.tx.clone())
+                    (
+                        p.id.clone(),
+                        p.account_id,
+                        p.session_id.clone(),
+                        p.tx.clone(),
+                    )
                 })
             })
             .collect()
     };
     let mut kicks: Vec<String> = Vec::new();
     for (pid, account_id, session_id, tx) in jobs {
-        let session = if session_id.is_empty() { None } else { Some(session_id.as_str()) };
+        let session = if session_id.is_empty() {
+            None
+        } else {
+            Some(session_id.as_str())
+        };
         match parental.auth.parental_status(account_id, session).await {
             Ok(s) => {
                 let mut states = parental.states.lock().await;
@@ -287,10 +320,7 @@ pub async fn poll_once(parental: &SharedParental, shared: &Shared) {
 }
 
 /// 10-s-Poller als Hintergrund-Task (Abbruch via JoinHandle::abort).
-pub fn start_poller(
-    parental: SharedParental,
-    shared: Shared,
-) -> tokio::task::JoinHandle<()> {
+pub fn start_poller(parental: SharedParental, shared: Shared) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {

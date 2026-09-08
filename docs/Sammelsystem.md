@@ -79,4 +79,6 @@ Ein Spieler mit einem wesentlich höheren Skill kann dasselbe Vorkommen zuverlä
 
 > **Ein höherer Sammelskill erschließt nicht nur neue Rohstoffe. Er macht bekannte Rohstoffe zuverlässiger und ermöglicht seltene Funde.**
 
+Dasselbe System trägt die Rohstoffprogression der Unterwelt (Exp1): Tiefere Ebenen bieten Rohstoffe höherer Progressionsstufen mit entsprechendem Mindestskill; ein Exp1-Sondersystem gibt es dafür nicht (siehe `exp1_Unterwelt.md`, Abschnitt 58).
+
 Damit bleibt das Sammeln über die gesamte Charakterentwicklung relevant und belohnt Spieler, die ihre Sammelfertigkeiten kontinuierlich einsetzen.

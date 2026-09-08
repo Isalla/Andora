@@ -10,8 +10,9 @@ use tokio::sync::mpsc;
 
 use crate::auth_api::AuthApi;
 use crate::combat::CombatState;
-use crate::config::{CombatCfg, Config};
+use crate::config::{CombatCfg, Config, NpcCfg};
 use crate::db;
+use crate::npc::aggro_trigger;
 use crate::parental::{self, SharedParental};
 use crate::protocol::{s2c, Frame};
 use crate::world::{apply_move, ensure_visible, truncate_chat, Player, Shared};
@@ -207,18 +208,22 @@ pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value
     }
 }
 
-/// ATTACK (Combat V1): Auto-Grundangriff starten oder beenden.
+/// ATTACK (Combat V1 + V2): Auto-Grundangriff starten oder beenden.
 /// Payload: {target_id} = starten, {stop: true} = beenden.
 /// Realm-autoritativ validiert: Ziel existiert, ist nicht selbst, lebt
-/// und liegt in Waffen-Reichweite. Gültige Starts bewaffnen den Angriff;
-/// der erste Schlag folgt sofort (Duration als abgelaufen gesetzt), alle
-/// weiteren im Duration-Takt (siehe combat::combat_tick). Ungültige
-/// Anfragen werden ignoriert (kein Kampfzustand, kein Schaden).
+/// und liegt in Waffen-Reichweite. Ziel kann ein Spieler (V1) oder ein
+/// NPC/Monster (V2) sein. NPCs werden nur angegriffen, wenn sie
+/// `attackable` sind und nicht in Evade/Return (Combat V2, §18/§20).
+/// Gültige Starts bewaffnen den Angriff; der erste Schlag folgt sofort
+/// (Duration als abgelaufen gesetzt), alle weiteren im Duration-Takt
+/// (siehe combat::combat_tick). Ein gültiger Angriff auf einen NPC löst
+/// dessen (defensives) Aggro aus (§21 Aggro-Formen).
 pub async fn handle_attack(
     shared: &Shared,
     conn_id: u64,
     data: &serde_json::Value,
     cfg: &CombatCfg,
+    npc_cfg: &NpcCfg,
 ) {
     let mut world = shared.lock().await;
     let pid = match world.by_conn.get(&conn_id) {
@@ -236,8 +241,10 @@ pub async fn handle_attack(
     if target_id.is_empty() || target_id == pid {
         return;
     }
+    // Ist das Ziel ein NPC? (Target-Namespace: "npc_<spawn_id>").
+    let is_npc = world.npcs.contains_key(target_id);
     // Validierung (immutable): Ziel existiert, nicht tot, in Reichweite,
-    // Angreifer lebt.
+    // Angreifer lebt. NPCs zusätzlich: attackable + nicht in Evade/Return.
     let valid = {
         let me = match world.players.get(&pid) {
             Some(me) => me,
@@ -245,6 +252,12 @@ pub async fn handle_attack(
         };
         if me.hp <= 0 {
             false
+        } else if is_npc {
+            world.npcs.get(target_id).is_some_and(|n| {
+                n.status == crate::npc::NpcStatus::Alive
+                    && n.effective_attackable()
+                    && (me.x - n.x).hypot(me.y - n.y) <= cfg.weapon_range
+            })
         } else {
             world
                 .players
@@ -254,6 +267,11 @@ pub async fn handle_attack(
     };
     if !valid {
         return; // kein Kampfzustand, kein Schaden.
+    }
+    if is_npc {
+        // Defensives/soziales Aggro auslösen (§21) — NPC verteidigt sich
+        // bzw. die feste Gruppe/Fraktion steigt ein.
+        aggro_trigger(&mut world, target_id, &pid, npc_cfg);
     }
     let now = Instant::now();
     if let Some(me) = world.players.get_mut(&pid) {
@@ -449,6 +467,15 @@ mod tests {
     const SESSION_OTHER: &str =
         r#"{"valid":true,"account_id":8,"expires_at":"2030-01-01T00:00:00Z"}"#;
 
+    fn npc_cfg() -> NpcCfg {
+        NpcCfg {
+            social_aggro_radius: 15.0,
+            no_link_ms: 5000,
+            return_speed: 5.0,
+            persist_interval_ms: 30000,
+        }
+    }
+
     #[tokio::test]
     async fn entry_requires_handoff_and_matching_session() {
         let auth = start_stub(HANDOFF_OK, SESSION_OK).await;
@@ -603,15 +630,36 @@ mod tests {
         }
 
         // Ungültig: Ziel existiert nicht → kein Kampfzustand.
-        handle_attack(&shared, 7, &serde_json::json!({"target_id": "ghost"}), &cfg).await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "ghost"}),
+            &cfg,
+            &npc_cfg(),
+        )
+        .await;
         assert!(shared.lock().await.players["a"].combat.is_none());
 
         // Ungültig: sich selbst anvisieren → kein Kampfzustand.
-        handle_attack(&shared, 7, &serde_json::json!({"target_id": "a"}), &cfg).await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "a"}),
+            &cfg,
+            &npc_cfg(),
+        )
+        .await;
         assert!(shared.lock().await.players["a"].combat.is_none());
 
         // Gültig: b in Reichweite → bewaffnet.
-        handle_attack(&shared, 7, &serde_json::json!({"target_id": "b"}), &cfg).await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "b"}),
+            &cfg,
+            &npc_cfg(),
+        )
+        .await;
         {
             let w = shared.lock().await;
             let c = w.players["a"].combat.as_ref().expect("bewaffnet");
@@ -619,7 +667,14 @@ mod tests {
         }
 
         // Stop → Kampf beendet.
-        handle_attack(&shared, 7, &serde_json::json!({"stop": true}), &cfg).await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"stop": true}),
+            &cfg,
+            &npc_cfg(),
+        )
+        .await;
         assert!(shared.lock().await.players["a"].combat.is_none());
     }
 
@@ -684,7 +739,14 @@ mod tests {
             w.by_conn.insert(7, "a".into());
         }
         // b steht 50 m entfernt → kein gültiger Start.
-        handle_attack(&shared, 7, &serde_json::json!({"target_id": "b"}), &cfg).await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "b"}),
+            &cfg,
+            &npc_cfg(),
+        )
+        .await;
         assert!(shared.lock().await.players["a"].combat.is_none());
     }
 }

@@ -744,6 +744,8 @@ Seltene Gegenstände und Materialien können zusätzlich gesammelt werden, um f�
 
 > **Drops halten den Grind am Laufen. Crafting ermöglicht gezielteren Fortschritt.**
 
+Die tiefenabhängige Rohstoffprogression (Kreislauf aus Vordringen, Erschließen, Herstellen und weiterem Vordringen; Vorkommen auch abseits des direkten Wegs) ist in Abschnitt 58 verbindlich festgelegt.
+
 ---
 
 # 28. Bedeutung der Schmiede
@@ -833,6 +835,10 @@ Zu seinen Aufgaben gehören:
 * vor Debuffs warnen
 * Bossphasen erkennen
 * Pull-Risiken einschätzen
+* Patrouillen beobachten und sich nähernde Gruppen erkennen
+* vor zusätzlichem Aggro warnen
+* Wege und Räume kennen
+* geeignete Pullpositionen erkennen
 * gefährliche Gegner identifizieren
 * hohe Tragkapazität bereitstellen
 * Vorräte transportieren
@@ -841,6 +847,8 @@ Zu seinen Aufgaben gehören:
 * die Gruppe bei taktischen Entscheidungen unterstützen
 
 > **Der Supporter ist nicht der stärkste Charakter der Gruppe. Er macht die Gruppe stärker.**
+
+Diese Beobachtungsfunktion entsteht primär aus Spielerwissen, Aufmerksamkeit und der natürlichen Aufgabenverteilung der Gruppe: Der Supporter verursacht vergleichsweise wenig eigenen Schaden und kann viel tragen, sodass er während eines Kampfes das Gesamtgeschehen und die Umgebung im Blick behalten kann. Der Realm gibt dem Supporter dafür keinen künstlichen „Dungeon-Radar“ und keine automatischen Live-Informationsvorteile über Patrouillen oder Gegnerpositionen. Andere Klassen und Spieler dürfen dieselbe Dungeonkenntnis besitzen und dieselben Gefahren beobachten; der Supporter ist dafür besonders geeignet, aber nicht technisch vorgeschrieben.
 
 ---
 
@@ -883,6 +891,8 @@ Verhalten
 
 Dadurch entsteht echtes charakterbezogenes Erfahrungswissen.
 
+Abgrenzung: Das Analyse-HUD dokumentiert ausschließlich bereits erlebtes Wissen des Charakters. Es zeigt keine Live-Informationen über aktuelle Gegnerpositionen, Patrouillenbewegungen oder ungesehene Gefahren; deren Beobachtung bleibt Aufgabe der Spieleraufmerksamkeit (siehe Abschnitt 32).
+
 ---
 
 # 34. Ebenenerfahrung
@@ -900,6 +910,7 @@ Er kann beispielsweise gelernt haben:
 * welche Gegner fliehen
 * welche Routen sicherer sind
 * wo sich gefährliche Gegnergruppen befinden
+* wo sich versteckte Bereiche, alternative Wege und mögliche Geheimnisse befinden
 * wie bestimmte Bosse reagieren
 
 Dadurch kann ein Spieler auf bestimmten Ebenen als besonders erfahrener Supporter bekannt werden.
@@ -1138,6 +1149,7 @@ Ein erfahrener Spieler kann wissen:
 * welche Kreaturen ein großes Sichtfeld besitzen
 * welche Gegner bei falschem Pull weitere Gruppen mitziehen
 * wo sichere Wege liegen
+* wo verborgene Bereiche und alternative Wege liegen
 * welche Gegnergruppen vermieden werden sollten
 * wie ein Boss seine Phasen ankündigt
 
@@ -1244,6 +1256,10 @@ Folgende Werte werden bewusst erst während späterer Spieltests festgelegt:
 * durchschnittliche Expeditionsdauer
 * Anzahl besiegbarer Gegner vor einer notwendigen Rückkehr
 * Verhältnis zwischen Drops und Crafting-Materialien
+* Aggroreichweiten und deren Progression
+* Raum-/Ebenengrößen und Größenkurve
+* Encounter-Dichte und Encounter-Komplexität
+* Rohstoffverteilung, -seltenheit, benötigte Mengen und Progressionsstufen
 
 Die Konzeptphase legt lediglich das gewünschte Spielgefühl fest.
 
@@ -1381,6 +1397,22 @@ Andora kann dadurch nicht nur horizontal, sondern auch vertikal wachsen.
 
 > **Nicht alles, was einen Spieler besser macht, muss auf seinem Charakterbogen stehen.**
 
+> **Encounter-Schwierigkeit entsteht aus Geometrie, Positionierung, Aggroverbindungen und Patrouillen – nicht nur aus Gegnerwerten.**
+
+> **Je tiefer eine Gruppe vordringt, desto wichtiger werden Beobachtung, Kommunikation, Dungeonkenntnis und kontrolliertes Pulling. Reine Kampfstärke allein beherrscht die tiefsten Bereiche nicht zuverlässig.**
+
+> **Spielerwissen ist ein realer Bestandteil der Gruppenstärke.**
+
+> **Im Grundspiel beträgt die maximale normale Gruppengröße 4 Spieler; mit Exp1 wird sie auf 5 erhöht. Die Beispielzusammensetzung Tank/Heiler/DD/DD/Supporter ist keine Pflicht; Raidgruppen werden dadurch nicht neu definiert.**
+
+> **Versteckte Bereiche müssen keinen materiellen Vorteil bieten – Wissen und Geschichte sind eigene Belohnungen.**
+
+> **Neben der Kampfprogression gibt es eine Erkundungsprogression: Spätere Ebenen halten Geheimnisse bereit, die nicht jede Gruppe beim ersten Durchlauf findet.**
+
+> **Die Tiefe erschließt zugleich die Ressourcen, mit denen Spieler ihre Ausrüstung für tiefere Ebenen erneuern und weiterentwickeln können.**
+
+> **Mit zunehmender Tiefe wachsen zusammen: Encounter-Komplexität, räumliche Größe und Komplexität, Anforderungen an Dungeonkenntnis, Erkundungsmöglichkeiten, Geheimnisse, Rohstoffmöglichkeiten sowie die Bedeutung von Sammeln und Handwerk für die weitere Progression. Die tieferen Ebenen wirken zunehmend wie eine große unbekannte Welt innerhalb der Unterwelt und nicht wie dieselben Dungeonräume mit lediglich stärkeren Gegnern.**
+
 > **Quests sind ein Weg zum Fortschritt – Grinding ist ein anderer.**
 
 > **Inventarplätze und Gewicht erzeugen Entscheidungen, dürfen aber den Grind nicht ständig unterbrechen.**
@@ -1392,3 +1424,210 @@ Andora kann dadurch nicht nur horizontal, sondern auch vertikal wachsen.
 > **Die Welt ist offen für alle – die Spieler formen die Welt.**
 
 > **Andora wächst nicht nur nach außen – Andora kann auch nach unten wachsen.**
+
+---
+
+# 51. Encounter-Schwierigkeit entsteht aus Anordnung, nicht nur aus Werten
+
+Die Schwierigkeit eines Dungeons entsteht nicht nur aus Lebenspunkten, Schaden oder anderen Gegnerwerten.
+
+Wesentliche Bestandteile der Schwierigkeit sind ebenfalls:
+
+* Raum- und Ganggeometrie
+* Positionierung und Abstand der Gegner
+* Aggroreichweiten
+* Social Aggro
+* feste Gegnergruppen
+* Patrouillen und deren Bewegungswege
+* Überschneidungen von Aggro-/Hilfsbereichen
+* Möglichkeiten oder fehlende Möglichkeiten für kontrollierte Pulls
+
+Dieselben grundlegenden Combat-Mechaniken (siehe `Kampfsystem.md`, Abschnitte 18–21) sollen durch unterschiedliche Anordnung und Kombination dieser Faktoren sehr unterschiedliche Encounter ermöglichen.
+
+Dungeon-Geometrie ist ausdrücklich Teil des Encounter-Designs:
+
+* Enge Gänge oder bestimmte Räume dürfen bewusst so gestaltet sein, dass mehrere Gegner oder Gruppen praktisch gemeinsam bekämpft werden müssen.
+* Größere Räume dürfen so gestaltet sein, dass eine aufmerksame und erfahrene Gruppe durch Positionierung, Timing und gutes Pulling nur einen Teil der vorhandenen Gegner gleichzeitig bekämpfen muss.
+
+Gutes Beobachten und gutes Pulling dürfen dadurch die tatsächliche Schwierigkeit eines Encounters reduzieren. Nicht jeder Encounter muss in kleine Einzel-Pulls zerlegbar sein.
+
+> **Geometrie, Positionierung und Aggroverbindungen sind Encounter-Mechanik, keine Dekoration.**
+
+---
+
+# 52. Dynamische Gefahr durch Patrouillen
+
+Ein beim Start sauberer Pull kann während des Kampfes gefährlicher werden.
+
+Bewegliche NPC-/Monstergruppen oder Patrouillen können sich einem laufenden Kampf nähern und durch die dokumentierten Aggro-/Social-Aggro-Regeln (`Kampfsystem.md`, Abschnitt 21) zusätzliche Gegner in den Kampf bringen.
+
+Spieler sollen deshalb nicht ausschließlich den aktuellen Gegner beobachten, sondern auch ihre Umgebung.
+
+---
+
+# 53. Encounter-Progression innerhalb der Abschnitte
+
+Die 100 Ebenen steigern ihre Schwierigkeit nicht ausschließlich durch stärkere Gegner.
+
+Innerhalb eines Abschnitts steigt die Encounter-Komplexität grundsätzlich in Richtung des jeweiligen Wächters. Mögliche Mittel dafür sind unter anderem:
+
+* dichtere Gegneraufstellung
+* stärkere Überschneidung von Aggro-/Social-Aggro-Bereichen
+* größere oder komplexere feste Gruppen
+* schwierigere Patrouillen
+* weniger sichere Pullpositionen
+* zunehmend anspruchsvolle Raumgeometrie
+
+Spätere Abschnitte beginnen grundsätzlich auf einem höheren Ausgangsniveau als frühere Abschnitte.
+
+Nicht alle Schwierigkeitsparameter müssen gleichzeitig erhöht werden. Unterschiedliche Abschnitte dürfen unterschiedliche Schwerpunkte besitzen.
+
+Konkrete Meterwerte, Skalierungsformeln und endgültige Schwierigkeitskurven bleiben Balancing- und Gameplay-Testwerte und werden jetzt nicht festgelegt (siehe Abschnitt 47).
+
+---
+
+# 54. Aggroreichweite und Raumgröße
+
+Mit zunehmender Tiefe beziehungsweise späteren Abschnitten darf auch die Aggroreichweite von Gegnern schrittweise zunehmen. Gleichzeitig dürfen Räume und Abschnitte größer werden.
+
+Dadurch soll die steigende Aggroreichweite nicht wie eine offensichtlich künstliche Zahlensteigerung wirken, sondern organisch mit der Umgebung zusammenspielen.
+
+Entscheidend ist das Verhältnis zwischen:
+
+* Raumgröße
+* Gegnerabständen
+* Aggroreichweiten
+* Social-Aggro-Verbindungen
+* festen Gruppen
+* Patrouillenbewegungen
+
+Ein größerer Raum bedeutet deshalb nicht automatisch mehr Sicherheit oder einfachere Pulls.
+
+(Prinzipienquellen: gestaffelte Dungeon-Abschnitte mit Level-Bändern und mehrstöckige Dungeon-Architektur; siehe `references/Andora-Design-Vorschlaege.md`, Kandidaten 5 und 6.)
+
+---
+
+# 55. Größenprogression der Ebenen
+
+Die räumliche Größe der Ebenen darf mit zunehmender Tiefe beziehungsweise mit späteren Abschnitten wachsen. Die 100 Ebenen bestehen deshalb nicht aus gleich großen, lediglich unterschiedlich dekorierten Dungeonflächen.
+
+Frühere Ebenen beziehungsweise Abschnitte dürfen kompakter, kürzer und übersichtlicher aufgebaut sein. Mit zunehmender Tiefe dürfen Ebenen beziehungsweise Abschnitte größer und weitläufiger werden, längere Wege und größere Räume enthalten, komplexere Raumverbindungen verwenden, mehr Platz für Patrouillen bieten, mehrere räumlich getrennte Encounterbereiche besitzen und durch ihre Größe anspruchsvoller zu überblicken sein.
+
+Diese Größenprogression ist Teil des Level- und Encounter-Designs und spielt insbesondere mit Aggroreichweiten, Gegnerabständen, Social Aggro, festen Gruppen und Patrouillen zusammen (siehe Abschnitt 54).
+
+Eine größere Ebene bedeutet ausdrücklich nicht automatisch eine einfachere Ebene. Mehr Fläche kann durch größere Aggrobereiche, längere Patrouillenwege, komplexere Sicht- und Laufwege sowie schwierigere Gegnerpositionierung taktisch anspruchsvoller werden.
+
+Die Größensteigerung muss nicht auf jeder einzelnen Ebene stattfinden. Sie darf abschnittsweise erfolgen und soll organisch wirken.
+
+Konkrete Raumgrößen, Flächenwerte, Skalierungsformeln und die genaue Größenkurve werden jetzt nicht festgelegt; sie entstehen später durch Leveldesign und Gameplay-Tests (siehe Abschnitt 47).
+
+> **Mit zunehmender Tiefe darf nicht nur die Kampfstärke und Encounter-Komplexität wachsen, sondern auch die räumliche Dimension und Komplexität der Unterwelt.**
+
+---
+
+# 56. Gruppengröße mit Exp1
+
+Im Grundspiel beträgt die maximale Größe einer normalen Spielergruppe **4 Spieler** (siehe `project_overview.md`, Abschnitt 14).
+
+Mit Exp1 wird diese maximale Größe einer normalen Spielergruppe auf **5 Spieler** erhöht.
+
+Raidgrößen und Raidgruppen werden dadurch nicht neu definiert.
+
+Die zusätzliche Position in Exp1 ermöglicht unter anderem leichter die Aufnahme eines Supporters, schreibt aber keine bestimmte Gruppenzusammensetzung vor. Eine mögliche natürliche Zusammensetzung wäre beispielsweise:
+
+```text
+Tank
+Heiler
+DD
+DD
+Supporter
+```
+
+Diese Zusammenstellung ist ausdrücklich keine verpflichtende Gruppenzusammensetzung. Andere funktionierende Gruppenkombinationen bleiben möglich (siehe auch `Dungeon-Finder.md`, Abschnitt 10).
+
+Die Encounter der 100 Ebenen dürfen die zusätzliche Gruppenkapazität bei ihrer Komplexität berücksichtigen.
+
+---
+
+# 57. Versteckte Inhalte und Erkundungsprogression
+
+Mit zunehmender Größe und räumlicher Komplexität der späteren Ebenen entsteht bewusst mehr Raum für optionale und versteckte Inhalte.
+
+Größere Ebenen sollen nicht lediglich längere Wege zwischen den notwendigen Encountern erzeugen. Zusätzlicher Raum darf genutzt werden, um Dinge zu verstecken, die eine Gruppe bei einem normalen Durchlauf nicht zwangsläufig entdeckt.
+
+Mögliche versteckte Inhalte sind beispielsweise:
+
+* versteckte Räume und Nebenbereiche
+* alternative Wege
+* schwer erkennbare Abzweigungen
+* geheime Durchgänge
+* seltene Gegner oder Named
+* besondere Truhen
+* Bücher, Aufzeichnungen und Hinweise zur Weltgeschichte
+* Hinweise auf größere Geheimnisse der Unterwelt
+* seltene Rohstoffe oder Sammelstellen
+* optionale kleine Encounter
+* Rätsel
+* besondere NPCs
+* Voraussetzungen oder Hinweise für versteckte Questketten
+* Verbindungen zwischen unterschiedlichen Ebenen
+
+Nicht jeder versteckte Bereich muss unmittelbar einen materiellen Vorteil bieten. Entdeckungen dürfen auch ausschließlich Wissen, Geschichte oder Hinweise auf andere Geheimnisse liefern (siehe auch `Storytelling_und_Weltgeheimnisse.md`, Abschnitte 7–8).
+
+Mit zunehmender Tiefe und Größe der Ebenen darf die Zahl und Komplexität möglicher Geheimnisse wachsen. Dadurch entsteht neben der Kampfprogression eine Erkundungsprogression:
+
+* Frühe Ebenen sind vergleichsweise übersichtlich und leichter vollständig zu erfassen.
+* Spätere Ebenen werden größer und komplexer und können Bereiche enthalten, die selbst nach mehreren Durchläufen noch nicht von jeder Gruppe entdeckt wurden.
+
+Das Leveldesign darf bewusst Situationen erzeugen, in denen der direkte Weg zum Wächter nur einen Teil einer Ebene zeigt. Eine Gruppe kann einen Abschnitt erfolgreich abschließen, ohne sämtliche Räume, Wege oder Geheimnisse gefunden zu haben.
+
+Dungeonkenntnis umfasst deshalb nicht nur die Kenntnis sicherer Pulls und Patrouillen, sondern auch Wissen über Wege, versteckte Bereiche und mögliche Geheimnisse (siehe Abschnitte 34 und 43).
+
+Ein größerer Dungeon soll dadurch nicht einfach länger werden, sondern mehr Möglichkeiten zum Erkunden und Entdecken bieten.
+
+Konkrete Geheimnisse, Belohnungen, Rätsel und Fundorte werden später als Content entworfen und sind nicht Bestandteil dieser Festlegung.
+
+> **Der direkte Weg zeigt nur einen Teil der Ebene. Wer tiefer vordringt, findet mehr – aber nicht alles beim ersten Mal.**
+
+---
+
+# 58. Rohstoffprogression mit zunehmender Tiefe
+
+Die Tiefe der 100 Ebenen beeinflusst auch die verfügbaren Rohstoffe.
+
+Mit zunehmender Tiefe werden Rohstoffe verfügbar, die zur dortigen Progressionsstufe passen und für die Herstellung beziehungsweise Erneuerung der Ausrüstung dieser Stufe benötigt werden.
+
+Grundprinzip:
+
+> **Je tiefer eine Gruppe vordringt, desto mehr und höherstufige Rohstoffe des entsprechenden Progressionsbereichs kann sie finden.**
+
+Dadurch entsteht ein Kreislauf:
+
+```text
+tiefer vordringen
+      ↓
+neue beziehungsweise bessere Rohstoffe erschließen
+      ↓
+Ausrüstung herstellen oder erneuern
+      ↓
+dadurch besser für noch tiefere Ebenen vorbereitet sein
+      ↓
+weiter vordringen
+```
+
+Die Rohstoffprogression ist mit dem bereits bestehenden Sammel- und Handwerkssystem verbunden und bildet kein davon getrenntes Exp1-Sondersystem: Tiefenstufen werden über die vorhandenen Mechaniken abgebildet, insbesondere Mindestskill und seltene Varianten (siehe `Sammelsystem.md`).
+
+Größere und komplexere Ebenen bieten zusätzlich mehr Raum für Rohstoffvorkommen. Rohstoffe müssen nicht ausschließlich auf dem direkten Weg zum Wächter liegen. Besonders interessante oder seltene Vorkommen dürfen sich befinden in:
+
+* Nebenbereichen
+* versteckten Räumen
+* gefährlichen Encounterbereichen
+* schwer erreichbaren Abschnitten
+* hinter optionalen Gegnergruppen
+* entlang alternativer Wege
+
+Damit verbindet Exp1 Erkundung, Kampf, Sammeln und Handwerk miteinander. Eine Gruppe, die eine Ebene lediglich möglichst schnell durchquert, muss deshalb nicht dieselben Rohstoffmöglichkeiten erhalten wie eine Gruppe, die sie gründlich erkundet (siehe auch Abschnitt 57).
+
+Die genaue Verteilung, Seltenheit, benötigten Mengen und Progressionsstufen der Rohstoffe sind spätere Content- und Balancingentscheidungen und werden jetzt nicht festgelegt (siehe Abschnitt 47).
+
+> **Die zunehmende Tiefe bietet nicht nur stärkere Gegner und schwierigere Encounter, sondern erschließt zugleich die Ressourcen, mit denen Spieler ihre Ausrüstung für die Herausforderungen der tieferen Ebenen erneuern und weiterentwickeln können.**

@@ -19,9 +19,9 @@ export const C2S = {
 
 export const S2C = {
   WELCOME: 1,   // {server_tick, time, you:{...}}
-  SPAWN: 2,     // {id, kind, x, y, face, extra}
+  SPAWN: 2,     // {id, kind, x, y, face, extra}; kind player|npc; npc: extra {status, aggro, claimed, name}
   DESPAWN: 3,   // {id}
-  STATE: 4,     // {id, x, y, face, anim, hp, max_hp}
+  STATE: 4,     // {id, x, y, face, anim, hp, max_hp}; NPC zusätzlich {kind, status, aggro, claimed}
   DAMAGE: 5,    // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
   KILL: 6,      // {id, killer_id}
   LOOT: 7,      // {item_id, x, y}

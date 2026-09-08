@@ -327,6 +327,8 @@ Reservierte Rulesets (Vorbereitung statt Aktivierung):
 
 * `normal`: reguläres Andora-Regelwerk.
 * `hardcore`: alternative Realm-Regeln für Spieler, die eine härtere Spielweise wünschen. Dauerhafter Charaktertod (Permadeath) ist als mögliche Regel vorgemerkt, aber noch nicht verbindlich definiert.
+
+Für das Dungeon-/Encounter-Design gilt im Hinblick auf einen zukünftigen Hardcore-Realm folgendes Fairnessprinzip (keine vollständigen Hardcore-Regeln): Je schwerer die Konsequenz eines Fehlers, desto wichtiger ist es, dass die Gefahr durch Beobachtung, Erfahrung, Kommunikation und gutes Gruppenspiel beherrschbar bleibt. Spieler sollen nach einem schweren Fehler nachvollziehen können, was sie falsch gemacht haben („Wir hätten die Patrouille abwarten müssen.“ statt „Woher hätten wir das wissen sollen?“). Hardcore darf nicht dadurch künstlich schwer werden, dass bekannte Dungeonmechaniken ohne erkennbare Grundlage plötzlich andere Aggro-, Social-Aggro- oder Pullregeln verwenden. Die grundlegenden Encounter-Regeln bleiben lesbar und erlernbar; die wesentlich höhere Konsequenz eines Fehlers kann bereits einen erheblichen Teil der Hardcore-Schwierigkeit erzeugen. (Prinzipienquelle: faire, lesbare Gefahren mit Entscheidungsfenster; siehe `references/Andora-Design-Vorschlaege.md`, Kandidat 7.)
 * `roleplay`: alternative Realm-Regeln für stärker rollenspielorientierte Spieler. Welche mechanischen RP-Regeln gelten, wird erst später festgelegt.
 
 Hardcore- und RP-Realms müssen nicht zum Release angeboten werden. Ziel ist, später auf Spielerinteresse reagieren zu können und beispielsweise kurzfristig einen Realm mit `HC` oder `RP` im Namen starten zu können, ohne dafür zunächst die grundlegende Realm-Architektur umbauen zu müssen.

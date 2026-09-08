@@ -88,7 +88,7 @@ Lua        = Gameplay + NPC-/KI-Definitionen
 MariaDB    = persistenter Weltzustand
 Runtime-KI (lokal: Ollama) = Sprache, Persönlichkeit und Interpretation
 
-Lua kann pro NPC unter anderem Persönlichkeit, Prompt-Bausteine, erlaubte Verhaltensweisen, Dienste und Dialogregeln definieren.
+Lua kann pro NPC unter anderem Persönlichkeit, Prompt-Bausteine, erlaubte Verhaltensweisen, Dienste, Dialogregeln und Kampf-Grundregeln (Normalzustand, `attackable`/`aggressive`; Details in `Kampfsystem.md`, Abschnitte 18–19) definieren.
 
 Der Server ergänzt den Prompt mit dem tatsächlichen Weltzustand und dem tatsächlichen Wissen des NPCs.
 

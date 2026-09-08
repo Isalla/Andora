@@ -60,6 +60,8 @@ pub struct TickStat {
 
 pub struct World {
     pub players: HashMap<String, Player>,
+    /// NPC-/Monster-Registry (Combat V2): key = npc_id().
+    pub npcs: HashMap<String, crate::npc::Npc>,
     /// Verbindung (interne Conn-ID) → Spieler-ID.
     pub by_conn: HashMap<u64, String>,
     /// Schließ-Signale je Verbindung (Socket-Closes laufen über net.rs).
@@ -72,6 +74,7 @@ impl World {
     pub fn new() -> Self {
         Self {
             players: HashMap::new(),
+            npcs: HashMap::new(),
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             tick: TickStat::default(),
@@ -126,20 +129,37 @@ pub fn ensure_visible(o: &mut Player, p: &Player) {
     ));
 }
 
-/// Welt-Tick: AOFB-Broadcast (SPAWN/STATE/DESPAWN) für alle Spieler.
-/// Wie im Übergangsstand O(list²), ausreichend für die Kanalgröße
-/// (40–70 Spieler). Arbeitet auf einem Positions-Snapshot, damit keine
-/// Borrow-Konflikte zwischen Leser (p) und Schreiber (q) entstehen.
+/// Welt-Tick: AOFB-Broadcast (SPAWN/STATE/DESPAWN) für alle Spieler UND
+/// NPCs (Combat V2). Wie im Übergangsstand O(list²), ausreichend für die
+/// Kanalgröße (40–70 Spieler). Arbeitet auf einem Positions-Snapshot, damit
+/// keine Borrow-Konflikte zwischen Leser (p) und Schreiber (q) entstehen.
 pub fn world_tick(world: &mut World, aofb_radius: f64) {
     let t0 = Instant::now();
-    let snap: Vec<(String, f64, f64, f64, i32, i32)> = world
-        .players
-        .values()
-        .map(|p| (p.id.clone(), p.x, p.y, p.face, p.hp, p.max_hp))
-        .collect();
-    for (qid, qx, qy, _, _, _) in &snap {
+    // Entity-Snapshot: Spieler + lebende/kehrende NPCs (tote sind unsichtbar).
+    let mut snap: Vec<(String, String, f64, f64, f64, i32, i32)> = Vec::new();
+    for p in world.players.values() {
+        snap.push((
+            p.id.clone(),
+            "player".into(),
+            p.x,
+            p.y,
+            p.face,
+            p.hp,
+            p.max_hp,
+        ));
+    }
+    for n in world.npcs.values() {
+        if n.status == crate::npc::NpcStatus::Dead {
+            continue; // tot → unsichtbar (Respawn kommt später)
+        }
+        snap.push((n.id.clone(), "npc".into(), n.x, n.y, 0.0, n.hp, n.max_hp));
+    }
+    for (qid, _, qx, qy, _, _, _) in &snap {
+        if !world.players.contains_key(qid) {
+            continue; // nur Spieler empfangen Frames
+        }
         let mut now_visible = HashSet::new();
-        for (pid, px, py, _, _, _) in &snap {
+        for (pid, _, px, py, _, _, _) in &snap {
             if pid == qid {
                 continue;
             }
@@ -150,26 +170,58 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
         let Some(q) = world.players.get_mut(qid.as_str()) else {
             continue;
         };
-        for (pid, px, py, face, hp, max_hp) in &snap {
+        for (pid, kind, px, py, face, hp, max_hp) in &snap {
             if pid == qid || !now_visible.contains(pid) {
                 continue;
             }
-            if !q.entities.contains(pid) {
+            if kind == "player" {
+                if !q.entities.contains(pid) {
+                    q.send(&Frame::new(
+                        0,
+                        s2c::SPAWN,
+                        serde_json::json!({"id": pid, "kind": "player", "x": px, "y": py, "face": face}),
+                    ));
+                    q.entities.insert(pid.clone());
+                }
                 q.send(&Frame::new(
                     0,
-                    s2c::SPAWN,
-                    serde_json::json!({"id": pid, "kind": "player", "x": px, "y": py, "face": face}),
+                    s2c::STATE,
+                    serde_json::json!({
+                        "id": pid, "x": px, "y": py, "face": face,
+                        "hp": hp, "max_hp": max_hp
+                    }),
                 ));
-                q.entities.insert(pid.clone());
+            } else {
+                let (status, aggro, claimed, name) = {
+                    let n = world.npcs.get(pid.as_str());
+                    (
+                        n.map(|n| n.status.key()).unwrap_or("alive"),
+                        n.map(|n| n.target_id.is_some()).unwrap_or(false),
+                        n.map(|n| n.claimed_by.is_some()).unwrap_or(false),
+                        n.map(|n| n.name.clone()).unwrap_or_default(),
+                    )
+                };
+                if !q.entities.contains(pid) {
+                    q.send(&Frame::new(
+                        0,
+                        s2c::SPAWN,
+                        serde_json::json!({
+                            "id": pid, "kind": "npc", "x": px, "y": py, "face": face,
+                            "extra": {"status": status, "aggro": aggro, "claimed": claimed, "name": name}
+                        }),
+                    ));
+                    q.entities.insert(pid.clone());
+                }
+                q.send(&Frame::new(
+                    0,
+                    s2c::STATE,
+                    serde_json::json!({
+                        "id": pid, "x": px, "y": py, "face": face,
+                        "hp": hp, "max_hp": max_hp,
+                        "kind": "npc", "status": status, "aggro": aggro, "claimed": claimed
+                    }),
+                ));
             }
-            q.send(&Frame::new(
-                0,
-                s2c::STATE,
-                serde_json::json!({
-                    "id": pid, "x": px, "y": py, "face": face,
-                    "hp": hp, "max_hp": max_hp
-                }),
-            ));
         }
         let stale: Vec<String> = q
             .entities

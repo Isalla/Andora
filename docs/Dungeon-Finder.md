@@ -233,6 +233,20 @@ Der Dungeon-Finder kann dabei helfen, fehlende Spieler zu finden.
 
 Er entscheidet jedoch nicht, ob diese Zusammenstellung spielerisch sinnvoll ist.
 
+Im Grundspiel beträgt die maximale Größe einer normalen Spielergruppe 4 Spieler (siehe `project_overview.md`, Abschnitt 14). Die obigen Beispiele veranschaulichen inhaltliche Freiheit, einzeln jeweils bis zur geltenden Gruppengröße.
+
+Mit Exp1 wird die maximale Größe einer normalen Spielergruppe auf 5 Spieler erhöht (siehe `exp1_Unterwelt.md`, Abschnitt 56). Dadurch kann beispielsweise auch eine Supportrolle Platz finden:
+
+```text
+Tank
+Heiler
+DD
+DD
+Supporter
+```
+
+Auch das bleibt ein Beispiel, keine Vorschrift.
+
 ---
 
 # 11. Unterschied zwischen Vermittlung und Matchmaking

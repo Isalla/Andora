@@ -104,6 +104,7 @@ Dazu können gehören:
 * feste Dialoge
 * Narrative Regeln
 * erlaubte AI-Kontexte
+* NPC-/Monster-Grundregeln (Normalzustand, `attackable`/`aggressive`, Aggro, Home-Zone, Respawnzeiten; Combat-Details in `Kampfsystem.md`, Abschnitte 18–21)
 
 Lua führt kein beliebiges SQL aus und verändert Weltzustände ausschließlich über kontrollierte Server-APIs.
 

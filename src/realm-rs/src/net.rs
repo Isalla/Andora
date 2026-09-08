@@ -168,7 +168,10 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
             handlers::handle_heartbeat(&ctx.shared, tx, conn_id, frame.seq, &data).await
         }
         c2s::MOVE => handlers::handle_move(&ctx.shared, conn_id, &data, ctx.cfg.tick_ms).await,
-        c2s::ATTACK => handlers::handle_attack(&ctx.shared, conn_id, &data, &ctx.cfg.combat).await,
+        c2s::ATTACK => {
+            handlers::handle_attack(&ctx.shared, conn_id, &data, &ctx.cfg.combat, &ctx.cfg.npc)
+                .await
+        }
         c2s::CHAT => {
             handlers::handle_chat(
                 &ctx.parental,

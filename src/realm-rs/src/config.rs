@@ -156,6 +156,23 @@ pub struct AuthApiConfig {
     pub secret: String,
 }
 
+/// Vorläufige NPC/Combat-V2-Mechanikwerte (docs/Kampfsystem.md §§18–21).
+/// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
+/// Praxistests angepasst — keine Architekturwerte.
+#[derive(Debug, Clone)]
+pub struct NpcCfg {
+    /// Sozialer Aggro-Radius: Umstehende Gegner derselben Fraktion steigen
+    /// in den Kampf ein, wenn ein Mitglied angegriffen wird (§21).
+    pub social_aggro_radius: f64,
+    /// Zeit in ms ohne gültigen Kampfbezug (Ziel weg/außer Reichweite),
+    /// bevor ein Gegner Evade/Return auslöst (§20).
+    pub no_link_ms: u64,
+    /// Rücklauf-Geschwindigkeit in m/s für Home-Zone-Return (§20).
+    pub return_speed: f64,
+    /// Intervall in ms zwischen periodischen Persistenz-Flushes.
+    pub persist_interval_ms: u64,
+}
+
 /// Vorläufige Combat-V1-Balancingwerte (docs/Kampfsystem.md §§4–7, 17).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -230,6 +247,15 @@ pub fn combat_config(env: &HashMap<String, String>) -> CombatCfg {
     }
 }
 
+pub fn npc_config(env: &HashMap<String, String>) -> NpcCfg {
+    NpcCfg {
+        social_aggro_radius: numf(env, "NPC_SOCIAL_AGGO_RADIUS", 15.0),
+        no_link_ms: num1(env, "NPC_NO_LINK_MS", 5000),
+        return_speed: numf(env, "NPC_RETURN_SPEED", 5.0),
+        persist_interval_ms: num1(env, "NPC_PERSIST_INTERVAL_MS", 30000),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Eigene Realm-ID (prüft Handoff-Bindung: handoff.realm_id muss passen).
@@ -256,6 +282,8 @@ pub struct Config {
     pub allow_destructive: bool,
     /// Vorläufige Combat-V1-Balancingwerte.
     pub combat: CombatCfg,
+    /// Vorläufige NPC/Combat-V2-Mechanikwerte.
+    pub npc: NpcCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -369,6 +397,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         migrations_dir: g("REALM_STATE_MIGRATIONS_DIR"),
         allow_destructive: g("ALLOW_DESTRUCTIVE_MIGRATIONS") == "1",
         combat: combat_config(&env),
+        npc: npc_config(&env),
     })
 }
 

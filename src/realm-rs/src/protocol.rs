@@ -27,9 +27,9 @@ pub mod c2s {
 #[allow(dead_code)]
 pub mod s2c {
     pub const WELCOME: i64 = 1; // {you:{id,name,x,y}}
-    pub const SPAWN: i64 = 2; // {id, kind, x, y, face}
+    pub const SPAWN: i64 = 2; // {id, kind, x, y, face}; kind player|npc; npc: extra {status, aggro, claimed, name}
     pub const DESPAWN: i64 = 3; // {id}
-    pub const STATE: i64 = 4; // {id, x, y, face}
+    pub const STATE: i64 = 4; // {id, x, y, face}; Spieler + {hp, max_hp}; NPC zusätzlich {kind, status, aggro, claimed}
     pub const DAMAGE: i64 = 5; // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
     pub const KILL: i64 = 6; // {id, killer_id}
     pub const LOOT: i64 = 7; // (künftig)

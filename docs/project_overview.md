@@ -321,6 +321,8 @@ Rucksäcke können unterschiedliche Kapazitäten besitzen.
 
 Spieler können gemeinsam Inhalte bestreiten.
 
+Im Grundspiel beträgt die maximale Größe einer normalen Spielergruppe **4 Spieler**. Mit Exp1 wird diese maximale Gruppengröße auf **5 Spieler** erhöht (siehe `exp1_Unterwelt.md`, Abschnitt 56). Raidgrößen und Raidgruppen werden dadurch nicht neu definiert.
+
 Geplant sind:
 
 * Gruppen

@@ -23,6 +23,8 @@ Die Runtime-KI (lokal aktuell: Ollama) soll später Persönlichkeit, Dialoge und
 
 Die Wahrheit über die Spielwelt bleibt jedoch immer beim Gameserver.
 
+Für Kampfverhalten von NPCs/Monstern gelten ergänzend die verbindlichen Gegnergrundregeln in `Kampfsystem.md` (Abschnitte 18–21): Content-/Lua-definierter Grundzustand (`attackable`/`aggressive` getrennt), kontextgebundene Überschreibungen, Home-Zone/Verfolgung, Evade/Return als Combat-Reset sowie Respawn als Contentwerte. Dieses Dokument regelt dazu komplementär Wissen, Beziehungen und Reiseverhalten, nicht die Kampfregeln selbst.
+
 ---
 
 # Sehr wichtige Architekturregel

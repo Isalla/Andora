@@ -276,7 +276,7 @@ Die genaue Berechnung und der spätere Abbau des XP-Malus werden separat festgel
 
 Bereits erreichte Charakterstufen werden durch den Tod nicht direkt verändert.
 
-Tod, Wiederbelebung und Todesmalus in diesem Abschnitt beschreiben das reguläre (`normal`-)Ruleset. Andere Rulesets (z. B. ein späterer Hardcore-Realm) können abweichende Todesregeln definieren; diese sind noch nicht festgelegt (siehe Realm-Rulesets in `Login_Realm_Architektur.md`).
+Tod, Wiederbelebung und Todesmalus in diesem Abschnitt beschreiben das reguläre (`normal`-)Ruleset. Andere Rulesets (z. B. ein späterer Hardcore-Realm) können abweichende Todesregeln definieren; diese sind noch nicht festgelegt (siehe Realm-Rulesets in `Login_Realm_Architektur.md`). Für das Encounter-Design gilt dabei das dort festgelegte Hardcore-Fairnessprinzip: gleiche lesbare Grundregeln auf allen Rulesets, Schwierigkeit über Konsequenz.
 
 ---
 
@@ -316,6 +316,90 @@ Die erste Version soll spielbar und testbar sein. Trefferchancen, Skillprogressi
 
 ---
 
+## 18. Gegnergrundregeln (NPCs und Monster)
+
+NPCs und Monster besitzen einen Content-/Lua-definierten Grundzustand.
+
+Normale Regeln und Eigenschaften eines NPCs/Monsters werden in Content/Lua (beziehungsweise in den zugehörigen Spawn-/DB-Daten) definiert und nicht als feste Gameplaywerte in den Rust-Combat-Kern hartverdrahtet. Der Realm wertet diese Regeln aus und bleibt die endgültige Autorität.
+
+Dabei sind `attackable` (angreifbar) und `aggressive` (aggressiv) getrennte Eigenschaften:
+
+* **attackable** bestimmt, ob ein Spieler den Gegner überhaupt angreifen kann.
+* **aggressive** bestimmt, ob der Gegner von sich aus einen Kampf beginnen kann.
+
+Aggressive Gegner können selbstständig Kämpfe beginnen.
+
+Friedliche Stadt-NPCs können standardmäßig weder angreifbar noch aggressiv sein; der konkrete Zustand ist Contententscheidung.
+
+---
+
+## 19. Kontextabhängige Überschreibungen
+
+Quest-, Dialog-, Spieler- oder Gruppenkontext kann den Standard eines NPCs/Monsters gezielt überschreiben, beispielsweise Angriffserlaubnis, Aggressivität oder Verhalten in einer bestimmten Phase.
+
+Solche Überschreibungen sind an ihren Kontext gebunden und laufen mit dessen Ende (zum Beispiel Phasenende) automatisch aus. Danach gilt wieder der Content-/Lua-definierte Grundzustand.
+
+---
+
+## 20. Home-Zone, Verfolgung und Evade/Return
+
+Gegner besitzen eine Home-Zone statt zwingend starrer Spawnpunkte. Die Verfolgung von Spielern ist nur innerhalb definierter Grenzen möglich.
+
+Wird ein Gegner zu weit von seiner Home-Zone entfernt, zu lange ohne gültigen Kampfbezug verfolgt oder anderweitig aus seinem definierten Bereich gezogen, geht er in **Evade/Return** über.
+
+Evade/Return ist ein Combat-Reset, weder Tod noch Respawn:
+
+* die Entity ist während Evade/Return **nicht angreifbar**,
+* sie besitzt kein Aggro und ist kein gültiges Kampfziel,
+* sie führt keine Angriffe aus,
+* sie kehrt in ihre Home-Zone zurück,
+* bei Rückkehr erfolgen vollständige HP-/Mana-Regeneration und vollständiger Cooldown-Reset,
+* Evade/Return ist nicht durch erneutes Angreifen unterbrechbar.
+
+Für Bosse gilt dieselbe einheitliche Regel: Auch ein Boss ist während seiner Rückkehr (Boss-Reset) nicht angreifbar; Details stehen in `Boss-System.md`.
+
+---
+
+## 21. Respawn, Aggroformen, Schwierigkeit und Architekturgrenze
+
+### Respawn
+
+Respawnzeiten sind Contentwerte und werden nicht als feste Werte in den Rust-Combat-Kern gelegt. Der tatsächlich gültige Wert kann in Lua beziehungsweise in speziellen Spawn-/DB-Daten definiert oder überschrieben werden.
+
+Standardwerte, sofern Content nichts anderes festlegt:
+
+* Questmonster: **3 Minuten**
+* normale Monster: **5 Minuten**
+* Named: **10 Minuten**
+* besondere seltene Named/Bosse: individuelle Werte, zum Beispiel **24 Stunden oder länger**
+
+Der Respawn-Timer beginnt erst beim tatsächlichen Tod der Entity. Langfristige Respawnzustände müssen Realm-Neustarts überstehen.
+
+### Aggroformen
+
+Es gibt drei Aggroformen, die auch kombiniert auftreten können:
+
+* **Solo-Aggro:** der Gegner reagiert einzeln.
+* **soziale Aggro:** umstehende Gegner derselben Gruppe oder Fraktion steigen in den Kampf ein.
+* **feste Gruppe/Rudel:** der Verband agiert als feste Einheit.
+
+Die Anwendung dieser Formen im Encounter- und Pull-Design (Geometrie, Positionierung, Patrouillen, dynamische Gefahr) ist in `exp1_Unterwelt.md` (Abschnitte 51–55) verbindlich festgelegt; dort stehen auch die Designziele für Beobachtung, Kommunikation und Spielerwissen.
+
+### Schwierigkeit
+
+Die Schwierigkeit ist contentabhängig. Es gibt keine separate Combat-Engine pro Contenttyp; unterschiedliche Gegner, Gebiete, Dungeons und Bosse nutzen dasselbe Grundkampfsystem mit unterschiedlichen Contentwerten.
+
+### Architekturgrenze
+
+* **Lua/Content** definiert Regeln und Standardwerte.
+* **DB/persistenter Weltzustand** hält konkrete persistente Spawn- und Zustandsinformationen.
+* **Kontext** (Quest/Dialog/Spieler/Gruppe) überschreibt gezielt und zeitlich begrenzt.
+* **Realm** wertet aus und hat die endgültige Autorität.
+
+> **Stand:** Die Abschnitte 18–21 sind als Combat V2 **umgesetzt** (Realm-Binär); ein gemeinsamer, realm-autoritativer Kampfkern für Spieler UND NPC/Monster, Content-/DB-Schicht (Migration 009) mit Probe-Spawnzone 0 für den vertikalen Schnitt. Siehe auch `Projekt-Status.md` und zum Boss-System `Boss-System.md`.
+
+---
+
 # Abgrenzung zu anderen Systemen
 
 Das allgemeine Kampfsystem definiert die grundlegenden Regeln eines Kampfes.
@@ -328,6 +412,15 @@ Dazu gehören neben den bereits festgelegten Grundelementen (Anvisieren, Grundan
 * Rüstung und physische Schadensreduktion mit Klassen-Caps (Abschnitt 7)
 
 Die konkreten Zahlenwerte dieser Bereiche sind bewusst Balancingdaten und werden bei der anschließenden Implementierung und über Praxistests festgelegt beziehungsweise angepasst.
+
+Seit den Combat-V2-Festlegungen gehören außerdem dazu:
+
+* Gegnergrundregeln mit Content-/Lua-definiertem Grundzustand und getrennten Eigenschaften `attackable`/`aggressive` (Abschnitt 18)
+* kontextabhängige Überschreibungen mit automatischem Auslaufen am Kontextende (Abschnitt 19)
+* Home-Zone, Verfolgungsgrenzen und Evade/Return als Combat-Reset (Abschnitt 20)
+* Respawn als Contentwerte mit Standardzeiten, Aggroformen (Solo/sozial/feste Gruppe), contentabhängige Schwierigkeit und Architekturgrenze Lua–DB–Kontext–Realm (Abschnitt 21)
+
+Die Abschnitte 18–21 sind als Combat V2 umgesetzt; Details zur NPC-/Monster-Ebene stehen in `Projekt-Status.md`.
 
 Folgende Bereiche werden separat ausgearbeitet, ohne das Grundkampfsystem zu verändern:
 

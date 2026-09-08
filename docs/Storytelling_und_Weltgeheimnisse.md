@@ -239,6 +239,8 @@ Mögliche Deutungen einer Entdeckung:
 
 Dadurch bleibt die Welt lebendig und überraschend.
 
+In der Unterwelt (Exp1) gilt dafür zusätzlich eine Erkundungsprogression: Mit zunehmender Tiefe und Größe der Ebenen wachsen Zahl und Komplexität möglicher Geheimnisse; der direkte Weg zum Wächter zeigt nur einen Teil einer Ebene (siehe `exp1_Unterwelt.md`, Abschnitt 57).
+
 ---
 
 # 8. Verborgene Questketten

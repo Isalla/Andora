@@ -13,6 +13,7 @@ mod handlers;
 mod health;
 mod migrations;
 mod net;
+mod npc;
 mod parental;
 mod protocol;
 mod world;
@@ -81,15 +82,99 @@ async fn async_main() -> Result<(), String> {
     let tick_ms = cfg.tick_ms;
     let aofb = cfg.aofb_radius;
     let combat_cfg = cfg.combat.clone();
+    let npc_cfg = cfg.npc.clone();
     let mut combat_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
+
+    // NPC-/Monster-Instanzen aus Content + persistentem Zustand laden
+    // (Migration 009). Ein Ladefehler bremst den Start (kein halber Realm).
+    let npcs = {
+        let defs = db::load_npc_definitions(&pool).await?;
+        let spawns = db::load_npc_spawns(&pool).await?;
+        let states = db::load_npc_states(&pool).await.unwrap_or_default();
+        npc::build_npcs(&defs, &spawns, &states)
+    };
+    log::info!("{} NPC-Instanzen geladen", npcs.len());
+    {
+        let mut w = tick_shared.lock().await;
+        w.npcs = npcs;
+    }
+
+    let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);
+    let persist_pool = pool.clone();
     let ticker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
+        let mut last_persist = std::time::Instant::now();
         loop {
             interval.tick().await;
             let mut world = tick_shared.lock().await;
             world::world_tick(&mut world, aofb);
             let now = std::time::Instant::now();
-            combat::combat_tick(&mut world, &combat_cfg, &mut combat_rng, now, aofb);
+            let wall_now = std::time::SystemTime::now();
+            combat::combat_tick(
+                &mut world,
+                &combat_cfg,
+                &mut combat_rng,
+                now,
+                wall_now,
+                aofb,
+            );
+            npc::npc_tick(
+                &mut world,
+                &combat_cfg,
+                &npc_cfg,
+                &mut combat_rng,
+                now,
+                wall_now,
+                tick_ms,
+                aofb,
+            );
+            // Periodische Persistenz des NPC-Zustands über Realm-Neustarts.
+            if now.duration_since(last_persist) >= persist_interval {
+                last_persist = now;
+                let wall_epoch_ms = wall_now
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                // Snapshot ohne Sperre bauen (DB-I/O außerhalb der Sperre).
+                let snapshot: Vec<db::NpcStateRow> = {
+                    world
+                        .npcs
+                        .values()
+                        .map(|n| db::NpcStateRow {
+                            spawn_id: n.spawn_id,
+                            status: n.status.key().to_string(),
+                            hp: n.hp,
+                            x: n.x,
+                            y: n.y,
+                            respawn_after_ms: n.respawn_after.map(|r| {
+                                r.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as i64)
+                                    .unwrap_or(0)
+                            }),
+                            claimed_by: n.claimed_by.clone(),
+                            claim_at_ms: n.claimed_by.is_some().then_some(wall_epoch_ms),
+                        })
+                        .collect()
+                };
+                let persist_pool2 = persist_pool.clone();
+                tokio::spawn(async move {
+                    for st in &snapshot {
+                        db::save_npc_state(
+                            &persist_pool2,
+                            st.spawn_id,
+                            &st.status,
+                            st.hp,
+                            st.x,
+                            st.y,
+                            st.respawn_after_ms,
+                            st.claimed_by.as_deref(),
+                            st.claim_at_ms,
+                        )
+                        .await;
+                    }
+                });
+                log::debug!("NPC-Zustand persistiert");
+            }
         }
     });
 

@@ -30,26 +30,32 @@ pub struct MigrationFile {
 /// Zerlegt NNN_name.sql (Split am ERSTEN Unterstrich). Fehler bei
 /// ungültigem Namen — nichts wird stillschweigend übersprungen.
 pub fn parse_migration_name(file: &str) -> Result<MigrationFile, String> {
-    let base = file.strip_suffix(".sql").ok_or_else(|| {
-        format!("ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql")
-    })?;
-    let us = base.find('_').ok_or_else(|| {
-        format!("ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql")
-    })?;
+    let base = file
+        .strip_suffix(".sql")
+        .ok_or_else(|| format!("ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql"))?;
+    let us = base
+        .find('_')
+        .ok_or_else(|| format!("ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql"))?;
     let (num_str, rest) = base.split_at(us);
     let tag = &rest[1..];
-    let num: u32 = num_str.parse().map_err(|_| {
-        format!("ungültiger Migrationsdateiname {file:?}: kein numerisches Präfix")
-    })?;
+    let num: u32 = num_str
+        .parse()
+        .map_err(|_| format!("ungültiger Migrationsdateiname {file:?}: kein numerisches Präfix"))?;
     if num == 0
         || tag.is_empty()
         || !tag
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql"));
+        return Err(format!(
+            "ungültiger Migrationsdateiname {file:?}: erwartet NNN_name.sql"
+        ));
     }
-    Ok(MigrationFile { num, tag: tag.to_string(), file: file.to_string() })
+    Ok(MigrationFile {
+        num,
+        tag: tag.to_string(),
+        file: file.to_string(),
+    })
 }
 
 /// Teilt einen Migrations-Body in Statements (--Kommentare und USE
@@ -84,9 +90,11 @@ pub fn split_statements(body: &str) -> Vec<String> {
 
 fn is_use(stmt: &str) -> bool {
     let upper = stmt.to_ascii_uppercase();
-    upper.starts_with("USE ") && upper[4..].trim().chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '_' || c == '`' || c == '"' || c == '\''
-    })
+    upper.starts_with("USE ")
+        && upper[4..]
+            .trim()
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '`' || c == '"' || c == '\'')
 }
 
 /// True bei Kopfzeile `-- destructive: <Grund>`.
@@ -95,15 +103,22 @@ pub fn is_destructive(body: &str) -> bool {
         let t = l.trim_start();
         t.len() > 2
             && t[..2].eq_ignore_ascii_case("--")
-            && t[2..].trim_start().to_ascii_lowercase().starts_with("destructive:")
+            && t[2..]
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("destructive:")
     })
 }
 
 /// Ermittelt + prüft die Migrationsdateien eines Verzeichnisses
 /// (sortiert, eindeutig, lückenlos ab 1).
 pub fn collect_files(dir: &std::path::Path) -> Result<Vec<MigrationFile>, String> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| format!("Migrationsverzeichnis nicht lesbar ({}): {e}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| {
+        format!(
+            "Migrationsverzeichnis nicht lesbar ({}): {e}",
+            dir.display()
+        )
+    })?;
     let mut files = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("Migrationsverzeichnis nicht lesbar: {e}"))?;
@@ -225,9 +240,9 @@ pub async fn apply_migrations(
         }
         match failed {
             None => {
-                tx.commit().await.map_err(|e| {
-                    format!("[migration:realm_state] {} commit: {e}", f.file)
-                })?;
+                tx.commit()
+                    .await
+                    .map_err(|e| format!("[migration:realm_state] {} commit: {e}", f.file))?;
                 log::info!("[migration:realm_state] {db_name}: {} angewendet.", f.file);
             }
             Some(why) => {
@@ -260,14 +275,18 @@ mod tests {
 
     #[test]
     fn split_filters_use_and_comments() {
-        let s = split_statements("-- Kommentar\nUSE realm_state;\nCREATE TABLE a (x INT);\n\nCREATE INDEX i ON a(x);\n");
+        let s = split_statements(
+            "-- Kommentar\nUSE realm_state;\nCREATE TABLE a (x INT);\n\nCREATE INDEX i ON a(x);\n",
+        );
         assert_eq!(s.len(), 2);
         assert!(s[0].starts_with("CREATE TABLE"));
     }
 
     #[test]
     fn destructive_marker() {
-        assert!(is_destructive("-- destructive: Spalte weg\nALTER TABLE t DROP COLUMN x;\n"));
+        assert!(is_destructive(
+            "-- destructive: Spalte weg\nALTER TABLE t DROP COLUMN x;\n"
+        ));
         assert!(is_destructive("SELECT 1;\n--   DESTRUCTIVE: foo\n"));
         assert!(!is_destructive("-- Kommentar\nSELECT 1;\n"));
     }

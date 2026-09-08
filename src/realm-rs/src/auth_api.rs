@@ -104,7 +104,10 @@ impl AuthApi {
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .map_err(|e| format!("authapi http-client: {e}"))?;
-        Ok(Self { cfg: cfg.clone(), client })
+        Ok(Self {
+            cfg: cfg.clone(),
+            client,
+        })
     }
 
     pub fn enabled(&self) -> bool {
@@ -115,8 +118,7 @@ impl AuthApi {
         use sha2::Digest;
         let body_hash = hex::encode(Sha256::digest(body.as_bytes()));
         let payload = format!("{method}\n{path}\n\n{ts}\n{body_hash}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(self.cfg.secret.as_bytes())
-            .expect("hmac key");
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.cfg.secret.as_bytes()).expect("hmac key");
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -142,11 +144,17 @@ impl AuthApi {
             .body(body)
             .send()
             .await
-            .map_err(|e| AuthApiError { status: None, body: e.to_string() })?;
+            .map_err(|e| AuthApiError {
+                status: None,
+                body: e.to_string(),
+            })?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if status != 200 && status != 201 {
-            return Err(AuthApiError { status: Some(status), body: text });
+            return Err(AuthApiError {
+                status: Some(status),
+                body: text,
+            });
         }
         serde_json::from_str(&text).map_err(|e| AuthApiError {
             status: Some(status),
@@ -156,11 +164,22 @@ impl AuthApi {
 
     /// Handoff validieren UND verbrauchen (einmalig; Zweitaufruf ungültig).
     pub async fn validate_handoff(&self, token: &str) -> Result<HandoffValidation, AuthApiError> {
-        self.post("/handoff/validate", serde_json::json!({"handoff_token": token})).await
+        self.post(
+            "/handoff/validate",
+            serde_json::json!({"handoff_token": token}),
+        )
+        .await
     }
 
-    pub async fn validate_session(&self, session_id: &str) -> Result<SessionValidation, AuthApiError> {
-        self.post("/session/validate", serde_json::json!({"session_id": session_id})).await
+    pub async fn validate_session(
+        &self,
+        session_id: &str,
+    ) -> Result<SessionValidation, AuthApiError> {
+        self.post(
+            "/session/validate",
+            serde_json::json!({"session_id": session_id}),
+        )
+        .await
     }
 
     pub async fn parental_status(
@@ -220,7 +239,12 @@ mod tests {
         //     = f2c36706b9eeb7e73643c7f18de03eb4b7fe76982f7fc22134376b10cd377c75
         // Gleiches Schema wie src/api/auth.go (signPayload).
         let a = api();
-        let sig = a.sign("POST", "/session/validate", 1753286400, r#"{"session_id":"abc"}"#);
+        let sig = a.sign(
+            "POST",
+            "/session/validate",
+            1753286400,
+            r#"{"session_id":"abc"}"#,
+        );
         assert_eq!(
             sig,
             "f2c36706b9eeb7e73643c7f18de03eb4b7fe76982f7fc22134376b10cd377c75"
