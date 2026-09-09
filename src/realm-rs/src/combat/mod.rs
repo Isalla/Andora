@@ -14,6 +14,13 @@ use crate::config::CombatCfg;
 use crate::protocol::{s2c, Frame};
 use crate::world::World;
 
+pub mod ability;
+pub mod aoe;
+pub mod cooldowns;
+pub mod effects;
+pub mod events;
+pub mod targeting;
+
 /// Ergebnis einer physischen Trefferauflösung (docs/Kampfsystem.md §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitResult {
@@ -383,6 +390,9 @@ pub fn combat_tick(
         for p in world.players.values() {
             p.send(&frame);
         }
+        // Combat V3: Tod → alle Effekte entfernen, Cast abbrechen,
+        // nicht-persistente Cooldowns zurücksetzen (Ability-System.md §6).
+        ability::on_death(world, tid, world.players.contains_key(tid));
         // Blackboard: jeder (inkl. des Killers), der dieses Ziel anvisiert,
         // beendet seinen Auto-Angriff; der Tote greift nicht weiter an.
         for p in world.players.values_mut() {
@@ -471,6 +481,12 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: std::collections::BTreeMap::new(),
+                active_cast: None,
+                learned_abilities: std::collections::HashSet::new(),
             },
             rx,
         )

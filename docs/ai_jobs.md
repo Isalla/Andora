@@ -100,9 +100,19 @@ Go-Toolchain:
 Rust-Toolchain:
 - Rust-Installation (rustup, rustc, cargo): `.tmp/rust` bzw. `.tmp/rustup` (relativ zum Projektroot; Profil `minimal`, Toolchain `stable-aarch64-unknown-linux-gnu`)
 - Aktivierung: `source .tmp/rust/env.sh` (setzt `RUSTUP_HOME`, `CARGO_HOME`, `PATH` passend)
+- Direkter Aufruf ohne Aktivierung: `.tmp/rust/bin/cargo`, `.tmp/rust/bin/rustc`,
+  `.tmp/rust/bin/rustfmt`, `.tmp/rust/bin/clippy-driver` (relativ zum Projektroot).
+  Diese Pfade können in beliebigen Pfaden abgelegt werden, siehe unten.
 - Details: `docs/Temporäre_Dateien.md` (Abschnitt „Projekt-Toolchains in `.tmp/`")
 
 Jeder NEUE Coding-Auftrag (gofmt, vet, build, test für Go; cargo build/test für Rust, Downloads temporärer Toolchains) MUSS die jeweils passende projektinterne Toolchain unter `.tmp/` verwenden. Der systemweite Rust-Pfad `~/.cargo` wird NICHT verwendet.
+
+**Rust-Aufruf ohne systemweite Suche:** Toolchains werden ausschließlich innerhalb des
+Projektroots unter `.tmp/` gesucht und verwendet. Für Rust ist die zu verwundende Binary
+`.tmp/rust/bin/cargo` (relativ zum Projektroot). Es darf NIE systemweit nach `cargo`/`rustc`
+gesucht werden (`which cargo`, `find / -name cargo`, `/etc/environment` o. Ä.). Fehlt der
+Binary-Pfad, wird die Toolchain unter `.tmp/` verifiziert oder der Nutzer gefragt — nicht
+außerhalb des Projektroots.
 
 Regeln:
 - `/etc` und (dauerhafte Projektdateien in) `/tmp` werden für Coden und Kompilieren NICHT benutzt.

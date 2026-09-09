@@ -111,6 +111,12 @@ pub struct Npc {
     pub respawn_after: Option<SystemTime>,
     pub claimed_by: Option<String>,
     pub override_ctx: Option<ContextOverride>,
+    /// Aktive Effekte (Buffs, Debuffs, DoT/HoT, Control, Combat V3).
+    pub effects: Vec<crate::combat::effects::Effect>,
+    /// Fähigkeits-Cooldowns (Combat V3): ability_id → ready_at.
+    pub cooldowns: std::collections::BTreeMap<String, std::time::SystemTime>,
+    /// Aktiver Cast-Zustand (Combat V3, für künftige NPC-AI).
+    pub active_cast: Option<crate::combat::ability::ActiveCast>,
 }
 
 impl Npc {
@@ -260,6 +266,9 @@ pub fn build_npcs(
             respawn_after: None,
             claimed_by: None,
             override_ctx: None,
+            effects: Vec::new(),
+            cooldowns: std::collections::BTreeMap::new(),
+            active_cast: None,
         };
         if let Some(st) = states.get(&spawn.id) {
             n.status = match st.status.as_str() {
@@ -342,6 +351,10 @@ pub fn npc_tick(
                 n.respawn_after = None;
                 n.claimed_by = None; // Boss neu → wieder frei claimbar.
                 n.last_attack = now;
+                // Combat V3: vollständiger Reset (Effekte, Cooldowns) (§20).
+                crate::combat::effects::clear_all(&mut n.effects);
+                crate::combat::cooldowns::reset_all(&mut n.cooldowns);
+                n.active_cast = None;
             }
         }
     }
@@ -368,6 +381,10 @@ pub fn npc_tick(
                 n.return_started_at = None;
                 n.claimed_by = None; // Claim vollständig gelöscht (§3.5)
                 n.last_attack = now; // vollständiger Cooldown-Reset (§20)
+                // Combat V3: vollständiger Reset (Effekte, Cooldowns) (§20).
+                crate::combat::effects::clear_all(&mut n.effects);
+                crate::combat::cooldowns::reset_all(&mut n.cooldowns);
+                n.active_cast = None;
                 returned.push(id.clone());
             }
         }
@@ -566,6 +583,9 @@ pub fn npc_tick(
         for p in world.players.values() {
             p.send(&frame);
         }
+        // Combat V3: Tod → alle Effekte entfernen, Cast abbrechen,
+        // nicht-persistente Cooldowns zurücksetzen (Ability-System.md §6).
+        crate::combat::ability::on_death(world, pid, world.players.contains_key(pid));
         // Toten Spieler entwaffnen; NPC verliert das Ziel.
         if let Some(p) = world.players.get_mut(pid) {
             p.combat = None;
@@ -710,6 +730,12 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: std::collections::BTreeMap::new(),
+                active_cast: None,
+                learned_abilities: std::collections::HashSet::new(),
             },
             rx,
         )
@@ -749,6 +775,9 @@ mod tests {
             respawn_after: None,
             claimed_by: None,
             override_ctx: None,
+            effects: Vec::new(),
+            cooldowns: std::collections::BTreeMap::new(),
+            active_cast: None,
         }
     }
 

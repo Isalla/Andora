@@ -42,7 +42,7 @@ Er erhält insbesondere keinen direkten Zugriff auf:
 
 Er benötigt deshalb auch keine Zugangsdaten zu diesen Datenbanken.
 
-Seine lokale Persistenz besteht ausschließlich aus seinen Queue-/Job-Dateien und technischen Logs.
+Seine lokale Persistenz besteht ausschließlich aus seinen Queue-/Job-Dateien, technischen Logs und dem persistenten Erinnerungsspeicher für NPC-Beziehungen und -Wissen (Details: `Ki-NPC.md`, Abschnitt 0).
 
 Der Coordinator darf keine Spielzustände direkt verändern.
 
@@ -700,6 +700,31 @@ Die konkrete Secret-Verwaltung wird bei der späteren Implementierung festgelegt
 
 ---
 
+## 28.1 Persistenter Erinnerungsspeicher
+
+Der Coordinator speichert NPC-Erinnerungen und Beziehungen persistent in einem separaten dateibasierten Speicherbereich.
+
+Dieser Speicher ist getrennt von der Queue.
+
+Gründe:
+
+* Erinnerungen dürfen nicht verloren gehen
+* Ein Coordinator-Neustart darf Erinnerungen nicht löschen
+* Der Coordinator besitzt weiterhin keinen Datenbankzugriff
+* Stabile interne IDs verhindern, dass Namensänderungen Erinnerungen zerstören
+
+Enthalten sind unter anderem:
+
+* persönliche Erinnerungen pro Character-ID und NPC
+* Beziehungsstatus zwischen Charakteren und NPCs
+* Shared Knowledge pro Character-ID
+
+Der Erinnerungsspeicher enthält keine Accountdaten, keine Passwörter, keine Items und keine Goldstände.
+
+Er ist kein Ersatz für Realm-Datenbanken und enthält keine Spielzustände, die der Realm autoritativ verwaltet.
+
+---
+
 ## 29. Zentrale Architekturregel
 
 Die Verantwortlichkeiten bleiben strikt getrennt:
@@ -727,6 +752,7 @@ Die Verantwortlichkeiten bleiben strikt getrennt:
 * Output-Prüfung
 * begrenzte Korrekturschleifen
 * Fehler-/Statusmeldung an den Realm
+* persistenter Erinnerungsspeicher (dateibasiert, kein DB-Zugriff)
 
 **KI-Provider (aktuell lokale Standard-/Basislösung: Ollama; später auch externe Provider möglich, siehe §3.1)**
 

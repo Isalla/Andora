@@ -130,6 +130,8 @@ Beispiele:
 * Hochzeiten
 * Statistiken
 
+NPC-Erinnerungen, persönliche Beziehungen und Shared Knowledge werden nicht in MariaDB gespeichert, sondern im Coordinator in einem separaten dateibasierten persistenten Speicherbereich (Details: `Ki-NPC.md`, Abschnitt 0).
+
 Die KI erhält keinen direkten Datenbankzugriff.
 
 ---
@@ -257,7 +259,10 @@ AI Request
 ├── relationship_context
 ├── scene_context
 ├── allowed_actions
-└── locale
+├── locale
+├── personal_memories     (persönliche Erinnerungen des NPC an den Spieler)
+├── shared_knowledge      (allgemein erzählbares Wissen über den Spieler)
+└── related_persons       (Erinnerungen an bekannte Angehörige/Bekannte des Spielers)
 ```
 
 Nur benötigte Daten werden übergeben.
@@ -654,6 +659,10 @@ Information kann beispielsweise entstehen durch:
 * erlaubte berufliche Informationen
 
 Der AI-Service darf einem NPC keine globale Allwissenheit geben.
+
+Der Coordinator stellt dem AI-Service für jede Anfrage nur die relevanten persönlichen Erinnerungen und das zugehörige Shared Knowledge bereit.
+
+NPCs unterscheiden in ihren Antworten zwischen persönlich bekanntem Wissen und allgemein gehörten Informationen (Details: `Ki-NPC.md`, Abschnitt 0).
 
 ---
 

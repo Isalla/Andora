@@ -16,10 +16,18 @@ func _detect_system_lang():
 	var loc = (OS.get_system_language() if OS.has_method("get_system_language") else "de")
 	# Godot 3: OS.get_locale_x11() liefert z.B. "de_DE.UTF-8"
 	var x = OS.get_locale_x11()
-	if x.get_slice("_", 0).get_slice(".", 0) in ["en", "de", "fr", "es", "it"]:
-		var code = x.get_slice("_", 0).get_slice(".", 0)
+	var code = x.get_slice("_", 0).get_slice(".", 0)
+	if code in ["en", "de", "fr", "es", "it"]:
 		if has_table(code):
 			current = code
+	elif code == "zh":
+		# Chinesisch: Region entscheidet zwischen zh-Hans und zh-Hant
+		var region = x.get_slice("_", 1).get_slice(".", 0)
+		var mapped = "zh-Hans"
+		if region in ["TW", "HK", "MO"]:
+			mapped = "zh-Hant"
+		if has_table(mapped):
+			current = mapped
 
 func has_table(code):
 	return File.new().file_exists("res://i18n/" + code + ".json")

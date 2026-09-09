@@ -6,6 +6,8 @@ Das Boss-System baut direkt auf dem allgemeinen Kampfsystem von Andora auf.
 
 Grundlegende Regeln wie Anvisieren, Aggro, Gruppenrollen, Fähigkeiten und Tod bleiben auch bei Bosskämpfen bestehen.
 
+Bosse verwenden dasselbe Ability-Grundsystem wie Spieler und normale NPCs (siehe `Ability-System.md` Abschnitt 15). Named/Champions und Bosse dürfen meisterschaftsähnliche Varianten oder Erweiterungen ihrer Fähigkeiten besitzen, die abhängig von einer Bossphase freigeschaltet werden können. Dafür entsteht kein separates zweites Ability-System.
+
 Raidbosse werden separat behandelt, da ihre Kämpfe innerhalb eigener Raidinstanzen stattfinden.
 
 ---

@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::auth_api::AuthApi;
 use crate::combat::CombatState;
+use crate::combat::ability::AbilityRegistry;
 use crate::config::{CombatCfg, Config, NpcCfg};
 use crate::db;
 use crate::npc::aggro_trigger;
@@ -23,6 +24,7 @@ pub struct Ctx {
     pub auth: AuthApi,
     pub shared: Shared,
     pub parental: SharedParental,
+    pub registry: AbilityRegistry,
 }
 
 fn get_str(data: &serde_json::Value, key: &str) -> String {
@@ -114,6 +116,8 @@ pub async fn handle_hello(
         "character unavailable".to_string()
     })?;
     let weapon_skill = db::load_weapon_skill(&ctx.db, &c.id, &ctx.cfg.combat.weapon_skill_id).await;
+    let learned_abilities: std::collections::HashSet<String> =
+        db::load_character_abilities(&ctx.db, &c.id).await.unwrap_or_default().into_iter().collect();
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -124,6 +128,8 @@ pub async fn handle_hello(
         zone_id: 0,
         hp: c.hp,
         max_hp: c.hp,
+        mana: c.mana,
+        max_mana: c.mana_max,
         lang,
         account_id,
         session_id: session_id.clone(),
@@ -135,6 +141,10 @@ pub async fn handle_hello(
         armor: c.armor,
         weapon_skill,
         combat: None,
+        effects: Vec::new(),
+        cooldowns: std::collections::BTreeMap::new(),
+        active_cast: None,
+        learned_abilities,
     };
     {
         let mut world = ctx.shared.lock().await;
@@ -200,11 +210,29 @@ pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value
         Some(pid) => pid.clone(),
         None => return,
     };
+
+    let moving = (dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON)
+        && !crate::combat::effects::is_rooted(
+            &world.players.get(&pid).map(|p| &p.effects).unwrap_or(&Vec::new()),
+        );
+
     if let Some(me) = world.players.get_mut(&pid) {
+        if !moving {
+            return;
+        }
         let (x, y) = apply_move(me.x, me.y, dx, dy, tick_ms);
         me.x = x;
         me.y = y;
         me.last_activity = Instant::now();
+    }
+
+    // Cast-Unterbrechung durch Bewegung (Ability-System.md §3;
+    // Kampfsystem.md §9: Zauber werden durch Bewegung unterbrochen).
+    let had_cast = world.players.get(&pid).map(|p| p.active_cast.is_some()).unwrap_or(false);
+    if moving && had_cast {
+        if let Some(event) = crate::combat::ability::interrupt_cast(&mut world, &pid) {
+            crate::combat::ability::broadcast_combat_event(&world, 0.0, 0.0, 0.0, &event);
+        }
     }
 }
 
@@ -282,6 +310,66 @@ pub async fn handle_attack(
                 .checked_sub(std::time::Duration::from_millis(cfg.weapon_duration_ms))
                 .unwrap_or(now),
         });
+    }
+}
+
+/// ABILITY (Combat V3): Fähigkeit auslösen.
+/// Payload: {ability_id, target_id?, x?, y?}
+/// Realm-autoritativ: Cast-Management, Mana, Cooldown, Effekte.
+pub async fn handle_ability(
+    ctx: &Ctx,
+    conn_id: u64,
+    data: &serde_json::Value,
+) {
+    let pid = {
+        let world = ctx.shared.lock().await;
+        match world.by_conn.get(&conn_id) {
+            Some(pid) => pid.clone(),
+            None => return,
+        }
+    };
+
+    let ability_id = get_str(data, "ability_id");
+    if ability_id.is_empty() {
+        return;
+    }
+    let target_id = {
+        let t = get_str(data, "target_id");
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    };
+    let ground_x = data.get("x").and_then(|v| v.as_f64());
+    let ground_y = data.get("y").and_then(|v| v.as_f64());
+
+    let mut world = ctx.shared.lock().await;
+    let now = std::time::Instant::now();
+    let wall_now = std::time::SystemTime::now();
+
+    // Sende-Resultat an den Casting-Spieler zurück.
+    let events = crate::combat::ability::start_ability(
+        &mut world,
+        &ctx.registry,
+        &pid,
+        &ability_id,
+        target_id.as_deref(),
+        ground_x,
+        ground_y,
+        now,
+        wall_now,
+    );
+
+    let (caster_x, caster_y) = world
+        .players
+        .get(&pid)
+        .map(|p| (p.x, p.y))
+        .unwrap_or((0.0, 0.0));
+    for event in &events {
+        crate::combat::ability::broadcast_combat_event(
+            &world, caster_x, caster_y, ctx.cfg.aofb_radius, event,
+        );
     }
 }
 
@@ -599,6 +687,12 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
                 },
             );
             w.players.insert(
@@ -624,6 +718,12 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -709,6 +809,12 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
                 },
             );
             w.players.insert(
@@ -734,6 +840,12 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
                 },
             );
             w.by_conn.insert(7, "a".into());

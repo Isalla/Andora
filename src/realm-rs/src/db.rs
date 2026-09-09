@@ -8,7 +8,7 @@
 // monster_spawns, Migration 009) sowie den persistenten Runtime-Zustand
 // (monster_instances: Status, Respawn-Timer, Boss-Claim) — Respawn- und
 // Boss-Zustände überstehen Realm-Neustarts (Datenbank_Architektur.md §5).
-use sqlx::{MySql, Pool};
+use sqlx::{MySql, Pool, Row as _};
 
 use crate::config::DbConfig;
 
@@ -22,6 +22,8 @@ pub struct Character {
     pub hp: i32,
     pub char_class: String,
     pub armor: i32,
+    pub mana: i32,
+    pub mana_max: i32,
 }
 
 /// Verbindet den Pool und prüft die Verbindung (SELECT 1).
@@ -63,17 +65,17 @@ pub async fn open_pool(prefix: &str, cfg: &DbConfig) -> Result<Pool<MySql>, Stri
 
 /// Lädt einen Charakter; erzeugt ihn bei Bedarf (Übergangs-Prototyp-
 /// verhalten aus src/realm, Zone 0, Spawn 0,0). Kämpft damit mit
-/// geladener Klasse, Level, HP und Rüstung ein (Combat V1).
+/// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
-    type Row = (i64, String, i32, i32, String, f64, f64, i32);
+    type Row = (i64, String, i32, i32, String, f64, f64, i32, i32, i32);
     let row: Option<Row> = sqlx::query_as(
-        "SELECT id, name, level, hp, char_class, pos_x, pos_y, combat_armor FROM characters WHERE id = ?",
+        "SELECT id, name, level, hp, char_class, pos_x, pos_y, combat_armor, mana, mana_max FROM characters WHERE id = ?",
     )
     .bind(char_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Charakter laden: {e}"))?;
-    if let Some((id, name, level, hp, char_class, x, y, armor)) = row {
+    if let Some((id, name, level, hp, char_class, x, y, armor, mana, mana_max)) = row {
         return Ok(Character {
             id: id.to_string(),
             name,
@@ -83,6 +85,8 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             hp,
             char_class,
             armor,
+            mana: mana,
+            mana_max: mana_max.max(mana),
         });
     }
     sqlx::query("INSERT INTO characters (name, race, char_class) VALUES (?, 'Mensch', 'Warrior')")
@@ -99,6 +103,8 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         hp: 100,
         char_class: "Warrior".to_string(),
         armor: 0,
+        mana: 50,
+        mana_max: 50,
     })
 }
 
@@ -380,4 +386,56 @@ pub async fn save_npc_state(
     if let Err(e) = result {
         log::error!("saveNpcState {spawn_id}: {e}");
     }
+}
+
+/// Content-Definition einer Fähigkeit (ability_definitions, Migration 010).
+use crate::combat::ability::AbilityDefRow;
+
+/// Lädt alle Ability-Definitionen (Content-Schicht, Migration 010).
+pub async fn load_ability_definitions(pool: &Pool<MySql>) -> Result<Vec<AbilityDefRow>, String> {
+    let rows = sqlx::query(
+        "SELECT id, name, exec_type, semantic_category, mana_cost, cooldown_ms, \
+               cooldown_persistent, cast_time_ms, range, aoe_type, aoe_radius, \
+               host_effect, effect_kind, effect_value, duration_ms, tick_ms, effect_group \
+         FROM ability_definitions",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Ability-Definitionen laden: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| AbilityDefRow {
+            id: r.get("id"),
+            name: r.get("name"),
+            exec_type: r.get("exec_type"),
+            semantic_category: r.get("semantic_category"),
+            mana_cost: r.get("mana_cost"),
+            cooldown_ms: r.get("cooldown_ms"),
+            cooldown_persistent: r.get("cooldown_persistent"),
+            cast_time_ms: r.get("cast_time_ms"),
+            range: r.get("range"),
+            aoe_type: r.get("aoe_type"),
+            aoe_radius: r.get("aoe_radius"),
+            host_effect: r.get("host_effect"),
+            effect_kind: r.get("effect_kind"),
+            effect_value: r.get("effect_value"),
+            duration_ms: r.get("duration_ms"),
+            tick_ms: r.get("tick_ms"),
+            effect_group: r.get("effect_group"),
+        })
+        .collect())
+}
+
+/// Gelernte Fähigkeiten eines Charakters (character_abilities, Migration 010).
+pub async fn load_character_abilities(
+    pool: &Pool<MySql>,
+    char_id: &str,
+) -> Result<Vec<String>, String> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT ability_id FROM character_abilities WHERE char_id = ?")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Charakter-Fähigkeiten laden: {e}"))?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
 }

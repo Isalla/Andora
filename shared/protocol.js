@@ -15,6 +15,7 @@ export const C2S = {
   AUCTION_BUY: 9,  // {auction_id}
   HEARTBEAT: 10,
   PARENTAL: 11,  // {action, pin}  (In-Game-Elternpanel: extend/unlock_chat/unlock_voice)
+  ABILITY: 12,    // {ability_id, target_id?, x?, y?} Fähigkeit auslösen (Combat V3)
 }
 
 export const S2C = {
@@ -33,6 +34,8 @@ export const S2C = {
   PARENTAL_STATUS: 13,  // {remaining_seconds, blocked, buffer_until, warning, chat_allowed, voice_allowed, extended_used_today}
   PARENTAL_BLOCKED: 14, // {reason}     (blocked / buffer_expired -> Logout)
   PARENTAL_RESULT: 15,  // {ok, reason?, unlocked?, remaining_seconds?} (Antwort aufs Elternpanel)
+  ABILITY: 16,          // {caster_id, ability_id, outcome, reason?, target_id?} (Combat V3)
+  EFFECT: 17,           // {entity_id, action, effect_id, group, kind, duration_left_ms} (Combat V3)
 }
 
 // Renderer-Auswahl auf dem Client, wenn RENDER_CAP überschritten:

@@ -17,7 +17,7 @@
 
 ## Verzeichnisse
 - `shared/`   – Protokoll + Definitionsdaten (Client UND Server lesen); engineunabhängig zu pflegen, nicht unnötig an Godot-spezifische Darstellungsdetails koppeln – Realm liefert Spielzustand/Informationen, Client entscheidet über deren Darstellung (`Mehrere_Offizielle_Clients.md`)
-- `i18n/`     – Sprache-JSONs (de, en, ...), beide Seiten teilen
+- `i18n/`     – Sprache-JSONs (de, en, zh-Hans, zh-Hant, ...), beide Seiten teilen
 - `src/realm-rs/`   – Realm-Server in Rust (Zielimplementierung; Autorität: Combat, Loot, AH, NPC-AI via Coordinator/KI-Provider (lokal: Ollama)). Genau eine DB (`realm_state_<realm>`), Einstieg per Handoff. Bauen/Testen mit der vorhandenen Toolchain (`~/.cargo`).
 - `src/realm/`      – Realm-Server (Node.js/TypeScript) als ÜBERGANGSSTAND: lauffähig, wird schrittweise nach `src/realm-rs/` migriert ( Alt-Annahmen: character-/world_data-Pools, Session statt Handoff). Nicht ausbauen.
 - `src/api/`        – Go-API-/Auth-Service (einziger Service mit Auth-DB-Zugriff; Zielplattformen arm64 + amd64)
@@ -34,8 +34,11 @@
 - Auktionshaus global (quer über Kanäle, Server-Layer + MariaDB)
 
 ## i18n
-- Alle Text-Keys in `i18n/<lang>.json`, Client UND Server laden dieselben Dateien
+- Alle Text-Keys in `i18n/<locale>.json`, Client UND Server laden dieselben Dateien
 - Niemals harte Texte im Code: immer `t("key", args)`
+- Unterstützte Locales: `de`, `en` (Master), `zh-Hans` (简体中文), `zh-Hant` (繁體中文)
+- `zh-Hans` und `zh-Hant` sind getrennte Lokalisierungen, keine automatische Schriftkonvertierung
+- Eigennamen und noch nicht festgelegte Fantasy-Begriffe bleiben konsistent; Grundlagen und Glossar-Vorbereitung: `i18n/README.md`
 
 ## Expansion
 - Dateien mit Präfix exp1_, exp2_ usw. gehören zu geplanten Erweiterungen und sind keine Anforderungen an das Grundspiel. Sie dürfen nur implementiert werden, wenn die entsprechende Expansion ausdrücklich als aktueller Entwicklungsumfang festgelegt wurde.

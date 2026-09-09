@@ -19,6 +19,7 @@ pub mod c2s {
     pub const AUCTION_BUY: i64 = 9; // (künftig)
     pub const HEARTBEAT: i64 = 10;
     pub const PARENTAL: i64 = 11; // {action, pin}
+    pub const ABILITY: i64 = 12; // {ability_id, target_id?, x?, y?} (Combat V3)
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -41,6 +42,8 @@ pub mod s2c {
     pub const PARENTAL_STATUS: i64 = 13;
     pub const PARENTAL_BLOCKED: i64 = 14; // {reason}
     pub const PARENTAL_RESULT: i64 = 15; // {ok, reason?, unlocked?, ...}
+    pub const ABILITY: i64 = 16; // {caster_id, ability_id, outcome, reason?, target_id?} (Combat V3)
+    pub const EFFECT: i64 = 17; // {entity_id, action, effect_id, group, kind, duration_left_ms} (Combat V3)
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -80,6 +83,7 @@ mod tests {
         assert_eq!(c2s::CHAT, 5);
         assert_eq!(c2s::HEARTBEAT, 10);
         assert_eq!(c2s::PARENTAL, 11);
+        assert_eq!(c2s::ABILITY, 12);
         assert_eq!(s2c::WELCOME, 1);
         assert_eq!(s2c::SPAWN, 2);
         assert_eq!(s2c::DESPAWN, 3);
@@ -89,6 +93,8 @@ mod tests {
         assert_eq!(s2c::PARENTAL_STATUS, 13);
         assert_eq!(s2c::PARENTAL_BLOCKED, 14);
         assert_eq!(s2c::PARENTAL_RESULT, 15);
+        assert_eq!(s2c::ABILITY, 16);
+        assert_eq!(s2c::EFFECT, 17);
     }
 
     #[test]

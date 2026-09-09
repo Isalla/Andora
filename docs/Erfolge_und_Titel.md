@@ -87,6 +87,8 @@ Titel sind grundsätzlich **kosmetisches Prestige**, keine Kampfvorteile.
 
 Solange keine explizite Ausnahme in der späteren Implementierung definiert wird, bleiben Titel rein repräsentativ.
 
+Titel, die freiwillige Unterstützung des Projekts anerkennen, folgen derselben Regel: Freiwillige Spenden dürfen ausschließlich nicht spielrelevante Anerkennung geben. Dafür ist ein optionaler, rein kosmetischer Ingame-Unterstützer-Titel vorgesehen (siehe `Monetarisierung_und_Donations.md`). Er erzeugt keinen Bonus, keinen Vorteil und keinen besonderen Status.
+
 ---
 
 # 5. Beispiel für gestufte Erfolge

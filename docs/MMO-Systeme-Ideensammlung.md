@@ -45,6 +45,8 @@ Später mögliche Themen:
 * Spezialisierungen
 * Fähigkeitenkombinationen
 
+Die verbindlichen Grundregeln des Ability-Systems (Ausführungsarten, Mana/Cooldown, AoE, Buffs/Debuffs, Waffen-Effekte, Fähigkeitsqualität, Meisterschaft) stehen in `Ability-System.md`. Die einzige konkret definierte klassenübergreifende Combo-/Synergie-Mechanik ist das Heldenrad (verbindliche Grundstruktur in `Heldenrad.md`); weitere normale Skill-Kombos bleiben eine spätere Designentscheidung.
+
 ---
 
 # Buffs, Debuffs und Statuseffekte
@@ -513,6 +515,8 @@ Mögliche Funktionen:
 * regionale oder globale Märkte
 
 Die genaue Wirtschaftsstruktur wird später entschieden.
+
+Alle Handels- und Wirtschaftssysteme sind ausschließlich Ingame-Systeme mit Ingame-Währung; es gibt keinen Bezug zu Echtgeld (verbindlich in `Monetarisierung_und_Donations.md`).
 
 ---
 

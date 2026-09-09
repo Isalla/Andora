@@ -347,7 +347,7 @@ Handwerksgegenstände sind nicht ausschließlich für den eigenen Charakter geda
 
 Findet beispielsweise ein Krieger ein seltenes Bogenrezept oder einen benötigten Rare-Rohstoff, muss er diesen nicht selbst verwenden.
 
-Rare-Rohstoffe, Rezepte und hergestellte Gegenstände können Bestandteil der Spielerwirtschaft werden.
+Rare-Rohstoffe, Rezepte und hergestellte Gegenstände können Bestandteil der Spielerwirtschaft werden. Seltene Fähigkeitsrezepte (für Fortgeschritten-2- und Meisterhaft-2-Fähigkeiten) gehören ebenfalls dazu und sollen wertvolle Auktionshaus-Waren werden (siehe `Ability-System.md` Abschnitt 8).
 
 Besonders hochwertige oder meisterhaft gefertigte Gegenstände können im **Auktionshaus (AH)** entsprechend hohe Preise erzielen.
 

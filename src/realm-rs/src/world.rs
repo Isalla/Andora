@@ -1,13 +1,15 @@
 // world — Spieler-Registry + AOFB-Tick (Port von src/realm world.ts).
 // Versand pro Spieler über einen MPSC-Kanal (Trennung Spielzustand /
 // Socket-IO; ohne echte Sockets testbar). Disconnect = Kanal zu.
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 
 use crate::combat::CombatState;
+use crate::combat::ability::ActiveCast;
+use crate::combat::effects::Effect;
 use crate::protocol::{s2c, Frame};
 
 /// Autoritativer Spieler-State auf dem Server. Felder hp/max_hp/lang
@@ -43,6 +45,17 @@ pub struct Player {
     pub weapon_skill: u32,
     /// Aktueller Auto-Angriff (Combat V1): None = nicht im Kampf.
     pub combat: Option<CombatState>,
+    /// Mana (Fähigkeits-Ressource, Ability-System.md §2).
+    pub mana: i32,
+    pub max_mana: i32,
+    /// Aktive Effekte (Buffs, Debuffs, DoT/HoT, Control, Combat V3).
+    pub effects: Vec<Effect>,
+    /// Fähigkeits-Cooldowns: ability_id → ready_at (SystemTime).
+    pub cooldowns: BTreeMap<String, std::time::SystemTime>,
+    /// Aktiver Cast-Zustand (Combat V3): None = kein Cast aktiv.
+    pub active_cast: Option<ActiveCast>,
+    /// Gelernte Fähigkeiten (ability_id).
+    pub learned_abilities: HashSet<String>,
 }
 
 impl Player {
@@ -310,6 +323,12 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: std::collections::BTreeMap::new(),
+                active_cast: None,
+                learned_abilities: HashSet::new(),
             },
             rx,
         )

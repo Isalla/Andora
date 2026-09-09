@@ -4,6 +4,8 @@
 
 Jeder neue Charakter beginnt als **Abenteurer**.
 
+Reguläre Klassenfähigkeiten werden beim vorgesehenen Level automatisch erlernt und stehen sofort auf Lehrling 1 zur Verfügung (siehe `Ability-System.md` Abschnitte 8–10). Rassenfähigkeiten sind davon getrennt und können außerhalb des Ability-Qualitätssystems stehen.
+
 Im weiteren Spielverlauf entscheidet sich der Spieler für eine von vier Grundklassen:
 
 * **Kämpfer**
@@ -14,6 +16,8 @@ Im weiteren Spielverlauf entscheidet sich der Spieler für eine von vier Grundkl
 Jede Grundklasse besitzt anschließend zwei Unterklassen. Die Grundklasse legt die grundlegende Rolle und Spielweise fest, während die Unterklasse diese Rolle spezialisiert.
 
 Die Wahl der Klasse ist **nicht an Rasse oder Fraktion gebunden**. Jede spielbare Rasse kann grundsätzlich jede Klasse wählen. Der Spieler entscheidet selbst, wie er seinen Charakter spielen möchte.
+
+Die klassenübergreifende Kampffähigkeit des Heldenrads baut auf dieser Rollenidentität auf: Jede Klasse soll innerhalb ihrer eigenen Rolle agieren können (siehe `Heldenrad.md`).
 
 ---
 

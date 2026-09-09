@@ -77,6 +77,8 @@ All equipment (weapons, armor, accessories) follows a tier-based system that ali
 - Tier 11: Level 111+
 
 ### Backpack Expansion System
+Backpack expansions are earned through in-game progression (level tiers). They are never purchased with real money or with gold; expansion is tied to player level and remains an in-game progression reward (see `Monetarisierung_und_Donations.md`).
+
 The system allows players to expand their inventory through:
 - Tier 0 backpacks (4 slots) - Level 1-10
 - Tier 1 backpacks (8 slots) - Level 11-20

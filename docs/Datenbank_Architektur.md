@@ -714,6 +714,8 @@ Grundsatz:
 > Der Coordinator verarbeitet KI.
 > Der Realm verwaltet das Spiel.
 
+NPC-Erinnerungen, persönliche Beziehungen und Shared Knowledge werden nicht in Realm-Datenbanken gespeichert, sondern im Coordinator in einem separaten dateibasierten persistenten Speicherbereich. Der Realm übermittelt dem Coordinator über die dafür vorgesehene Schnittstelle die für Erinnerungen relevanten Spielzustände und Fakten. Details: `Ki-NPC.md` (Abschnitt 0) und `Coordinator.md` (§28.1).
+
 ---
 
 ## 17. Mehrere technische Realm-Prozesse

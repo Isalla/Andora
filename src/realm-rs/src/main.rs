@@ -101,6 +101,12 @@ async fn async_main() -> Result<(), String> {
 
     let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);
     let persist_pool = pool.clone();
+    // Ability-Registry (Content, Migration 010) für den Tick.
+    let mut ability_registry = combat::ability::AbilityRegistry::new();
+    for row in db::load_ability_definitions(&persist_pool).await? {
+        ability_registry.register(combat::ability::build_ability_def(&row));
+    }
+    log::info!("{} Ability-Definitionen geladen", ability_registry.defs.len());
     let ticker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         let mut last_persist = std::time::Instant::now();
@@ -123,6 +129,14 @@ async fn async_main() -> Result<(), String> {
                 &combat_cfg,
                 &npc_cfg,
                 &mut combat_rng,
+                now,
+                wall_now,
+                tick_ms,
+                aofb,
+            );
+            combat::ability::ability_tick(
+                &mut world,
+                &ability_registry,
                 now,
                 wall_now,
                 tick_ms,

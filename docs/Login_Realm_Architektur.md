@@ -669,6 +669,8 @@ Die Webseite erhält keine direkten Zugangsdaten zur Account-Datenbank.
 
 Bei einer Kompromittierung des Webservers sollen dadurch keine unmittelbaren Datenbank-Zugangsdaten für die Account-Datenbank verfügbar sein.
 
+Zur späteren Webseite gehört gemäß `Monetarisierung_und_Donations.md` eine freiwillige Möglichkeit zur finanziellen Unterstützung des Projekts (Donation). Diese ist ausdrücklich kein Shop und keine Gameplay-Monetarisierung; Zahlungsanbieter, Beträge, technische Umsetzung und organisatorische/rechtliche Ausgestaltung sind noch nicht festgelegt.
+
 ---
 
 # 19. Sicherheitsprinzip

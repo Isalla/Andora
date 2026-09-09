@@ -429,8 +429,10 @@ Mögliche zusätzliche Regeln sind:
 * Handel,
 * Auktionshaus,
 * Gildenbeitritt,
-* Käufe oder Echtgeldfunktionen,
+* Käufe (ausschließlich Ingame-Käufe mit Ingame-Währung),
 * weitere soziale Funktionen.
+
+Spielbezogene Echtgeldfunktionen (Kauf von Inhalt, Fortschritt, Währung oder sonstigen Vorteilen gegen Echtgeld) existieren in Andora nicht und sind als Thema der Elternkontrolle nicht vorgesehen (verbindlich in `Monetarisierung_und_Donations.md`). Die spätere, auf der offiziellen Andora-Website geplante freiwillige Donation-Möglichkeit ist eine nicht-spielbezogene Unterstützungsleistung und gehört ebenfalls nicht zu den Regeln der Elternkontrolle.
 
 Diese Funktionen gehören noch nicht zwingend zur ersten Implementierung.
 

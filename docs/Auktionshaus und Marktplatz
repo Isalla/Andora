@@ -279,6 +279,8 @@ Damit dient der Briefkasten der Zustellung von Gegenständen, während Geld inne
 
 > **Der Marktplatz besitzt ein eigenes Gelddepot des Spielers. Verkäufe füllen das Depot, Käufe verwenden es.**
 
+Das AH-Depot ist ausschließlich Ingame-Geld (Gold, Kupfer, Silber). Es kann nicht mit Echtgeld aufgeladen werden, und Guthaben oder Gegenstände fließen nie in oder aus Echtgeld (verbindlich in `Monetarisierung_und_Donations.md`).
+
 Reicht das Guthaben für ein Kaufgesuch nicht aus, wird dieses pausiert und kann automatisch weiterlaufen, sobald durch Verkäufe oder Einzahlungen wieder genügend Marktguthaben vorhanden ist.
 
 # Asynchroner Handel und faire Spielzeit
@@ -475,6 +477,8 @@ Die persönliche Marktübersicht besitzt ausschließlich **Lesezugriff**.
 * Gegenstände aus dem Briefkasten genommen werden
 
 Alle spielverändernden Aktionen müssen weiterhin im Andora-Spielclient durchgeführt werden.
+
+Diese Einschränkungen gelten ausschließlich für Auktionshaus- und Marktfunktionen. Sie schließen andere eigenständige Webseiten-Funktionen – wie die spätere freiwillige Donation-Möglichkeit (verbindlich in `Monetarisierung_und_Donations.md`) – nicht aus.
 
 ---
 

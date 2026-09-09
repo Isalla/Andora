@@ -27,6 +27,106 @@ Für Kampfverhalten von NPCs/Monstern gelten ergänzend die verbindlichen Gegner
 
 ---
 
+# 0. Erinnerungs- und Beziehungskonzept
+
+## Grundprinzip
+
+NPC-Erinnerungen werden beim Coordinator persistent gespeichert, nicht nur im RAM oder LLM-Kontext.
+
+Ein Server- oder Coordinator-Neustart darf Erinnerungen nicht verlieren.
+
+Die Speicherung erfolgt dateibasiert, da der Coordinator weiterhin keinen DB-Zugriff erhält.
+
+Erinnerungsdaten liegen ausdrücklich nicht im bestehenden Queue-Ordner, sondern in einem separaten persistenten Speicherbereich.
+
+## Stabile interne IDs
+
+Dateien und Speicherpfade verwenden stabile interne IDs, keine Spieler- oder Charakternamen als Dateinamen oder primäre Identität.
+
+Charaktere werden über Character-IDs identifiziert.
+
+NPCs innerhalb persönlicher Erinnerungen über NPC-IDs.
+
+Namensänderungen dürfen bestehende Erinnerungen und Beziehungen nicht zerstören.
+
+## Persönliche Erinnerungen
+
+Pro Character-ID existiert eine persistente persönliche Erinnerungsstruktur.
+
+Darin können alle NPCs aufgeführt werden, mit denen dieser Charakter tatsächlich Kontakt hatte.
+
+Pro NPC können unter anderem individueller Beziehungsstatus und relevante gemeinsame Erinnerungen gespeichert werden.
+
+Jeder Charakter besitzt zu jedem NPC seinen eigenen unabhängigen Beziehungsstatus.
+
+Beziehungen verschiedener Charaktere werden nicht zusammengelegt.
+
+Erinnerungen dürfen Verknüpfungen zwischen bekannten Personen enthalten, zum Beispiel „Charakter A sagt, Charakter B sei sein Vater".
+
+Solche Aussagen müssen als Aussage bzw. Erinnerung behandelt werden und dürfen nicht automatisch zu objektiver Weltwahrheit werden.
+
+## Beziehungen zwischen Personen
+
+Ein NPC darf seine persönlichen Erinnerungen an eine erwähnte Person abrufen.
+
+Beispiel: Ein Spieler erwähnt seinen Vater Bandalor. Kennt der Schmied Bandalor, dürfen dessen persönliche Erinnerungen und sein Beziehungsstatus die Antwort beeinflussen.
+
+Die Beziehung zum Sohn bleibt trotzdem vollständig unabhängig.
+
+Ein NPC kann einem bekannten Spieler später von Begegnungen mit dessen verknüpften Angehörigen oder Bekannten erzählen.
+
+## Shared Knowledge
+
+Shared Knowledge wird getrennt von persönlichen NPC-Erinnerungen gespeichert, ebenfalls persistent und nach Character-ID organisiert.
+
+Es enthält nur allgemein erzählbares Wissen oder Ruf über einen Charakter, keine erfundenen persönlichen Begegnungen.
+
+Beispiele: lange in einer Region unterwegs, als tapfer bekannt, bedeutende Taten, Beteiligung an bekannten Ereignissen, bekannter Handwerker, seit langer Zeit nicht mehr gesehen.
+
+Nicht jede Aktivität eines Spielers wird automatisch Shared Knowledge.
+
+NPCs, die einen Charakter nie persönlich getroffen haben, können dadurch trotzdem von ihm gehört haben.
+
+Sie müssen sprachlich zwischen persönlicher Bekanntschaft und gehörtem bzw. allgemeinem Wissen unterscheiden.
+
+## Verbreitung von Shared Knowledge
+
+Allgemeines Wissen ist nicht automatisch jedem NPC bekannt.
+
+Seine plausible Verbreitung kann unter anderem von Fraktion, Region sowie Bedeutung oder Bekanntheit des Charakters abhängen.
+
+Ein lokal bekannter Charakter kann einer anderen Fraktion völlig unbekannt sein; eine weithin bekannte Persönlichkeit kann auch dort als Name oder Geschichte bekannt sein.
+
+Die genauen Regeln und Formeln dafür bleiben vorerst offen.
+
+## Langfristige Weltgeschichte
+
+Erinnerungen können auch nach langer Inaktivität eines Charakters erhalten bleiben.
+
+Dadurch können ehemalige Spieler später Teil der erzählten Geschichte eines Realms werden, ohne dass Entwickler dafür feste Lore-Dialoge schreiben müssen.
+
+Persönliche NPC-Erinnerungen und Shared Knowledge müssen dabei klar unterscheidbar bleiben.
+
+## KI-Kontext
+
+Das LLM muss nicht sämtliche Erinnerungen permanent im Kontext halten.
+
+Der Coordinator ermittelt für eine konkrete Unterhaltung nur die relevanten Erinnerungen und stellt diese der KI bereit.
+
+Persistenter Speicher ist die Grundlage; RAM darf später lediglich als Cache oder Index dienen.
+
+Ein Verlust des RAM-Caches darf keinen Verlust der Erinnerungen verursachen.
+
+## Realm-Grenze
+
+Der Coordinator erhält weiterhin keinerlei direkten DB-Zugriff.
+
+Spielzustände oder Fakten, die für Erinnerungen benötigt werden, müssen ihm über die dafür vorgesehene Realm- oder Coordinator-Schnittstelle übermittelt werden.
+
+Die KI darf unbekannte Weltfakten nicht eigenmächtig zu objektiver Wahrheit erklären.
+
+---
+
 # Sehr wichtige Architekturregel
 
 ## Keine große NPC-Datei bauen
@@ -136,6 +236,12 @@ Player: 5821
 Relationship: 78
 ```
 
+Jeder Charakter besitzt zu jedem NPC seinen eigenen unabhängigen Beziehungsstatus.
+
+Beziehungen verschiedener Charaktere werden nicht zusammengelegt.
+
+Beispiel: Hat Spieler A eine gute Beziehung zum Schmied Borin und Spieler B eine schlechte, wirkt sich dies unabhängig voneinander aus.
+
 Die Beziehung darf später durch verschiedene Ereignisse beeinflusst werden, beispielsweise:
 
 * häufige Einkäufe
@@ -206,6 +312,12 @@ Ein NPC darf nur auf Informationen reagieren, die:
 Die Runtime-KI darf keine Fakten über die Welt erfinden.
 
 Wenn Borin nicht weiß, dass ein Spieler in einem Raid steckt, darf sein KI-Dialog diese Information nicht kennen.
+
+NPCs unterscheiden zwischen persönlich erlangtem Wissen und allgemein gehörtem Wissen (Shared Knowledge).
+
+Ein NPC, der einen Spieler nie persönlich getroffen hat, kann trotzdem von ihm gehört haben, zum Beispiel durch Gerüchte oder Nachrichten.
+
+Shared Knowledge wird getrennt von persönlichen Erinnerungen gespeichert und muss sprachlich klar davon unterschieden werden.
 
 ---
 
@@ -528,11 +640,18 @@ Beispielsweise:
 * aktive Reservierungen
 * wichtige Ereignisse
 
+Erinnerungen werden beim Coordinator in einem separaten persistenten Speicherbereich dateibasiert gespeichert, nicht in der Realm-Datenbank.
+
+Der Coordinator besitzt weiterhin keinen direkten Datenbankzugriff.
+
+Dateien verwenden stabile interne IDs, keine Spielernamen.
+
+Beispielsweise:
+
+* persönliche Erinnerungen: `memories/characters/<character_id>/npcs/<npc_id>.json`
+* Shared Knowledge: `memories/characters/<character_id>/shared_knowledge.json`
+
 Temporäre Werte müssen nicht zwangsläufig dauerhaft gespeichert werden.
-
-Nutze das bestehende Datenbanksystem, wenn möglich.
-
-Keine zweite Datenbankarchitektur parallel aufbauen.
 
 ---
 

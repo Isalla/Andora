@@ -10,6 +10,28 @@ Der Schwerpunkt liegt nicht nur auf klassischen MMORPG-Systemen wie Quests, Craf
 
 ---
 
+## Grundsatz: Keine Monetarisierung
+
+Andora ist vollständig kostenlos spielbar und wird nicht auf Geldverdienen durch das Spiel ausgerichtet.
+
+Ausdrücklich ausgeschlossen sind:
+
+* kaufbare Items, Ausrüstung oder Ingame-Währung gegen Echtgeld
+* XP-, Loot- oder Progressions-Booster gegen Echtgeld
+* bezahlbare Komfort-, Inventar- oder Charaktervorteile
+* exklusive Inhalte, Charaktere oder Fähigkeiten gegen Echtgeld
+* Pay-to-Win oder Pay-for-Progress
+
+Freiwillige Spenden sind erlaubt. Sie dürfen ausschließlich nicht spielrelevante Anerkennung geben, zum Beispiel eine Donator-Kennzeichnung auf der Website oder ein optionaler, rein kosmetischer Ingame-Titel.
+
+Die offizielle Andora-Website soll später eine freiwillige Möglichkeit zur finanziellen Unterstützung des Projekts anbieten. Diese ist ausdrücklich kein Shop und keine Gameplay-Monetarisierung; Zahlungsanbieter, Beträge, technische Umsetzung und organisatorische/rechtliche Ausgestaltung sind noch nicht festgelegt.
+
+Ingame-Wirtschaft (Gold, Händler, Auktionshaus, Handel, Crafting) bleibt ein reguläres Spielsystem.
+
+Die verbindliche Definition steht in `Monetarisierung_und_Donations.md`.
+
+---
+
 # 1. Projekt
 
 **Name:** Andora
@@ -74,6 +96,7 @@ Dazu gehören unter anderem:
 * Spielerpositionen
 * NPC-Positionen
 * Combat
+* Fähigkeiten / Ability-System (siehe `Ability-System.md`)
 * Items
 * Inventory
 * Quests
@@ -194,6 +217,8 @@ NPCs können unter anderem besitzen:
 * Reisen
 * Erinnerungen an relevante Ereignisse
 
+NPC-Erinnerungen werden beim Coordinator persistent gespeichert und gehen bei einem Neustart nicht verloren. Jeder Charakter besitzt zu jedem NPC seinen eigenen unabhängigen Beziehungsstatus. Zusätzlich existiert Shared Knowledge, das allgemein erzählbares Wissen über einen Charakter enthält, getrennt von persönlichen Erinnerungen. Details: `Ki-NPC.md`.
+
 NPCs können auf Spieler und andere NPCs reagieren.
 
 ---
@@ -217,6 +242,8 @@ Informationen können beispielsweise entstehen durch:
 * berufliche Informationsquellen
 
 Dadurch können unterschiedliche NPCs unterschiedliche Kenntnisse über dieselbe Welt besitzen.
+
+NPCs unterscheiden zwischen persönlich erlangtem Wissen und allgemein gehörtem Wissen (Shared Knowledge). Ein NPC, der einen Spieler nie persönlich getroffen hat, kann trotzdem von ihm gehört haben, zum Beispiel über Fraktions-, Regional- oder Bekanntheitsgrenzen hinweg. Details: `Ki-NPC.md`.
 
 ---
 
@@ -322,6 +349,8 @@ Rucksäcke können unterschiedliche Kapazitäten besitzen.
 Spieler können gemeinsam Inhalte bestreiten.
 
 Im Grundspiel beträgt die maximale Größe einer normalen Spielergruppe **4 Spieler**. Mit Exp1 wird diese maximale Gruppengröße auf **5 Spieler** erhöht (siehe `exp1_Unterwelt.md`, Abschnitt 56). Raidgrößen und Raidgruppen werden dadurch nicht neu definiert.
+
+Die Gruppen- und Raidstruktur ist auch Bezugspunkt für das Heldenrad (siehe `Heldenrad.md`): Das Heldenrad besitzt kein raidweites gemeinsames Heldenrad, sondern arbeitet in normalen Gruppen innerhalb der jeweiligen Gruppe.
 
 Geplant sind:
 
@@ -499,6 +528,8 @@ Godot (Referenzclient)
 ```
 
 Diese Trennung soll ermöglichen, Inhalte später zu erweitern, ohne zentrale Servermechaniken ständig verändern zu müssen.
+
+Fähigkeiten, Qualitätswerte und Meisterschaftsvarianten werden Lua- bzw. datengetrieben definiert; der Realm bleibt autoritativ (siehe `Ability-System.md` Abschnitt 14).
 
 Weitere offizielle Clients (Browser, möglicher Unreal-PC-Client, weitere) folgen derselben Trennung; Details in `Mehrere_Offizielle_Clients.md`.
 

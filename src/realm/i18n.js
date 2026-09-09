@@ -3,7 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 
-const LANGS = ["en", "de"];
+const LANGS = ["en", "de", "zh-Hans", "zh-Hant"];
 const tables = {};
 
 function loadAll() {

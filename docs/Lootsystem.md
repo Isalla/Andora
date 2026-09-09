@@ -186,6 +186,21 @@ Diese Werte werden bei der Implementierung definiert und anschließend durch Tes
 
 Neue Ideen können dadurch später integriert werden, ohne das grundlegende Lootkonzept neu entwickeln zu müssen.
 
+## Fähigkeitsbücher, Schriftrollen und Rezepte als Loot
+
+Fähigkeitsbücher und Schriftrollen sind eine eigene Loot-Kategorie (siehe `Ability-System.md` Abschnitt 8):
+
+* **Lehrling 4:** als Loot von normalen Monstern erhältlich (einfache Qualität)
+* **Fortgeschritten Stufe 1:** als Buch in Truhen auffindbar
+* **Meisterhaft Stufe 1:** in besonders hochwertigen / großen Truhen auffindbar
+* **Legendär:** insbesondere Boss-/Raidboss-Loot; extrem selten
+
+Seltene Herstellungsrezepte (einschließlich Fähigkeitsrezepte) können als Loot gefunden werden und sind handelbare Wirtschaftsgüter.
+
+Fähigkeitsbücher und Rezepte sind grundsätzlich handelbar. Binding erfolgt nur, wenn die jeweilige Gegenstandsdefinition dies explizit vorsieht.
+
+---
+
 ## Gebundene Gegenstände
 
 Bestimmte besonders wertvolle Gegenstände können beim Erhalt an den Charakter gebunden werden.

@@ -146,11 +146,11 @@ Der Rüstungswert selbst darf über den für die Klasse notwendigen Wert hinausg
 
 Fähigkeiten werden vom Spieler aktiv über seine Aktionsleiste ausgelöst.
 
-Jede Fähigkeit besitzt ihren eigenen Cooldown.
+Jede Fähigkeit besitzt ihren eigenen Cooldown. Andora besitzt keinen globalen Cooldown. NPC- und Monsterfähigkeiten verwenden ebenfalls eigene Cooldowns; die normale Angriffs-Duration (Waffenduration für den automatischen Grundangriff) ist davon getrennt.
 
-Weitere Eigenschaften einer Fähigkeit werden nicht global durch das Kampfsystem festgelegt, sondern bei der jeweiligen Fähigkeit definiert.
+Die drei Ausführungsarten (Sofortfähigkeit, Fähigkeit mit Castzeit, Kanalisierung), Mana/Cooldown-Kombinationen, Cast-Unterbrechung, AoE-Grundarten, freundliche Ziele und Heilung, Buffs/Debuffs/CC, DoT/HoT und Waffen-Effekte, Fähigkeitsqualität und Meisterschaft sowie die Lua-/Realm-Trennung sind im **Ability-System** definiert (siehe `Ability-System.md`).
 
-Dadurch können spätere Klassen und Fähigkeiten unterschiedliche Mechaniken verwenden, ohne das Grundkampfsystem verändern zu müssen.
+Spieler und NPCs verwenden grundsätzlich dasselbe Ability-Grundsystem; Content/Lua definiert die jeweiligen Werte und Regeln, der Realm führt sie autoritativ aus (siehe auch Abschnitte 18–21).
 
 ---
 
@@ -398,6 +398,24 @@ Die Schwierigkeit ist contentabhängig. Es gibt keine separate Combat-Engine pro
 
 > **Stand:** Die Abschnitte 18–21 sind als Combat V2 **umgesetzt** (Realm-Binär); ein gemeinsamer, realm-autoritativer Kampfkern für Spieler UND NPC/Monster, Content-/DB-Schicht (Migration 009) mit Probe-Spawnzone 0 für den vertikalen Schnitt. Siehe auch `Projekt-Status.md` und zum Boss-System `Boss-System.md`.
 
+## 22. Fähigkeiten/Abilities als Combat V3
+
+Das **Ability-System** (Konzept: `Ability-System.md` §§1–16) ist als Combat V3 **umgesetzt** und folgt derselben Architekturgrenze: Der Rust-Kern ist rein mechanisch und contentunabhängig, die Fähigkeiten selbst sind Daten (DB-Tabelle `ability_definitions`, Migration `010_combat_v3.sql`).
+
+Umsetzungsstand in Kürze:
+
+* **Ausführungsarten:** `instant` und `cast` (mit `cast_time_ms`); `channel` verhält sich vorläufig wie `cast`.
+* **Ressourcen/Cooldown:** Mana wird beim Cast-Start abgezogen, Cooldown startet erst nach erfolgreicher Ausführung, keine Manarückgabe bei Unterbrechung, kein globaler Cooldown. Persistente Cooldowns (`cooldown_persistent`) sind über die Schnittstelle vorbereitet; die Füllung des persistenten Sets bei Tod/Logout folgt später (`on_death`-TODO).
+* **Cast-Unterbrechung:** durch Bewegung, Stun, Silence, Tod, Reichweiten- oder Sichtlinien-Verlust; Stun/Silence/Root blockieren Cast-Start bzw. Bewegung über das Effektmodell.
+* **Effekte:** Buffs/Debuffs/Stun/Silence/Root/Slow mit Gruppenlogik (gleiche Gruppe ersetzt, unterschiedliche parallel), DoT/HoT mit Tick-Intervall (`tick_ms`, `next_tick_at`), Entfernung aller Effekte beim Tod; Waffen-Effekte folgen der Quelle-Sichtweise.
+* **AoE:** `single`, `target_radius`, `caster_radius`, `ground`; Zielauswahl über die Welt, kein künstliches Ziellimit.
+* **Events:** Realm-autoritative S2C-Frames für Cast- und Effektzustände (ABLITY/EFFECT), Instants senden ihre Wirkung sofort.
+* **Programmstruktur:** modulares Kampf-Modul unter `src/realm-rs/src/combat/` (`ability.rs`, `effects.rs`, `cooldowns.rs`, `aoe.rs`, `events.rs`, `targeting.rs`), wiederverwendbar für Spieler, NPCs, Named und Bosse (Details: `Kampfsystem_V3_Wiederverwendung.md`).
+
+**Nicht Bestandteil von Combat V3** (bleiben offen): Claim/Ownership-Ability-Logik, Gruppensystem, Cleanse/Dispel, vollständige Channel-Regeln, Passive Fähigkeiten, Meisterschaft, Klassenfähigkeiten, endgültiges Balancing.
+
+> **Stand:** Combat V3 **umgesetzt** (Realm-Binär, 82 Unit-Tests grün); Probe-Fähigkeiten als Seed in Migration 010 (`fire_bolt`, `healing_light`, `soul_rend`, `frost_nova`, `choke`, `battle_shout`). NPC-Ausführung ihrer Lernfähigkeiten ist noch nicht verdrahtet und folgt mit den Boss-Fähigkeiten.
+
 ---
 
 # Abgrenzung zu anderen Systemen
@@ -422,16 +440,17 @@ Seit den Combat-V2-Festlegungen gehören außerdem dazu:
 
 Die Abschnitte 18–21 sind als Combat V2 umgesetzt; Details zur NPC-/Monster-Ebene stehen in `Projekt-Status.md`.
 
-Folgende Bereiche werden separat ausgearbeitet, ohne das Grundkampfsystem zu verändern:
+Folgende Bereiche sind mit Combat V3 umgesetzt oder werden separat ausgearbeitet, ohne das Grundkampfsystem zu verändern:
 
-* konkrete Fähigkeiten und deren Eigenschaften
+* das Ability-System mit konkreten Fähigkeiten, Ausführungsarten, Mana/Cooldown, Cast-Unterbrechung, AoE, Buffs/Debuffs, Waffen-Effekten (umgesetzt als Combat V3, Abschnitt 22 und `Ability-System.md`)
 * Klassenmechaniken und die konkrete Zuordnung von Haupt-/Nebenskills je Klasse
 * konkrete Schadens-, Duration-, Rüstungs- und Skill-Balancingwerte
 * Attribute und Kampfwerte
-* Gegner und deren Fähigkeiten
+* Gegner und deren Fähigkeiten (NPC-Ausführung der Fähigkeiten folgt mit den Boss-Fähigkeiten)
 * normale Bosse
 * Raids und Raidbosse
 * detaillierte PvP-Mechaniken
 * Loot und Belohnungen
+* das Heldenrad als besondere klassenübergreifende Kampffähigkeit (siehe `Heldenrad.md`)
 
 Dadurch bleibt das Grundkampfsystem einfach und kann von allen späteren Spielsystemen gemeinsam verwendet werden.

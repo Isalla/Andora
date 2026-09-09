@@ -14,7 +14,7 @@ Andora ist ein Fantasy-MMORPG. Die dauerhafte Spielwelt wird überwiegend als 2D
 * **Legacy/Transition:** `src/realm/` (Node.js/TypeScript) ist der ältere Realm-Stand, der aktiv bleibt, bis die Migration nach `src/realm-rs/` abgeschlossen ist; das aktuelle Admin-/Monitoring-Panel ist die PHP-Implementierung `web/andora-monitor/` (Node-`monitor/` ist Legacy-Referenz). Details: `docs/architecture.md`, `docs/monitoring_web_panel.md`.
 * **Datenbank:** MariaDB 10 (`auth`, `realm_state_<realm>` pro Realm mit statischen + dynamischen Realm-Daten; keine zentrale `world_data`, Charakterdaten liegen in `realm_state_<realm>`)
 * **Netzwerk:** WebSocket, serverautoritativ, 10-Hz-World-Tick
-* **Lokalisierung:** Deutsch und Englisch von Anfang an, später erweiterbar
+* **Lokalisierung:** Deutsch, Englisch, vereinfachtes Chinesisch (zh-Hans) und traditionelles Chinesisch (zh-Hant) von Anfang an; Clienttexte grundsätzlich nicht hart codiert, sondern über `i18n/` (Details in `i18n/README.md`)
 * **KI:** lokale KI-Dienste (Ollama / Sprachmodelle) für die dafür vorgesehenen Spielsysteme
 
 ## Verzeichnisse
@@ -83,6 +83,8 @@ Weitere technische Details befinden sich in der Dokumentation unter `docs/` (Ein
 Andora wird serverautoritativ entwickelt. Der Server bestimmt den verbindlichen Zustand der Spielwelt; der Client stellt diesen Zustand dar und verarbeitet die Benutzereingaben.
 
 Neue Systeme werden modular entwickelt und sollen vorhandene Komponenten wiederverwenden, anstatt parallele Implementierungen aufzubauen.
+
+Andora ist vollständig kostenlos spielbar und wird nicht auf Geldverdienen durch das Spiel ausgerichtet. Inhalt, Fortschritt und Vorteile werden nie gegen Echtgeld verkauft; freiwillige Spenden dürfen ausschließlich nicht spielrelevante Anerkennung geben (z. B. Donator-Kennzeichnung auf der Website, optionaler rein kosmetischer Ingame-Titel). Die offizielle Andora-Website soll später eine freiwillige Donation-Möglichkeit anbieten – ausdrücklich kein Shop und keine Gameplay-Monetarisierung; Zahlungsanbieter, Beträge, technische Umsetzung und organisatorische/rechtliche Ausgestaltung sind noch nicht festgelegt. Details in `docs/Monetarisierung_und_Donations.md`.
 
 ## Lizenz
 

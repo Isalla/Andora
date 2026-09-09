@@ -54,7 +54,7 @@ This document describes all properties and characteristics of items in the game 
 - Monster drops (quality based on monster level)
 - Quest rewards
 - Crafting results
-- Shop purchases
+- Shop purchases (ausschließlich Ingame-Händler, die Ingame-Währung annehmen; keine Echtgeld-Käufe, siehe `Monetarisierung_und_Donations.md`)
 
 ### Storage
 - Inventory slots

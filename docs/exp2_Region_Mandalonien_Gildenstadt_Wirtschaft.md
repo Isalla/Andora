@@ -12,6 +12,8 @@ Die Systeme werden möglichst nicht nachträglich künstlich reguliert, nur weil
 
 > **Die Systeme bleiben stabil – die Spielerwirtschaft reguliert sich innerhalb dieser Systeme selbst.**
 
+Die gesamte Gildenstadt-Wirtschaft ist ein Ingame-System: Stadtkasse, Steuern, Handel, Transport und Aufträge funktionieren ausschließlich mit Ingame-Währung. Es gibt keine Kopplung an Echtgeld (verbindlich in `Monetarisierung_und_Donations.md`).
+
 ---
 
 # 2. Gildenstadt als Wirtschaftssystem

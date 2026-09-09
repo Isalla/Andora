@@ -28,12 +28,21 @@ pub async fn serve(
     parental: SharedParental,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
+    // Ability-Registry aus Content-Schicht laden (Migration 010).
+    // Ein Ladefehler bricht den Start ab (kein halber Realm).
+    let mut registry = crate::combat::ability::AbilityRegistry::new();
+    let defs = db::load_ability_definitions(&db).await?;
+    for row in defs {
+        registry.register(crate::combat::ability::build_ability_def(&row));
+    }
+    log::info!("{} Ability-Definitionen geladen", registry.defs.len());
     let ctx = Arc::new(Ctx {
         cfg,
         db,
         auth,
         shared,
         parental,
+        registry,
     });
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -171,6 +180,9 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
         c2s::ATTACK => {
             handlers::handle_attack(&ctx.shared, conn_id, &data, &ctx.cfg.combat, &ctx.cfg.npc)
                 .await
+        }
+        c2s::ABILITY => {
+            handlers::handle_ability(ctx, conn_id, &data).await
         }
         c2s::CHAT => {
             handlers::handle_chat(
