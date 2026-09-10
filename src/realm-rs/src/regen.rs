@@ -151,6 +151,7 @@ mod tests {
 
     fn p(class: &str, level: u32, hp: i32, max_hp: i32, mana: i32, max_mana: i32) -> Player {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let status = crate::class::ClassStatus::from_db_name(class);
         Player {
             id: "t".into(),
             name: "t".into(),
@@ -168,6 +169,8 @@ mod tests {
             last_activity: std::time::Instant::now(),
             tx,
             char_class: class.into(),
+            class: status,
+            faction_transition: false,
             level,
             armor: 0,
             weapon_skill: 1,

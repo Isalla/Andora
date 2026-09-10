@@ -485,6 +485,8 @@ mod tests {
                 last_activity: Instant::now(),
                 tx,
                 char_class: class.into(),
+                class: crate::class::ClassStatus::from_db_name(class),
+                faction_transition: false,
                 level: 1,
                 armor: 0,
                 weapon_skill: 1,

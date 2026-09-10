@@ -244,6 +244,51 @@ Der maximale Ressourcenpool wächst separat über Charakter-/Klassenbasis, Attri
 
 ---
 
+## Technische Umsetzung (Rust-Realm, Stand)
+
+Die Klassenbasis ist typsicher im Rust-Realm umgesetzt
+(`src/realm-rs/src/class.rs`, `Character`, `Player`,
+Migration `012_class_progression.sql`):
+
+* **Startklasse:** Jeder neu angelegte Charakter beginnt als
+  **Adventurer** (`ClassStatus::Adventurer`, DB-Name `Adventurer`).
+* **Grundklassen:** `Fighter`, `Mage`, `Priest`, `Scout`
+  als `ClassStatus`-Varianten (keine Magic-Strings auf dem
+  Charakter; `char_class` bleibt als stabiles DB-Feld erhalten und wird
+  beim Laden tolerant zugeordnet, inkl. bestehender
+  Legacy-/deutscher/Unterklassen-Werte).
+* **Tutorial L1–8 (Klassen-Erprobung):** levelabgeleitet für
+  Adventurer (`tutorial_phase`): L1–2 `Fighter`, L3–4 `Scout`,
+  L5–6 `Priest`, L7–8 `Mage`. Technisch wechselt der Charakter NICHT;
+  es wird nur die jeweilige Grundklasse erlebt. Es gibt KEINE eigene
+  Schema-Spalte für die Phase.
+* **Klassenwahl ab L9:** permanent bei einem Klassentrainer
+  (`try_class_choice`: validiert Level ≥ 9, Grundklasse und
+  „einmalig gewählt“). `Adventurer` wird dauerhaft durch die gewählte
+  Grundklasse ersetzt; das Tutorial endet damit automatisch;
+  **kein Respec**, **keine spätere Unterklassen-Freischaltung**
+  (diese fehlt bewusst). Persistiert über `save_character_class`,
+  sodass die Wahl über Realm-Neustarts bleibt.
+* **Hauptattribute** (Stärke/Konstitution, Geschicklichkeit/Glück,
+  Intelligenz/Weisheit für Magier und Priester) sind als reine
+  **Klassenmetadaten** hinterlegt (`primary_attributes`); die konkrete
+  Verteilung folgt im Inhalt (Rassensystem/Ausrüstung), kein erfundenes
+  Start-Attributsystem.
+* **Level-10-Regel:** Im neutralen Startgebiet ist Level 10 das Maximum
+  für klassierte Charaktere (`NEUTRAL_MAX_LEVEL`); Adventurer dürfen
+  dort weiter leveln. Weiteres Leveln darüber erst nach Fraktionswahl
+  und Übergang in ein Fraktionsgebiet — vorbereitet als
+  Fraktions-Übergangs-Hook (`faction_transition`, Migration 012).
+  Das Fraktions-/Zonensystem selbst ist noch NICHT technisch vorhanden
+  (Hook nur, keine harte Sonderlösung).
+
+**Nicht umgesetzt (bewusst):** konkrete Tutorialquests,
+Klassentrainer-NPCs/Dialoge, vollständige Ability-Listen je Phase,
+fertige Starterausrüstung, Respec, spätere Unterklassen/Mastery,
+vollständiges Fraktionssystem, neues Gegner-/Aggrosystem.
+
+---
+
 ## Waffenbeherrschung und Haupt-/Nebenskills
 
 Die Klasse bestimmt, welche Waffen-/Kampfskills für sie **Hauptskills**, **Nebenskills** oder **nicht verwendbar** sind.

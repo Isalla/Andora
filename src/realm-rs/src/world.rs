@@ -36,8 +36,18 @@ pub struct Player {
     pub entities: HashSet<String>,
     pub last_activity: Instant,
     pub tx: mpsc::UnboundedSender<String>,
-    /// Klasse (char_class aus der DB; für Rüstungs-Caps im Kampf).
+    /// Klasse (char_class aus der DB).
     pub char_class: String,
+    /// Typsichere Klassenbasis (docs/Klassensystem.md): permanente
+    /// Grundklasse oder Adventurer; kanonischer Zustand für Tutorialphase,
+    /// Hauptattribute-Metadaten, L9-Wahl und L10-Progressions-Hook.
+    /// (Aus `char_class` abgeleitet; Tutorialphase L1–8 ist für Adventurer
+    /// levelabgeleitet, benötigt kein zusätzliches DB-Feld.)
+    pub class: crate::class::ClassStatus,
+    /// Fraktions-Übergangs-Hook (docs/Klassensystem.md, L10-Regel): true,
+    /// wenn der Charakter nach Fraktionswahl in ein Fraktionsgebiet
+    /// gewechselt ist; sonst false. Fraktions-/Zonensystem folgt technisch.
+    pub faction_transition: bool,
     pub level: u32,
     /// Aktueller Rüstungswert (relevante physische Rüstung).
     pub armor: i32,
@@ -348,7 +358,9 @@ mod tests {
                 entities: HashSet::new(),
                 last_activity: Instant::now(),
                 tx,
-                char_class: "Warrior".into(),
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
                 level: 1,
                 armor: 0,
                 weapon_skill: 1,

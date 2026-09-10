@@ -21,6 +21,11 @@ pub struct Character {
     pub level: u32,
     pub hp: i32,
     pub char_class: String,
+    /// Typsichere Klassenbasis (docs/Klassensystem.md); aus
+    /// `char_class` abgeleitet.
+    pub class: crate::class::ClassStatus,
+    /// Fraktions-Übergangs-Hook (L10-Regel; Fraktions-/Zonensystem folgt).
+    pub faction_transition: bool,
     pub armor: i32,
     pub mana: i32,
     pub mana_max: i32,
@@ -73,7 +78,7 @@ pub async fn open_pool(prefix: &str, cfg: &DbConfig) -> Result<Pool<MySql>, Stri
     Ok(pool)
 }
 
-/// DB-Zeile für `load_character` (18 Spalten; sqlx-Tupel-Limit ist 16,
+/// DB-Zeile für `load_character` (19 Spalten; sqlx-Tupel-Limit ist 16,
 /// daher strukturbasierte Zeile wie `NpcStateRow`).
 #[derive(Debug, Clone)]
 struct CharacterRow {
@@ -82,6 +87,7 @@ struct CharacterRow {
     level: i32,
     hp: i32,
     char_class: String,
+    faction_transition: i8,
     x: f64,
     y: f64,
     armor: i32,
@@ -106,6 +112,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
             level: row.try_get("level")?,
             hp: row.try_get("hp")?,
             char_class: row.try_get("char_class")?,
+            faction_transition: row.try_get("faction_transition")?,
             x: row.try_get("pos_x")?,
             y: row.try_get("pos_y")?,
             armor: row.try_get("combat_armor")?,
@@ -128,15 +135,16 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
-        "SELECT id, name, level, hp, char_class, pos_x, pos_y, combat_armor, mana, mana_max, \
-         race, strength, agility, intelligence, constitution, wisdom, luck, endurance \
-         FROM characters WHERE id = ?",
+        "SELECT id, name, level, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
+         mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
+         endurance FROM characters WHERE id = ?",
     )
     .bind(char_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Charakter laden: {e}"))?;
     if let Some(row) = row {
+        let class = crate::class::ClassStatus::from_db_name(&row.char_class);
         return Ok(Character {
             id: row.id.to_string(),
             name: row.name,
@@ -145,6 +153,8 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             level: row.level.max(0) as u32,
             hp: row.hp,
             char_class: row.char_class,
+            class,
+            faction_transition: row.faction_transition != 0,
             armor: row.armor,
             mana: row.mana,
             mana_max: row.mana_max.max(row.mana),
@@ -158,8 +168,12 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             endurance: row.endurance.max(1),
         });
     }
-    sqlx::query("INSERT INTO characters (name, race, char_class) VALUES (?, 'Mensch', 'Warrior')")
+    // Neuer Charakter beginnt als Abenteurer
+    // (docs/Klassensystem.md; Grundklassenwahl ab L9).
+    let class = crate::class::ClassStatus::Adventurer;
+    sqlx::query("INSERT INTO characters (name, race, char_class) VALUES (?, 'Mensch', ?)")
         .bind(char_id)
+        .bind(class.canonical_db_name())
         .execute(pool)
         .await
         .map_err(|e| format!("Charakter anlegen: {e}"))?;
@@ -170,7 +184,9 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         y: 0.0,
         level: 1,
         hp: 100,
-        char_class: "Warrior".to_string(),
+        char_class: class.canonical_db_name().to_string(),
+        class,
+        faction_transition: false,
         armor: 0,
         mana: 50,
         mana_max: 50,
@@ -515,4 +531,28 @@ pub async fn load_character_abilities(
             .await
             .map_err(|e| format!("Charakter-Fähigkeiten laden: {e}"))?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Persistiert die permanente Klassenwahl (L9) sowie den Fraktions-
+/// Übergang (L10-Hook) aus `char_class` (docs/Klassensystem.md). Fehler
+/// werden nur geloggt (wie save_position), damit kein Login abgebrochen
+/// wird. Hook für den noch ausstehenden Trainer-Flow (docs/Klassensystem.md).
+#[allow(dead_code)]
+pub async fn save_character_class(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    class: crate::class::ClassStatus,
+    faction_transition: bool,
+) {
+    if let Err(e) = sqlx::query(
+        "UPDATE characters SET char_class = ?, faction_transition = ? WHERE id = ?",
+    )
+    .bind(class.canonical_db_name())
+    .bind(faction_transition)
+    .bind(char_id)
+    .execute(pool)
+    .await
+    {
+        log::error!("saveCharacterClass {char_id}: {e}");
+    }
 }

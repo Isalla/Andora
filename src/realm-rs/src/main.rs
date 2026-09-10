@@ -7,6 +7,7 @@
 // Einstieg per Handoff statt reiner Session).
 mod attributes;
 mod auth_api;
+mod class;
 mod combat;
 mod config;
 mod db;
