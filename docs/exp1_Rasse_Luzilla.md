@@ -8,7 +8,7 @@ Sie sind deutlich kleiner als die anderen spielbaren Völker Andoras, besitzen d
 
 Ihre charakteristischen Attribute sind:
 
-* **Stärke**
+* **Geschicklichkeit**
 * **Ausdauer**
 
 ---
@@ -189,9 +189,9 @@ Diese Eigenschaft kann später besonders bei NPC-Dialogen und dem Beziehungssyst
 
 Die charakteristischen Attribute der Luzilla sind:
 
-### Stärke
+### Geschicklichkeit
 
-Ihr kompakter und kräftiger Körperbau macht körperliche Stärke zu einer ihrer natürlichen Eigenschaften.
+Ihr kompakter und kräftiger Körperbau macht körperliche Arbeit zur Selbstverständlichkeit; spielmechanisch liegt ihre natürliche Ausrichtung jedoch in Geschicklichkeit.
 
 ### Ausdauer
 
@@ -199,7 +199,9 @@ Das Leben unter der Erde, schwere körperliche Arbeit und ihre unwirtliche Heima
 
 Ihre beiden Kernattribute sind deshalb:
 
-> **Stärke + Ausdauer**
+> **Geschicklichkeit + Ausdauer**
+
+Die genaue Werteverteilung und erste Balancingwerte stehen in `Attribute_und_Regeneration.md`.
 
 ---
 

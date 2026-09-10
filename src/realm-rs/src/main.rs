@@ -5,6 +5,7 @@
 // Portiert nach dem Node.js/TypeScript-Übergangsstand (src/realm), ohne
 // dessen Alt-Architektur-Annahmen (keine character-/world_data-Pools;
 // Einstieg per Handoff statt reiner Session).
+mod attributes;
 mod auth_api;
 mod combat;
 mod config;
@@ -14,6 +15,7 @@ mod health;
 mod migrations;
 mod net;
 mod npc;
+mod regen;
 mod parental;
 mod protocol;
 mod world;
@@ -113,6 +115,7 @@ async fn async_main() -> Result<(), String> {
         loop {
             interval.tick().await;
             let mut world = tick_shared.lock().await;
+            world::world_regen_tick(&mut world, tick_ms);
             world::world_tick(&mut world, aofb);
             let now = std::time::Instant::now();
             let wall_now = std::time::SystemTime::now();

@@ -175,6 +175,14 @@ mod tests {
             effects: Vec::new(), cooldowns: std::collections::BTreeMap::new(),
             active_cast: None,
             learned_abilities: HashSet::new(),
+            sitting: false,
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 50,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
         };
         w.players.insert("a".into(), a);
 

@@ -224,24 +224,30 @@ Dieser Gegensatz ist ein wesentliches Merkmal ihrer visuellen Identität.
 
 Die primären rassischen Schwerpunkte der Mandalonier sind:
 
-## Geschick
+## Kraft
 
 Repräsentiert:
 
-* Beweglichkeit
-* Koordination
-* Präzision
-* schnelle Körperkontrolle
+* körperliche Wucht
+* Nahkampfstärke
+* Tragkraft
 
-## Glück
+## Konstitution
 
-Repräsentiert ihre zweite charakteristische Attributausrichtung.
+Repräsentiert:
+
+* Widerstandsfähigkeit
+* maximale Lebenspunkte
 
 Damit ergibt sich:
 
-> **Mandalonier: Geschick + Glück**
+> **Mandalonier: Kraft + Konstitution**
 
-Ihre große Körpergröße führt ausdrücklich nicht automatisch zu einer Stärke- oder Ausdauer-Spezialisierung.
+Aufgrund ihres großen und kräftigen Körperbaus besitzen Mandalonier eine **natürliche Tank-Tendenz**. Das ist ausdrücklich keine **Tank-Pflicht** und **keine Klassensperre**: Jede Rasse soll jede Klasse sinnvoll spielen können, und auch Mandalonier können jede Klasse wählen. Ihre Körpergröße und ihr überraschend agiler Bewegungsstil bleiben Teil ihrer Weltgeschichte und visuellen Identität.
+
+Details und erste Balancingwerte: `Attribute_und_Regeneration.md`.
+
+> **Hinweis:** Die frühere rassische Ausrichtung auf **Geschick + Glück** wird hiermit auf **Kraft + Konstitution** korrigiert (siehe `Attribute_und_Regeneration.md` Abschnitt 2).
 
 ---
 

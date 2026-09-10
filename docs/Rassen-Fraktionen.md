@@ -28,6 +28,8 @@ Aktuell sind folgende spielbare Rassen vorgesehen:
 
 Die genauen Eigenschaften, Kulturen und möglichen spielmechanischen Besonderheiten der einzelnen Rassen werden separat ausgearbeitet.
 
+Die aktuellen rassischen Attributschwerpunkte und die Regel „Jede Rasse soll jede Klasse sinnvoll spielen können" stehen verbindlich in `Attribute_und_Regeneration.md` (Abschnitt 2).
+
 ---
 
 # 3. Rasse ist keine Fraktion

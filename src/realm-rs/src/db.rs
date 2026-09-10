@@ -24,6 +24,16 @@ pub struct Character {
     pub armor: i32,
     pub mana: i32,
     pub mana_max: i32,
+    // Geladen (echte DB-Spalte); konkrete Rassensystem-Nutzung folgt (§2).
+    #[allow(dead_code)]
+    pub race: String,
+    pub strength: i32,
+    pub dexterity: i32,
+    pub intelligence: i32,
+    pub constitution: i32,
+    pub wisdom: i32,
+    pub luck: i32,
+    pub endurance: i32,
 }
 
 /// Verbindet den Pool und prüft die Verbindung (SELECT 1).
@@ -63,30 +73,89 @@ pub async fn open_pool(prefix: &str, cfg: &DbConfig) -> Result<Pool<MySql>, Stri
     Ok(pool)
 }
 
+/// DB-Zeile für `load_character` (18 Spalten; sqlx-Tupel-Limit ist 16,
+/// daher strukturbasierte Zeile wie `NpcStateRow`).
+#[derive(Debug, Clone)]
+struct CharacterRow {
+    id: i64,
+    name: String,
+    level: i32,
+    hp: i32,
+    char_class: String,
+    x: f64,
+    y: f64,
+    armor: i32,
+    mana: i32,
+    mana_max: i32,
+    race: String,
+    strength: i32,
+    dexterity: i32,
+    intelligence: i32,
+    constitution: i32,
+    wisdom: i32,
+    luck: i32,
+    endurance: i32,
+}
+
+impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
+    fn from_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(CharacterRow {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            level: row.try_get("level")?,
+            hp: row.try_get("hp")?,
+            char_class: row.try_get("char_class")?,
+            x: row.try_get("pos_x")?,
+            y: row.try_get("pos_y")?,
+            armor: row.try_get("combat_armor")?,
+            mana: row.try_get("mana")?,
+            mana_max: row.try_get("mana_max")?,
+            race: row.try_get("race")?,
+            strength: row.try_get("strength")?,
+            dexterity: row.try_get("agility")?,
+            intelligence: row.try_get("intelligence")?,
+            constitution: row.try_get("constitution")?,
+            wisdom: row.try_get("wisdom")?,
+            luck: row.try_get("luck")?,
+            endurance: row.try_get("endurance")?,
+        })
+    }
+}
+
 /// Lädt einen Charakter; erzeugt ihn bei Bedarf (Übergangs-Prototyp-
 /// verhalten aus src/realm, Zone 0, Spawn 0,0). Kämpft damit mit
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
-    type Row = (i64, String, i32, i32, String, f64, f64, i32, i32, i32);
-    let row: Option<Row> = sqlx::query_as(
-        "SELECT id, name, level, hp, char_class, pos_x, pos_y, combat_armor, mana, mana_max FROM characters WHERE id = ?",
+    let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
+        "SELECT id, name, level, hp, char_class, pos_x, pos_y, combat_armor, mana, mana_max, \
+         race, strength, agility, intelligence, constitution, wisdom, luck, endurance \
+         FROM characters WHERE id = ?",
     )
     .bind(char_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Charakter laden: {e}"))?;
-    if let Some((id, name, level, hp, char_class, x, y, armor, mana, mana_max)) = row {
+    if let Some(row) = row {
         return Ok(Character {
-            id: id.to_string(),
-            name,
-            x,
-            y,
-            level: level.max(0) as u32,
-            hp,
-            char_class,
-            armor,
-            mana: mana,
-            mana_max: mana_max.max(mana),
+            id: row.id.to_string(),
+            name: row.name,
+            x: row.x,
+            y: row.y,
+            level: row.level.max(0) as u32,
+            hp: row.hp,
+            char_class: row.char_class,
+            armor: row.armor,
+            mana: row.mana,
+            mana_max: row.mana_max.max(row.mana),
+            race: row.race,
+            strength: row.strength.max(1),
+            dexterity: row.dexterity.max(1),
+            intelligence: row.intelligence.max(1),
+            constitution: row.constitution.max(1),
+            wisdom: row.wisdom.max(1),
+            luck: row.luck.max(1),
+            endurance: row.endurance.max(1),
         });
     }
     sqlx::query("INSERT INTO characters (name, race, char_class) VALUES (?, 'Mensch', 'Warrior')")
@@ -105,6 +174,14 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         armor: 0,
         mana: 50,
         mana_max: 50,
+        race: "Mensch".to_string(),
+        strength: 10,
+        dexterity: 10,
+        intelligence: 10,
+        constitution: 10,
+        wisdom: 10,
+        luck: 10,
+        endurance: 10,
     })
 }
 

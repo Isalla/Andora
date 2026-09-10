@@ -116,6 +116,7 @@ pub fn armor_reduction_pct(cfg: &CombatCfg, armor: i32, class_cap: u32) -> u32 {
 /// Der Waffenskill reduziert die Miss-Chance (wesentlicher Bestandteil der
 /// Trefferwahrscheinlichkeit, §4/§5). Block reduziert Schaden (kein volles
 /// Ausweichen, §5). Rüstung reduziert den Schaden mit Klassen-Cap (§7).
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_attack(
     cfg: &CombatCfg,
     rng: &mut dyn CombatRng,
@@ -123,8 +124,10 @@ pub fn resolve_attack(
     weapon_skill: u32,
     armor: i32,
     cap: u32,
+    damage_permille: u32,
+    crit_permille_bonus: u32,
 ) -> (HitResult, i32) {
-    let base = weapon_damage.max(0);
+    let base = (weapon_damage.max(0) as f64 * (1.0 + damage_permille as f64 / 1000.0)).round() as i32;
     let mut miss = cfg.hit_miss_permille;
     // Skill-Punkte über 1 verringern die Miss-Chance pro Punkt (vorläufig).
     let skill_bonus = weapon_skill
@@ -135,7 +138,7 @@ pub fn resolve_attack(
     let dodge = cfg.hit_dodge_permille;
     let parry = cfg.hit_parry_permille;
     let block = cfg.hit_block_permille;
-    let crit = cfg.hit_crit_permille;
+    let crit = cfg.hit_crit_permille.saturating_add(crit_permille_bonus);
 
     let roll = rng.next() * 1000.0;
     let result = if roll < miss as f64 {
@@ -260,7 +263,10 @@ pub fn combat_tick(
                 continue; // außer Reichweite: pausieren, Angriff bleibt aktiv.
             }
             let cap = class_cap(cfg, &t.char_class);
-            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, t.armor, cap);
+            let effective_armor = crate::attributes::effective_armor(t.armor, t.attributes.endurance);
+            let damage_permille = crate::attributes::melee_damage_permille(a.attributes.strength);
+            let crit_bonus = crate::attributes::crit_bonus_permille(a.attributes.luck);
+            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, effective_armor, cap, damage_permille, crit_bonus);
             outcomes.push((
                 aid.clone(),
                 tid.clone(),
@@ -284,7 +290,9 @@ pub fn combat_tick(
             // NPCs nutzen denselben Kampfkern; Rüstungs-Cap: Default
             // (NPCs haben keine Klasse; vorläufig §7).
             let cap = cfg.armor_cap_default;
-            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, n.armor, cap);
+            let damage_permille = crate::attributes::melee_damage_permille(a.attributes.strength);
+            let crit_bonus = crate::attributes::crit_bonus_permille(a.attributes.luck);
+            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, n.armor, cap, damage_permille, crit_bonus);
             outcomes.push((
                 aid.clone(),
                 tid.clone(),
@@ -487,6 +495,14 @@ mod tests {
                 cooldowns: std::collections::BTreeMap::new(),
                 active_cast: None,
                 learned_abilities: std::collections::HashSet::new(),
+                sitting: false,
+                attributes: Default::default(),
+                max_hp_base: hp,
+                max_mana_base: 50,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
             },
             rx,
         )
@@ -508,15 +524,15 @@ mod tests {
     fn miss_dodge_parry_deal_no_damage() {
         let cfg = test_cfg();
         // 0.00 → miss (0..100)
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.0]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.0]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Miss);
         assert_eq!(d, 0);
         // 0.15 → dodge (100..200)
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.15]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.15]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Dodge);
         assert_eq!(d, 0);
         // 0.24 → parry (200..250)
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.24]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.24]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Parry);
         assert_eq!(d, 0);
     }
@@ -525,7 +541,7 @@ mod tests {
     fn block_reduces_damage_no_full_evade() {
         let cfg = test_cfg();
         // 0.30 → block (250..350), Basis 100, Reduktion 50 %
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.30]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.30]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Block);
         assert_eq!(d, 50);
     }
@@ -534,7 +550,7 @@ mod tests {
     fn normal_hit_full_damage_without_armor() {
         let cfg = test_cfg();
         // 0.80 trifft (nach 0..350), Krit-Wurf 0.90 → Normal.
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.90]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.90]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Normal);
         assert_eq!(d, 100);
     }
@@ -542,7 +558,7 @@ mod tests {
     #[test]
     fn critical_hit_multiplies() {
         let cfg = test_cfg();
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.05]), 100, 1, 0, 30);
+        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.05]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Critical);
         assert_eq!(d, 150);
     }
@@ -554,10 +570,10 @@ mod tests {
         cfg.hit_parry_permille = 0;
         cfg.hit_block_permille = 0;
         // 0.097 (97‰): bei Skill 1 (Miss 100) → verfehlt.
-        let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097]), 100, 1, 0, 30);
+        let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Miss);
         // Skill 2 → Miss 95, 0.097 trifft (Krit-Wurf 0.9 → Normal).
-        let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097, 0.9]), 100, 2, 0, 30);
+        let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097, 0.9]), 100, 2, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Normal);
     }
 
@@ -565,13 +581,13 @@ mod tests {
     fn armor_reduction_respects_class_cap() {
         let cfg = test_cfg();
         // Tank: 15 Rüstung → 30 % Reduktion (2 %/Pkt), ca. 70.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 15, 50);
+        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 15, 50, 0, 0);
         assert_eq!(d, 70);
         // Tank: viel Rüstung → Cap 50 %.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 50);
+        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 50, 0, 0);
         assert_eq!(d, 50);
         // Magier: 999 Rüstung → Cap 20 %.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 20);
+        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 20, 0, 0);
         assert_eq!(d, 80);
     }
 

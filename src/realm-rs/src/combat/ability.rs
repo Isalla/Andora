@@ -335,9 +335,12 @@ fn apply_ability_effect(
 ) {
     let kind = effects::parse_effect_kind(&def.effect_kind);
 
-    // Direktschaden (ohne Effekt-Tick)
+    // Direktschaden (ohne Effekt-Tick) — skaliert mit Intelligenz (§11).
     if def.effect_kind == "damage" && def.duration_ms == 0 {
-        let amount = def.effect_value.round() as i32;
+        let mult = world.players.get(caster_id)
+            .map(|p| crate::attributes::magic_damage_multiplier(p.attributes.intelligence))
+            .unwrap_or(1.0);
+        let amount = (def.effect_value * mult).round() as i32;
         apply_damage(world, caster_id, target_id, amount, events, now);
         return;
     }
@@ -350,6 +353,16 @@ fn apply_ability_effect(
     }
 
     // Zeit-/Tick-Effekt (DoT, HoT, Buff, Debuff, Stun, etc.)
+    // Magischer Schaden wird hier skaliert (§11): effektiver Wert wird
+    // in den Effect geschrieben, damit die Ticks den Skalierungswert nutzen.
+    let mult = if kind == EffectKind::Dot {
+        world.players.get(caster_id)
+            .map(|p| crate::attributes::magic_damage_multiplier(p.attributes.intelligence))
+            .unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let scaled_value = def.effect_value * mult;
     let group = def.effect_group.clone().unwrap_or_default();
     let effect_id = format!("{}:{}", caster_id, def.id);
     let source_kind = SourceKind::Ability;
@@ -370,7 +383,7 @@ fn apply_ability_effect(
         } else {
             None
         },
-        value: def.effect_value,
+        value: scaled_value,
         interrupts_on_damage: kind == EffectKind::Root,
     };
 
@@ -843,6 +856,14 @@ mod tests {
             effects: Vec::new(), cooldowns: BTreeMap::new(),
             active_cast: None,
             learned_abilities: HashSet::new(),
+            sitting: false,
+            attributes: Default::default(),
+            max_hp_base: hp,
+            max_mana_base: mana,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
         }
     }
 

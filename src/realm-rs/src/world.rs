@@ -56,6 +56,24 @@ pub struct Player {
     pub active_cast: Option<ActiveCast>,
     /// Gelernte Fähigkeiten (ability_id).
     pub learned_abilities: HashSet<String>,
+    /// Grundattribute (docs/Attribute_und_Regeneration.md §§1–3).
+    pub attributes: crate::attributes::Attributes,
+    /// Basis-Max-HP vor Attributs-Bonus (für recompute_max_resources).
+    pub max_hp_base: i32,
+    /// Basis-Max-Mana vor Attributs-Bonus (für recompute_max_resources).
+    pub max_mana_base: i32,
+    /// Sitz-Zustand (docs/Attribute_und_Regeneration.md §5): 125 %
+    /// Regeneration nur außerhalb des Kampfes.
+    pub sitting: bool,
+    /// Additive Regenerationsboni (absolute Werte, §7): Essen/Buffs/…
+    /// wirken hier als +HP/s bzw. +Mana/s (Technik-Anschluss; das
+    /// Consumable-System folgt später).
+    pub hp_regen_bonus: f64,
+    pub mana_regen_bonus: f64,
+    /// Bruchteil-Carry der Regeneration (f64, §8): dezimale Raten
+    /// ohne vorgezogenes Runden über Ticks.
+    pub hp_regen_carry: f64,
+    pub mana_regen_carry: f64,
 }
 
 impl Player {
@@ -256,6 +274,18 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
     world.tick.avg_ms += (ms - world.tick.avg_ms) / world.tick.count as f64;
 }
 
+/// HP-/Mana-Regeneration pro Tick (docs/Attribute_und_Regeneration.md
+/// §§4–8): absolute Raten pro Sekunde × Zustandsmultiplikator
+/// (Kampf 15 %, stehend 100 %, sitzend 125 % — Sitzbonus nie im Kampf),
+/// intern f64 mit Carry je Ressource; gedeckelt auf 0 bzw. max. Tote
+/// (hp == 0) regenerieren nicht (keine Wiederbelebung). Teilt sich die
+/// gemeinsame Kernlogik in crate::regen (HP UND Mana, NPC-fähig).
+pub fn world_regen_tick(world: &mut World, tick_ms: u64) {
+    for p in world.players.values_mut() {
+        crate::regen::apply_regen(p, tick_ms);
+    }
+}
+
 /// Entfernt einen Spieler und benachrichtigt alle, die ihn sahen
 /// (DESPAWN). Der Socket wird geschlossen, sobald die Kanal-Sender
 /// wegfallen (Forward-Task in net.rs beendet sich dann selbst).
@@ -329,6 +359,14 @@ mod tests {
                 cooldowns: std::collections::BTreeMap::new(),
                 active_cast: None,
                 learned_abilities: HashSet::new(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
             },
             rx,
         )

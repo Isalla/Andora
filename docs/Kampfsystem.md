@@ -192,6 +192,8 @@ Mana wird für Fähigkeiten verwendet, die einen Manaverbrauch besitzen.
 
 Auf zusätzliche klassenspezifische Grundressourcen wie Wut, Energie oder Fokus wird verzichtet.
 
+Die **Regeneration** dieser beiden Ressourcen folgt einem gemeinsamen technischen Grundprinzip: Effektive Regeneration = (Basisregeneration + additive Regenerationsboni) × Zustandsmultiplikator. Es gelten dieselben Zustandsmultiplikatoren (im Kampf immer 15 %, außerhalb des Kampfes stehend 100 %, sitzend 125 %), die Klasse bestimmt die Basisregeneration, und die Grundattribute beeinflussen die maximalen Pools über Konstitution (Max-HP) und Weisheit (Max-Mana). Die vollständigen Regeln und ersten Balancingwerte stehen in `Attribute_und_Regeneration.md`.
+
 ---
 
 ## 11. Kampftempo
@@ -445,7 +447,7 @@ Folgende Bereiche sind mit Combat V3 umgesetzt oder werden separat ausgearbeitet
 * das Ability-System mit konkreten Fähigkeiten, Ausführungsarten, Mana/Cooldown, Cast-Unterbrechung, AoE, Buffs/Debuffs, Waffen-Effekten (umgesetzt als Combat V3, Abschnitt 22 und `Ability-System.md`)
 * Klassenmechaniken und die konkrete Zuordnung von Haupt-/Nebenskills je Klasse
 * konkrete Schadens-, Duration-, Rüstungs- und Skill-Balancingwerte
-* Attribute und Kampfwerte
+* Attribute und Kampfwerte (verbindliche Grundlagen: `Attribute_und_Regeneration.md`)
 * Gegner und deren Fähigkeiten (NPC-Ausführung der Fähigkeiten folgt mit den Boss-Fähigkeiten)
 * normale Bosse
 * Raids und Raidbosse

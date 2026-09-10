@@ -50,6 +50,12 @@ Für Cast-Fähigkeiten gilt:
 * Persistente bzw. lange Cooldowns bleiben serverseitig über Tod und Logout hinweg bestehen und laufen weiter.
 * Normale kurze Kampffähigkeiten dürfen beim entsprechenden Tod bzw. Combat-Reset (Evade/Return, Boss-Reset) zurückgesetzt werden.
 
+**Mana-Progression:**
+
+* Stärkere bzw. spätere Fähigkeiten dürfen höhere Manakosten besitzen. Die konkreten Manakosten werden nicht jetzt festgelegt, sondern erst bei der Ausarbeitung der jeweiligen Fähigkeit.
+* Spieler sollen später über Finetuning und Meisterbücher unter anderem die Möglichkeit erhalten können, Manakosten bestimmter Fähigkeiten zu reduzieren und dadurch in längeren Kämpfen effizienter zu werden (siehe Abschnitte 9, 11 und 12). Manakosten-Senkungen müssen mit den bestehenden Qualitäts- und Meisterschaftsregeln konsistent bleiben.
+* Verhältnis und Balance von Manakosten, Manapool und Mana-Regeneration werden in `Attribute_und_Regeneration.md` (Abschnitte 4–10) behandelt; konkrete Kostensenkungen sind keine festen Architekturwerte, sondern Inhalts-/Balancewerte (siehe Abschnitt 14).
+
 Für NPCs und Monster gilt zusätzlich: Beim Evade/Return (Kampfsystem.md Abschnitt 20) erfolgt ein vollständiger Cooldown-Reset, wie dort verbindlich festgelegt.
 
 Die Persistenz von Cooldown-Zuständen folgt den allgemeinen Regeln für persistente Realm-Daten in `Datenbank_Architektur.md`.

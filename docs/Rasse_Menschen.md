@@ -76,7 +76,7 @@ Menschen bilden die **Allround-Rasse**.
 
 Ihre Grundwerte sind vergleichsweise gleichmäßig verteilt. Sie besitzen weder besonders ausgeprägte Stärken noch schwerwiegende rassenspezifische Schwächen.
 
-Dadurch eignen sie sich grundsätzlich für unterschiedlichste Klassen und Spielweisen.
+Dadurch eignen sie sich grundsätzlich für unterschiedlichste Klassen und Spielweisen. Die allgemeinen Regeln für rassische Attributunterschiede (typisch etwa 5, maximal etwa 10 Punkte auf Level 1; große Unterschiede erst durch Klasse, Level und Ausrüstung) sowie die aktuellen Rassenschwerpunkte stehen in `Attribute_und_Regeneration.md`.
 
 Ihre Vielseitigkeit spiegelt ihre Geschichte wider:
 

@@ -48,6 +48,9 @@ This document describes all properties and characteristics of items in the game 
 - **special_ability**: Unique passive or active abilities
 - **slot_type**: Type of equipment slot required
 
+### Attribute Bonuses on Equipment
+Weapons, armor, and accessories can increase the seven basic attributes (Kraft, Konstitution, Geschicklichkeit, Intelligenz, Weisheit, Glück, Ausdauer). Equipment is intended to provide a large part of the actual attribute growth and fine-tuning in the later game: the race remains the base imprinting, while the player can strongly influence his character through equipment. Crafted items may receive different or additional attribute values depending on the crafting/quality system. Whether attribute bonuses remain exclusively integer-valued in the long term is to be decided through playtesting. Details and the current balance values: `Attribute_und_Regeneration.md`.
+
 ## Item Lifecycle
 
 ### Acquisition

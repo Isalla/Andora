@@ -46,7 +46,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Rassen-Fraktionen.md** – Rassen-/Fraktionen-Design: spielbare Rassen, Rasse ≠ Fraktion, 3 gemischte Fraktionen, Wechsel, Verrats-Quest, Ruf.
 - **Rasse_Menschen.md** – Worldbuilding Doku: Herkunft, Lebensweise, Landschaft, Architektur, spielmechanische Ausrichtung.
 - **Rasse_Elfen.md** – Worldbuilding Doku: Herkunft, Lebensweise, elfische Hauptstadt, Architektur, Fraktionsprägung.
-- **Rasse_Andorer.md** – Worldbuilding Doku: Handelsdorf, Handel, Handwerk, Jäger, Glück/Weisheit, visuelle Identität.
+- **Rasse_Andorer.md** – Worldbuilding Doku: Handelsdorf, Handel, Handwerk, Jäger, Intelligenz/Weisheit, visuelle Identität.
 - **exp1_Rasse_Luzilla.md** – Worldbuilding Doku Rasse Luzilla (Exp 1): Herkunft, unterirdische Hauptstadt, Schmiedekunst, Kultur, Mechaniken.
 - **exp2_Rasse_Mandalonier.md** – Worldbuilding Doku Rasse Mandalonier (Exp 2): Herkunft, Hauptstadt, Gesellschaft, Kampfkunst, Handwerk, Patrouillen.
 - **Politik-Herrschaftssystem.md** – Politik-/Herrschafts-Design: Machterhalt/-übernahme, Königsamt, Fraktionskriege (spätere PvP-Phase).
@@ -58,6 +58,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Storytelling_und_Weltgeheimnisse.md** – Verbindliche Grundprinzipien (Konzept-Ebene): vier Ebenen des Storytellings (Hauptstory, Nebenmissionen, Rätsel und Weltgeheimnisse, spielerausgelöste Realm-Ereignisse), Bücher als Gameplay, verborgene Questketten, variable persönliche Rätsel, Realm-Chroniken (jeder Realm erzählt dieselbe Welt, Classic ausgenommen); keine technische Implementierung.
 
 ### 4. Charakter, Klasse & Progression
+- **Attribute_und_Regeneration.md** – Verbindliche Grundlage der sieben Grundattribute (Kraft, Konstitution, Geschicklichkeit, Intelligenz, Weisheit, Glück, Ausdauer) mit erster Balance (Richtwerte, ausdrücklich durch Spieltests überprüfbar), rassische Attributschwerpunkte (Menschen/Elfen/Andorer/Luzilla/Mandalonier; keine Klassensperre, Unterschiede Level 1 typisch ~5, max. ~10), Ausrüstung als große Quelle der Attributentwicklung, HP-/Mana-Regeneration (gemeinsames technisches Prinzip, absolute Werte pro Sekunde, Zustandsmultiplikatoren 15 %/100 %/125 %, Sitzbonus wirkt nie im Kampf), Klassen-Basisregeneration (Kämpfer/Magier/Priester/Kundschafter) + Levelwachstum, Regenerationsboni (additiv, Dezimalwerte), konzeptionelle Abgrenzung Essen/Getränke/direkte Heil-/Manatränke (eigene Consumable-Plätze), Mana-Progression (Meisterbücher/Finetuning) und datengetriebenes Balancing.
 - **Charaktererstellung_und_Charakterdarstellung.md** – Charaktererstellung + clientseitige Darstellung: serverseitige Daten, kosmetische Character-Sets, Mod-Unterstützung, Architekturgrenzen.
 - **Klassensystem.md** – Klassenbaum: Abenteurer → 4 Grundklassen à 2 Unterklassen, Rollen, nicht rassen-/fraktionsgebunden; Waffenbeherrschung und Haupt-/Nebenskills je Klasse.
 - **Tier-Progression.md** – Progressionsprinzip: keine feste Straße, Level als Ausgleich, Zeit vs. Ausrüstung, Spielertypen (Solo/Gilden), Wege (Dungeon-Finder, Crafting/AH).
@@ -111,6 +112,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Rassen & Fraktionen:** Rassen-Fraktionen.md (Rahmen) + Rasse_*.md / exp*_Rasse_*.md (Details) + Politik-Herrschaftssystem.md (PvP-Phase).
 - **Auth/DB:** Auth_API_Architektur.md + Login_Realm_Architektur.md + Datenbank_Architektur.md + Deployment_Betriebsarchitektur.md + parental_control.md.
 - **PvP/Kampf:** Kampfsystem.md + Ability-System.md + Boss-System.md + Arena.md (+ ai_cutscene_system.md) + Dungeon-Finder.md + Event-Matchmaking.md + Heldenrad.md (klassenübergreifende Kampffähigkeit; Heldenrad ist eine nicht aufwertbare Fähigkeit im Ability-System, nur mit Kampfsystem/Fähigkeitsarchitektur und Gruppengrößen in `project_overview.md`/`exp1_Unterwelt.md` zusammen lesbar).
+- **Attribute & Regeneration:** Attribute_und_Regeneration.md (verbindliche Grundlage) + Rasse_*.md / exp*_Rasse_*.md (rassische Schwerpunkte) + item_properties.md (Attributboni auf Ausrüstung) + inventory_system.md (Consumable-Slots) + Ability-System.md (Mana-Progression/Meisterschaft) + Kampfsystem.md (Ressourcen/Crit).
 - **Kommunikation:** voice_system.md (Zentraldokumentation: Voice-Mechanik, Rechte, Speicherung, Deaktivierung; verweist auf Kanal-/PTT-/Companion-Details, Elternkontrolle, Chat-Logging) + chat_system.md (Chat-/Voice-Regeln, Logging) + communication-voice-npc-commands.md (Kanäle, Voice-Mechanik, NPC-Sprachbefehle) + parental_control.md (Chat-/Voice-Gates unter Elternkontrolle).
 - **Expansionen:** exp1_Rasse_Luzilla.md + exp1_Unterwelt.md (Exp 1) und exp2_Rasse_Mandalonier.md + exp2_* (Exp 2) jeweils zusammen.
 

@@ -223,6 +223,19 @@ Seine wichtigste Aufgabe bleibt unabhängig von der Waffenwahl die Unterstützun
 * Räuber – DD
 * Barde – Buff/Debuff-Support, Nah- oder Fernkampf
 
+## Regeneration
+
+Die Klasse bestimmt den Regenerationsschwerpunkt:
+
+* **Kämpfer:** 6 HP/s, 3 Mana/s
+* **Magier:** 3 HP/s, 7 Mana/s
+* **Priester:** 4 HP/s, 6 Mana/s
+* **Kundschafter:** 5 HP/s, 4 Mana/s
+
+(erste Balancing-Ausgangswerte für Level 1; später veränderbar)
+
+Der maximale Ressourcenpool wächst separat über Charakter-/Klassenbasis, Attribute, Level, Ausrüstung und Buffs. Die vollständigen Regeln zur HP-/Mana-Regeneration (gemeinsames technisches Prinzip, Zustandsmultiplikatoren, Levelwachstum, Boni) stehen in `Attribute_und_Regeneration.md` (Abschnitte 4–8).
+
 ## Spätere Erweiterungsmöglichkeit
 
 **Räuber**

@@ -200,7 +200,7 @@ Mögliche Debuffs könnten beispielsweise sein:
 
 * reduzierte Lebensregeneration
 * reduzierte Manaregeneration
-* geringere Ausdauerregeneration
+* kürzere mögliche Laufdauer (verringerte Ausdauer)
 * temporär verringerte Attribute
 * verringerte Bewegungsgeschwindigkeit
 * andere zum Gericht passende negative Effekte

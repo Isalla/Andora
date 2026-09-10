@@ -107,6 +107,7 @@ The inventory system consists of:
 3. **Equipment Slot**: Specialized areas for equipped items (weapons, armor, accessories)
 4. **Crafting Materials**: Dedicated storage for crafting resources
 5. **UI Integration**: Visual representation in the game
+6. **Consumable Slots**: Dedicated item/consumable slots for food and drinks/potions (Speisen/Getränke mit Dauerwirkung, direkte Heil-/Manatränke). These can later be used manually or automatically. Details and the conceptual distinction (duration effects vs. direct resource restoration) are defined in `Attribute_und_Regeneration.md` (Abschnitt 9).
 
 ## Integration Points
 

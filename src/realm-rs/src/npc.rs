@@ -496,7 +496,8 @@ pub fn npc_tick(
                     let (res, dmg) = {
                         let t = world.players.get(&tid).unwrap();
                         let cap = class_cap(cfg, &t.char_class);
-                        resolve_attack(cfg, rng, dmg_weapon, skill, t.armor, cap)
+                        let effective_armor = crate::attributes::effective_armor(t.armor, t.attributes.endurance);
+                        resolve_attack(cfg, rng, dmg_weapon, skill, effective_armor, cap, 0, 0)
                     };
                     outcomes.push((id.clone(), tid, ax, ay, res, dmg));
                     if let Some(n) = world.npcs.get_mut(id) {
@@ -736,6 +737,14 @@ mod tests {
                 cooldowns: std::collections::BTreeMap::new(),
                 active_cast: None,
                 learned_abilities: std::collections::HashSet::new(),
+                sitting: false,
+                attributes: Default::default(),
+                max_hp_base: hp,
+                max_mana_base: 50,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
             },
             rx,
         )

@@ -17,6 +17,7 @@ use crate::npc::aggro_trigger;
 use crate::parental::{self, SharedParental};
 use crate::protocol::{s2c, Frame};
 use crate::world::{apply_move, ensure_visible, truncate_chat, Player, Shared};
+use crate::attributes;
 
 pub struct Ctx {
     pub cfg: Arc<Config>,
@@ -145,7 +146,25 @@ pub async fn handle_hello(
         cooldowns: std::collections::BTreeMap::new(),
         active_cast: None,
         learned_abilities,
+        attributes: attributes::Attributes {
+            strength: c.strength,
+            constitution: c.constitution,
+            dexterity: c.dexterity,
+            intelligence: c.intelligence,
+            wisdom: c.wisdom,
+            luck: c.luck,
+            endurance: c.endurance,
+        },
+        max_hp_base: c.hp,
+        max_mana_base: c.mana_max,
+        sitting: false,
+        hp_regen_bonus: 0.0,
+        mana_regen_bonus: 0.0,
+        hp_regen_carry: 0.0,
+        mana_regen_carry: 0.0,
     };
+    let mut me = me;
+    attributes::recompute_max_resources(&mut me);
     {
         let mut world = ctx.shared.lock().await;
         world.players.insert(me.id.clone(), me);
@@ -693,6 +712,14 @@ mod tests {
                     cooldowns: std::collections::BTreeMap::new(),
                     active_cast: None,
                     learned_abilities: std::collections::HashSet::new(),
+                    sitting: false,
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
                 },
             );
             w.players.insert(
@@ -724,6 +751,14 @@ mod tests {
                     cooldowns: std::collections::BTreeMap::new(),
                     active_cast: None,
                     learned_abilities: std::collections::HashSet::new(),
+                    sitting: false,
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -815,6 +850,14 @@ mod tests {
                     cooldowns: std::collections::BTreeMap::new(),
                     active_cast: None,
                     learned_abilities: std::collections::HashSet::new(),
+                    sitting: false,
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
                 },
             );
             w.players.insert(
@@ -846,6 +889,14 @@ mod tests {
                     cooldowns: std::collections::BTreeMap::new(),
                     active_cast: None,
                     learned_abilities: std::collections::HashSet::new(),
+                    sitting: false,
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
                 },
             );
             w.by_conn.insert(7, "a".into());

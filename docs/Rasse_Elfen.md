@@ -4,7 +4,7 @@
 
 Elfen sind ein naturverbundenes Volk, das ursprünglich aus einer Welt jenseits des Meeres stammt.
 
-Ihre Stärken liegen vor allem in **Geschick und Ausdauer**.
+Ihre Stärken liegen vor allem in **Geschicklichkeit und Glück**.
 
 Anders als Menschen verteilen sich Elfen nicht auf zahlreiche Dörfer und Siedlungen. Sie bevorzugen große Städte und konzentrieren einen erheblichen Teil ihres gesellschaftlichen Lebens an einem zentralen Ort.
 
@@ -114,11 +114,11 @@ Statt die Natur vollständig zurückzudrängen, verwenden sie die Materialien, d
 Elfen besitzen vor allem ausgeprägte:
 
 * **Geschicklichkeit**
-* **Ausdauer**
+* **Glück**
 
 Damit unterscheiden sie sich von den gleichmäßiger verteilten Grundwerten der Menschen.
 
-Die genaue Verteilung der Werte und mögliche weitere rassenspezifische Eigenschaften werden später mit dem Rassen- und Klassensystem abgestimmt.
+Glück ist mechanisch ein Kampfwert und erhöht die Chance auf kritische Treffer (Details und erste Balancingwerte in `Attribute_und_Regeneration.md`). Die genaue Verteilung der Werte und mögliche weitere rassenspezifische Eigenschaften werden später mit dem Rassen- und Klassensystem abgestimmt.
 
 ---
 

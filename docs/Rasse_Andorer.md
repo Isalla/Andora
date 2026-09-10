@@ -8,7 +8,7 @@ Sie besitzen keine ausgeprägten dauerhaften Stadtstrukturen wie Menschen oder E
 
 Ihre wichtigsten Attribute sind:
 
-* **Glück**
+* **Intelligenz**
 * **Weisheit**
 
 ---
@@ -152,15 +152,13 @@ Das Jagen ist dabei nicht nur ein Beruf, sondern ein Bestandteil ihrer nomadisch
 
 Die beiden charakteristischen Attribute der Andorer sind:
 
-**Glück** und **Weisheit**.
+**Intelligenz** und **Weisheit**.
 
-### Glück
+### Intelligenz
 
-Durch ihr ständiges Durchstreifen der Welt besitzen Andorer ein besonderes Talent dafür, wertvolle oder seltene Dinge zu entdecken.
+Durch ihr ständiges Durchstreifen der Welt besitzen Andorer ein besonderes Talent dafür, wertvolle oder seltene Dinge zu entdecken und ihre Umgebung aufmerksam zu beobachten.
 
-Glück kann deshalb später unter anderem Einfluss auf das Finden bestimmter Gegenstände oder Ressourcen erhalten.
-
-Die genaue Mechanik wird mit dem Attribut- und Lootsystem festgelegt.
+Spielmechanisch erhöht Intelligenz den magischen Schaden (Details und erste Balancingwerte in `Attribute_und_Regeneration.md`).
 
 ### Weisheit
 
@@ -169,6 +167,8 @@ Das Wissen der Andorer entstand weniger in Schulen oder großen Bibliotheken, so
 Sie kennen die Einöden, Tiere, Pflanzen, Handelswege und die Gefahren eines Lebens auf Reisen.
 
 Weisheit bildet diese Erfahrung spielmechanisch ab.
+
+> **Hinweis:** Die frühere rassische Ausrichtung auf **Glück** (einschließlich der Annahme, Glück beeinflusse insbesondere das Finden seltener Gegenstände) wird hiermit korrigiert: Glück ist nun ausdrücklich ein Kampfwert und erhöht die Chance auf kritische Treffer, nicht primär die Fundwahrscheinlichkeit von Gegenständen. Details: `Attribute_und_Regeneration.md`.
 
 ---
 

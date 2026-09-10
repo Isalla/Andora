@@ -203,6 +203,14 @@ mod tests {
             cooldowns: std::collections::BTreeMap::new(),
             active_cast: None,
             learned_abilities: HashSet::new(),
+            sitting: false,
+            attributes: Default::default(),
+            max_hp_base: hp,
+            max_mana_base: 50,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
         }
     }
 
