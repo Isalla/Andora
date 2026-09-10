@@ -11,6 +11,7 @@ mod class;
 mod combat;
 mod config;
 mod db;
+mod group;
 mod handlers;
 mod health;
 mod migrations;
@@ -67,6 +68,7 @@ async fn async_main() -> Result<(), String> {
     let auth = auth_api::AuthApi::new(&cfg.auth_api)?;
     let shared = world::new_shared();
     let parental = parental::new_shared(auth.clone());
+    let groups = group::new_shared_groups(cfg.group.clone());
 
     let health_task = {
         let (cfg, shared) = (cfg.clone(), shared.clone());
@@ -77,11 +79,13 @@ async fn async_main() -> Result<(), String> {
         })
     };
     let ws_task = {
-        let (cfg, shared, parental) = (cfg.clone(), shared.clone(), parental.clone());
-        tokio::spawn(net::serve(cfg, pool.clone(), auth, shared, parental))
+        let (cfg, shared, parental, groups) =
+            (cfg.clone(), shared.clone(), parental.clone(), groups.clone());
+        tokio::spawn(net::serve(cfg, pool.clone(), auth, shared, parental, groups))
     };
     let poller = parental::start_poller(parental.clone(), shared.clone());
     let tick_shared = shared.clone();
+    let tick_groups = groups.clone();
     let tick_ms = cfg.tick_ms;
     let aofb = cfg.aofb_radius;
     let combat_cfg = cfg.combat.clone();
@@ -120,9 +124,11 @@ async fn async_main() -> Result<(), String> {
             world::world_tick(&mut world, aofb);
             let now = std::time::Instant::now();
             let wall_now = std::time::SystemTime::now();
+            let mut groups_guard = tick_groups.lock().await;
             combat::combat_tick(
                 &mut world,
                 &combat_cfg,
+                &groups_guard,
                 &mut combat_rng,
                 now,
                 wall_now,
@@ -146,6 +152,21 @@ async fn async_main() -> Result<(), String> {
                 tick_ms,
                 aofb,
             );
+            // Gruppensystem §5: Reconnect-Frist ablaufen lassen.
+            for pid in groups_guard.tick(now) {
+                log::info!("Reconnect-Frist für Gruppenmitglied {pid} abgelaufen");
+            }
+            // §8: Gruppenauflösung — Claim "g:<gid>" geht aufs letzte Mitglied.
+            for (gid, last_pid) in groups_guard.take_dissolutions() {
+                let group_claim = format!("g:{gid}");
+                for n in world.npcs.values_mut() {
+                    if n.claimed_by.as_deref() == Some(group_claim.as_str()) {
+                        // Kein Mitglied übrig → Claim entfällt ersatzlos.
+                        n.claimed_by = if last_pid.is_empty() { None } else { Some(last_pid.clone()) };
+                    }
+                }
+            }
+            drop(groups_guard);
             // Periodische Persistenz des NPC-Zustands über Realm-Neustarts.
             if now.duration_since(last_persist) >= persist_interval {
                 last_persist = now;

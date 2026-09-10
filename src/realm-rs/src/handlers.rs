@@ -13,10 +13,11 @@ use crate::combat::CombatState;
 use crate::combat::ability::AbilityRegistry;
 use crate::config::{CombatCfg, Config, NpcCfg};
 use crate::db;
+use crate::group::{self, GroupManager, SharedGroups};
 use crate::npc::aggro_trigger;
 use crate::parental::{self, SharedParental};
 use crate::protocol::{s2c, Frame};
-use crate::world::{apply_move, ensure_visible, truncate_chat, Player, Shared};
+use crate::world::{apply_move, ensure_visible, truncate_chat, Player, Shared, World};
 use crate::attributes;
 
 pub struct Ctx {
@@ -26,6 +27,7 @@ pub struct Ctx {
     pub shared: Shared,
     pub parental: SharedParental,
     pub registry: AbilityRegistry,
+    pub groups: SharedGroups,
 }
 
 fn get_str(data: &serde_json::Value, key: &str) -> String {
@@ -142,6 +144,7 @@ pub async fn handle_hello(
         faction_transition: c.faction_transition,
         level: c.level,
         armor: c.armor,
+        exp: c.exp,
         weapon_skill,
         combat: None,
         effects: Vec::new(),
@@ -213,6 +216,22 @@ pub async fn handle_hello(
             world.players.insert(oid, other);
             world.players.insert(c.id.clone(), me);
         }
+    }
+
+    // Gruppensystem §9: Reconnect — Mitgliedschaft/Leitung zurücksetzen,
+    // Gruppe darüber informieren.
+    let gid = {
+        let mut groups = ctx.groups.lock().await;
+        let gid = groups.group_of(&c.id);
+        if gid.is_some() {
+            groups.on_reconnect(&c.id, Instant::now());
+        }
+        gid
+    };
+    if let Some(gid) = gid {
+        let world = ctx.shared.lock().await;
+        let groups = ctx.groups.lock().await;
+        broadcast_group_info(&world, &groups, gid);
     }
     Ok(())
 }
@@ -448,6 +467,301 @@ pub async fn handle_chat(
         let _ = o.tx.send(payload.clone());
     }
     let _ = tx.send(payload);
+}
+
+// ── Gruppensystem V1 (docs/Gruppensystem.md §§1–9) ──────────────────────
+
+/// GROUP_INFO-Payload: Mitgliedsdaten (id, name, class, level, hp, mp,
+/// online, is_leader, in_range, effects) + leader_id. in_range = online
+/// UND innerhalb cfg.range um den aktuellen Leiter (§3, Mittelpunkt).
+fn group_info_json(
+    world: &World,
+    groups: &GroupManager,
+    group_id: u64,
+) -> Option<serde_json::Value> {
+    let group = groups.get_group(group_id)?;
+    let leader_pos = world.players.get(&group.leader_id).map(|p| (p.x, p.y));
+    let members: Vec<serde_json::Value> = group
+        .members
+        .values()
+        .map(|m| {
+            let p = world.players.get(&m.player_id);
+            let (x, y) = p.map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
+            let in_range = leader_pos.is_some_and(|(lx, ly)| {
+                (lx - x).hypot(ly - y) <= groups.cfg.range
+            });
+            let effects: Vec<&str> = p
+                .map(|p| {
+                    p.effects
+                        .iter()
+                        .filter(|e| e.kind.tickable())
+                        .map(|e| e.kind.key())
+                        .collect()
+                })
+                .unwrap_or_default();
+            serde_json::json!({
+                "id": m.player_id,
+                "name": p.map(|p| p.name.as_str()).unwrap_or(""),
+                "class": p.map(|p| p.char_class.as_str()).unwrap_or(""),
+                "level": p.map(|p| p.level).unwrap_or(0),
+                "hp": p.map(|p| p.hp).unwrap_or(0),
+                "mp": p.map(|p| p.mana).unwrap_or(0),
+                "online": m.online,
+                "is_leader": group.leader_id == m.player_id,
+                "in_range": m.online && in_range,
+                "effects": effects,
+            })
+        })
+        .collect();
+    Some(serde_json::json!({
+        "group_id": group.id,
+        "leader_id": group.leader_id,
+        "members": members,
+    }))
+}
+
+fn broadcast_group_info(world: &World, groups: &GroupManager, group_id: u64) {
+    let Some(info) = group_info_json(world, groups, group_id) else {
+        return;
+    };
+    let frame = Frame::new(0, s2c::GROUP_INFO, info).encode();
+    for pid in groups.member_ids(group_id) {
+        if let Some(p) = world.players.get(&pid) {
+            let _ = p.tx.send(frame.clone());
+        }
+    }
+}
+
+fn group_toast(world: &World, groups: &GroupManager, group_id: u64, text: &str) {
+    let frame = Frame::new(
+        0,
+        s2c::GROUP_TOAST,
+        serde_json::json!({"text": text, "kind": "group"}),
+    )
+    .encode();
+    for pid in groups.member_ids(group_id) {
+        if let Some(p) = world.players.get(&pid) {
+            let _ = p.tx.send(frame.clone());
+        }
+    }
+}
+
+fn send_invite_s2c(world: &World, target_id: &str, group_id: u64, from_id: &str, from_name: &str) {
+    if let Some(p) = world.players.get(target_id) {
+        let _ = p.tx.send(
+            Frame::new(
+                0,
+                s2c::GROUP_INVITE_S2C,
+                serde_json::json!({
+                    "group_id": group_id,
+                    "from_id": from_id,
+                    "from_name": from_name,
+                }),
+            )
+            .encode(),
+        );
+    }
+}
+
+/// §2: Leiter lädt einen (online) Spieler ein. S2C-Einladung an Ziel.
+pub async fn handle_group_invite(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let Some(gid) = groups.group_of(&pid) else {
+        return;
+    };
+    if !groups.is_leader(&pid) {
+        return;
+    }
+    let target_id = get_str(data, "target_id");
+    if target_id.is_empty()
+        || target_id == pid
+        || !world.players.contains_key(&target_id)
+    {
+        return;
+    }
+    if groups.invite(gid, &pid, &target_id, Instant::now()).is_ok() {
+        let leader_name = world
+            .players
+            .get(&pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        send_invite_s2c(&world, &target_id, gid, &pid, &leader_name);
+        let text = format!("{leader_name} hat {target_id} eingeladen");
+        group_toast(&world, &groups, gid, &text);
+    }
+}
+
+/// §2: Einladung annehmen/ablehnen. {group_id, accept}
+pub async fn handle_group_invite_react(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let group_id = data.get("group_id").and_then(|v| v.as_u64()).unwrap_or(0);
+    if group_id == 0 {
+        return;
+    }
+    let accept = data.get("accept").and_then(|v| v.as_bool()).unwrap_or(false);
+    if accept {
+        if groups.accept_invite(group_id, &pid, Instant::now()).is_ok() {
+            group_toast(&world, &groups, group_id, "Ein Spieler ist der Gruppe beigetreten");
+            broadcast_group_info(&world, &groups, group_id);
+        }
+    } else if groups.reject_invite(group_id, &pid).is_ok() {
+        group_toast(&world, &groups, group_id, "Eine Einladung wurde abgelehnt");
+    }
+}
+
+/// §3: Mitglied schlägt Spieler vor (Leiter entscheidet). {target_id}
+pub async fn handle_group_suggest(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+let mut groups = ctx.groups.lock().await;
+    // Nur Leiter lädt ein. Ein Gruppenloser gründet die Gruppe mit der
+    // ersten Einladung; ein (Nicht-Leiter-)Mitglied darf nicht einladen.
+    let gid = if groups.is_leader(&pid) {
+        match groups.group_of(&pid) {
+            Some(gid) => gid,
+            None => return,
+        }
+    } else {
+        if groups.group_of(&pid).is_some() {
+            return;
+        }
+        match groups.create_group(&pid, Instant::now()) {
+            Ok(gid) => gid,
+            Err(_) => return,
+        }
+    };
+    let target_id = get_str(data, "target_id");
+    if target_id.is_empty() || target_id == pid || !world.players.contains_key(&target_id) {
+        return;
+    }
+    if groups.propose(gid, &pid, &target_id).is_ok() {
+        let member_name = world
+            .players
+            .get(&pid)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let text = format!("{member_name} schlägt {target_id} vor");
+        group_toast(&world, &groups, gid, &text);
+    }
+}
+
+/// §3: Leiter entscheidet über Vorschlag. {target_id, accept}
+pub async fn handle_group_suggest_decide(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let Some(gid) = groups.group_of(&pid) else {
+        return;
+    };
+    if !groups.is_leader(&pid) {
+        return;
+    }
+    let target_id = get_str(data, "target_id");
+    let accept = data.get("accept").and_then(|v| v.as_bool()).unwrap_or(false);
+    if target_id.is_empty() {
+        return;
+    }
+    if accept {
+        if !world.players.contains_key(&target_id) {
+            groups.reject_proposal(gid, &pid, &target_id).ok();
+            return;
+        }
+        if groups.approve_proposal(gid, &pid, &target_id, Instant::now()).is_ok() {
+            let leader_name = world
+                .players
+                .get(&pid)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            send_invite_s2c(&world, &target_id, gid, &pid, &leader_name);
+            let text = format!("{leader_name} schickt {target_id} eine Einladung");
+            group_toast(&world, &groups, gid, &text);
+        }
+    } else if groups.reject_proposal(gid, &pid, &target_id).is_ok() {
+        let text = format!("Der Vorschlag für {target_id} wurde abgelehnt");
+        group_toast(&world, &groups, gid, &text);
+    }
+}
+
+/// §2: Mitglied verlässt Gruppe (Leiter muss erst übertragen).
+pub async fn handle_group_leave(ctx: &Ctx, conn_id: u64, _data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let Some(gid) = groups.group_of(&pid) else {
+        return;
+    };
+    if let Err(group::GroupError::LeaderCannotLeave) = groups.leave(gid, &pid, Instant::now()) {
+        group_toast(&world, &groups, gid, "Leiter muss zuerst die Leitung übertragen");
+        return;
+    }
+    let name = world
+        .players
+        .get(&pid)
+        .map(|p| p.name.clone())
+        .unwrap_or_default();
+    let text = format!("{name} hat die Gruppe verlassen");
+    group_toast(&world, &groups, gid, &text);
+    broadcast_group_info(&world, &groups, gid);
+}
+
+/// §2: Leiter entfernt Mitglied. {target_id}
+pub async fn handle_group_kick(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let Some(gid) = groups.group_of(&pid) else {
+        return;
+    };
+    if !groups.is_leader(&pid) {
+        return;
+    }
+    let target_id = get_str(data, "target_id");
+    if target_id.is_empty()
+        || groups.kick(gid, &pid, &target_id, Instant::now()).is_err()
+    {
+        return;
+    }
+    let text = format!("{target_id} wurde aus der Gruppe entfernt");
+    group_toast(&world, &groups, gid, &text);
+    broadcast_group_info(&world, &groups, gid);
+}
+
+/// §2: Leiter überträgt Leitung. {target_id}
+pub async fn handle_group_transfer(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let mut groups = ctx.groups.lock().await;
+    let Some(gid) = groups.group_of(&pid) else {
+        return;
+    };
+    if !groups.is_leader(&pid) {
+        return;
+    }
+    let target_id = get_str(data, "target_id");
+    if target_id.is_empty() || groups.transfer_leader(gid, &pid, &target_id).is_err() {
+        return;
+    }
+    let text = format!("{target_id} ist jetzt Gruppenleiter");
+    group_toast(&world, &groups, gid, &text);
+    broadcast_group_info(&world, &groups, gid);
 }
 
 /// HEARTBEAT → SYNC-ACK (plus Ping-/Aktivitäts-Update).
@@ -707,6 +1021,7 @@ mod tests {
                     class: crate::class::ClassStatus::Adventurer,
                     faction_transition: false,
                     level: 1,
+                    exp: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -748,6 +1063,7 @@ mod tests {
                     class: crate::class::ClassStatus::Mage,
                     faction_transition: false,
                     level: 1,
+                    exp: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -849,6 +1165,7 @@ mod tests {
                     class: crate::class::ClassStatus::Adventurer,
                     faction_transition: false,
                     level: 1,
+                    exp: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -890,6 +1207,7 @@ mod tests {
                     class: crate::class::ClassStatus::Mage,
                     faction_transition: false,
                     level: 1,
+                    exp: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,

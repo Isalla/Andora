@@ -156,6 +156,7 @@ mod tests {
             class: crate::class::ClassStatus::Adventurer,
             faction_transition: false,
             level: 1,
+            exp: 0,
             armor: 0,
             weapon_skill: 1, combat: None,
             mana, max_mana,

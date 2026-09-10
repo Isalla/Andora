@@ -16,6 +16,13 @@ export const C2S = {
   HEARTBEAT: 10,
   PARENTAL: 11,  // {action, pin}  (In-Game-Elternpanel: extend/unlock_chat/unlock_voice)
   ABILITY: 12,    // {ability_id, target_id?, x?, y?} Fähigkeit auslösen (Combat V3)
+  GROUP_INVITE: 13,      // {target_id} Einladung senden (nur Leiter, §2)
+  GROUP_INVITE_REACT: 14, // {group_id, accept: bool} Einladung annehmen/ablehnen (§2)
+  GROUP_SUGGEST: 15,      // {target_id} Spieler vorschlagen (§3, nur Mitglieder)
+  GROUP_SUGGEST_DECIDE: 16, // {target_id, accept: bool} Vorschlag annehmen/ablehnen (§3, nur Leiter)
+  GROUP_LEAVE: 17,        // Gruppe verlassen (freiwillig, §2; Leiter muss vorher übertragen)
+  GROUP_KICK: 18,         // {target_id} Mitglied entfernen (§2, nur Leiter)
+  GROUP_TRANSFER: 19,     // {target_id} Leitung übertragen (§2, nur Leiter)
 }
 
 export const S2C = {
@@ -36,6 +43,9 @@ export const S2C = {
   PARENTAL_RESULT: 15,  // {ok, reason?, unlocked?, remaining_seconds?} (Antwort aufs Elternpanel)
   ABILITY: 16,          // {caster_id, ability_id, outcome, reason?, target_id?} (Combat V3)
   EFFECT: 17,           // {entity_id, action, effect_id, group, kind, duration_left_ms} (Combat V3)
+  GROUP_INFO: 18,         // {group_id, leader_id, members:[{id, name, class, level, hp, max_hp, mp, max_mp, online, in_range, effects}]} (§4–6)
+  GROUP_INVITE_S2C: 19,   // {group_id, from_id} Gruppeneinladung (§2)
+  GROUP_TOAST: 20,        // {text, kind} Systemhinweis (z.B. "Leiter übertragen") (§9)
 }
 
 // Renderer-Auswahl auf dem Client, wenn RENDER_CAP überschritten:

@@ -20,6 +20,13 @@ pub mod c2s {
     pub const HEARTBEAT: i64 = 10;
     pub const PARENTAL: i64 = 11; // {action, pin}
     pub const ABILITY: i64 = 12; // {ability_id, target_id?, x?, y?} (Combat V3)
+    pub const GROUP_INVITE: i64 = 13; // {target_id}
+    pub const GROUP_INVITE_REACT: i64 = 14; // {group_id, accept: bool}
+    pub const GROUP_SUGGEST: i64 = 15; // {target_id}
+    pub const GROUP_SUGGEST_DECIDE: i64 = 16; // {target_id, accept: bool}
+    pub const GROUP_LEAVE: i64 = 17;
+    pub const GROUP_KICK: i64 = 18; // {target_id}
+    pub const GROUP_TRANSFER: i64 = 19; // {target_id}
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -44,6 +51,9 @@ pub mod s2c {
     pub const PARENTAL_RESULT: i64 = 15; // {ok, reason?, unlocked?, ...}
     pub const ABILITY: i64 = 16; // {caster_id, ability_id, outcome, reason?, target_id?} (Combat V3)
     pub const EFFECT: i64 = 17; // {entity_id, action, effect_id, group, kind, duration_left_ms} (Combat V3)
+    pub const GROUP_INFO: i64 = 18; // {group_id, leader_id, members:[{id,name,class,level,hp,max_hp,mp,max_mp,online,in_range,effects}]}
+    pub const GROUP_INVITE_S2C: i64 = 19; // {group_id, from_id}
+    pub const GROUP_TOAST: i64 = 20; // {text, kind}
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -95,6 +105,16 @@ mod tests {
         assert_eq!(s2c::PARENTAL_RESULT, 15);
         assert_eq!(s2c::ABILITY, 16);
         assert_eq!(s2c::EFFECT, 17);
+        assert_eq!(s2c::GROUP_INFO, 18);
+        assert_eq!(s2c::GROUP_INVITE_S2C, 19);
+        assert_eq!(s2c::GROUP_TOAST, 20);
+        assert_eq!(c2s::GROUP_INVITE, 13);
+        assert_eq!(c2s::GROUP_INVITE_REACT, 14);
+        assert_eq!(c2s::GROUP_SUGGEST, 15);
+        assert_eq!(c2s::GROUP_SUGGEST_DECIDE, 16);
+        assert_eq!(c2s::GROUP_LEAVE, 17);
+        assert_eq!(c2s::GROUP_KICK, 18);
+        assert_eq!(c2s::GROUP_TRANSFER, 19);
     }
 
     #[test]

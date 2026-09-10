@@ -49,6 +49,8 @@ pub struct Player {
     /// gewechselt ist; sonst false. Fraktions-/Zonensystem folgt technisch.
     pub faction_transition: bool,
     pub level: u32,
+    /// Gesammelte Erfahrungspunkte (Gruppensystem V1, §7).
+    pub exp: i64,
     /// Aktueller Rüstungswert (relevante physische Rüstung).
     pub armor: i32,
     /// Level des relevanten Waffen-/Kampfskills (startet bei 1).
@@ -362,6 +364,7 @@ mod tests {
                 class: crate::class::ClassStatus::Adventurer,
                 faction_transition: false,
                 level: 1,
+                exp: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,

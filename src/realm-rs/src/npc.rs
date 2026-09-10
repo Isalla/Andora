@@ -92,6 +92,9 @@ pub struct Npc {
     pub move_speed: f64,
     pub respawn_ms: i64,
     pub faction: Option<String>,
+    /// Normale EXP des Monsters (docs/Gruppensystem.md §7): 100 % werden
+    /// beim Tod an die aktiven Gruppenmitglieder verteilt.
+    pub exp_reward: i64,
     pub pack_id: Option<String>,
     pub home_x: f64,
     pub home_y: f64,
@@ -250,6 +253,7 @@ pub fn build_npcs(
             move_speed: def.move_speed,
             respawn_ms,
             faction: def.faction.clone(),
+            exp_reward: def.exp_reward,
             pack_id: spawn.pack_id.clone(),
             home_x: spawn.home_x,
             home_y: spawn.home_y,
@@ -707,6 +711,10 @@ mod tests {
         }
     }
 
+    fn groups() -> crate::group::GroupManager {
+        crate::group::GroupManager::new(crate::group::GroupCfg::default())
+    }
+
     fn player(id: &str, hp: i32) -> (crate::world::Player, mpsc::UnboundedReceiver<String>) {
         let (tx, rx) = mpsc::unbounded_channel();
         (
@@ -730,6 +738,7 @@ mod tests {
                 class: crate::class::ClassStatus::Adventurer,
                 faction_transition: false,
                 level: 1,
+                exp: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -770,6 +779,7 @@ mod tests {
             move_speed: 4.0,
             respawn_ms: 300_000,
             faction: None,
+            exp_reward: 100,
             pack_id: None,
             home_x: x,
             home_y: y,
@@ -823,6 +833,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
             wall(),
@@ -905,6 +916,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
             wall(),
@@ -923,6 +935,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(20),
             wall(),

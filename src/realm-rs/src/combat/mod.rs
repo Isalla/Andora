@@ -8,9 +8,11 @@
 // (CombatCfg) und werden anhand späterer Praxistests angepasst.
 // Die Trefferentscheidung ist eine reine Funktion mit injizierbarem,
 // reproduzierbarem RNG — damit in Tests deterministisch testbar.
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::CombatCfg;
+use crate::group::GroupManager;
 use crate::protocol::{s2c, Frame};
 use crate::world::World;
 
@@ -192,15 +194,17 @@ fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 /// - Ziel tot/weg → Auto-Angriff endet (auch für alle, die dasselbe Ziel
 ///   anvisieren). Bei 0 HP: KILL-Broadcast, HP nie unter 0.
 /// - NPC-Ziele: nur wenn `attackable` und nicht in Evade/Return (§18/§20).
-/// - Boss-Claim (Boss-System.md §2): erster Schadensverursacher (Schaden
-///   positiv) an freiem Boss erhält den Claim; andere zufügter Schaden
-///   übernimmt den Claim nicht.
+/// - Claim (Kampfsystem.md §2/Boss-System.md §2): erster gültiger Schaden
+///   an freiem Monster verleiht den Claim; Einzelspieler → Spieler-ID,
+///   Gruppenmitglied → "g:<id>" (Gruppensystem.md §8, Gruppe als Einheit).
 /// - NPC-Tod: Status Dead, Respawn-Timer startet (respawn_after, §21),
-///   Claim wird gelöscht; Respawn übernimmt npc::npc_tick.
-/// Sender: DAMAGE (+ hp via world_tick-STATE) und KILL an alle Sichtbaren.
+///   Claim wird gelöscht; EXP (§7) wird an die aktiven Gruppenmitglieder
+///   bzw. den Claim-Spieler verteilt.
+/// - Sender: DAMAGE (+ hp via world_tick-STATE) und KILL an alle Sichtbaren.
 pub fn combat_tick(
     world: &mut World,
     cfg: &CombatCfg,
+    groups: &GroupManager,
     rng: &mut dyn CombatRng,
     now: Instant,
     wall_now: SystemTime,
@@ -336,13 +340,22 @@ pub fn combat_tick(
                     .is_some_and(|n| n.status == crate::npc::NpcStatus::Alive);
                 if let Some(n) = world.npcs.get_mut(tid) {
                     if was_alive && n.status == crate::npc::NpcStatus::Alive {
-                        // Boss-Claim (§2): erster Schadensverursacher eines
-                        // freien Bosses erhält den Claim.
-                        if n.is_boss() && n.claimed_by.is_none() && *dmg > 0 {
-                            n.claimed_by = Some(aid.clone());
+                        // Claim (Kampfsystem.md §2): erster gültiger Schaden
+                        // an freiem Monster. Gruppenmitglied → Gruppe als
+                        // Einheit (Gruppensystem.md §8).
+                        if n.claimed_by.is_none() && *dmg > 0 {
+                            n.claimed_by = Some(
+                                groups
+                                    .group_of(aid)
+                                    .map(crate::group::encode_group_claim)
+                                    .unwrap_or_else(|| aid.clone()),
+                            );
                         }
                         n.hp = (n.hp - dmg).max(0);
                         if n.hp == 0 {
+                            // EXP (§7): Claim vor dem Löschen festhalten.
+                            let exp_reward = n.exp_reward;
+                            let claim = n.claimed_by.clone();
                             n.status = crate::npc::NpcStatus::Dead;
                             n.target_id = None;
                             n.no_link_since = None;
@@ -350,8 +363,9 @@ pub fn combat_tick(
                             // oder Default je Kategorie.
                             let respawn_ms = n.respawn_ms.max(0) as u64;
                             n.respawn_after = Some(wall_now + Duration::from_millis(respawn_ms));
-                            // Boss-Tod: Claim ungültig.
+                            // Monster-Tod: Claim ungültig.
                             n.claimed_by = None;
+                            award_monster_exp(world, groups, exp_reward, &claim, aid);
                             true
                         } else {
                             false
@@ -416,6 +430,56 @@ pub fn combat_tick(
     }
 }
 
+/// Gruppensystem V1 §7: Monster-EXP (100 %) an die Empfänger:
+/// - Claim der Gruppe → aktive Mitglieder (online + in Reichweite) teilen;
+/// - Claim eines Spielers → dieser erhält 100 %;
+/// - Kein Claim → Killer erhält 100 % (Fallback).
+///
+/// Empfänger, die nicht (mehr) online sind, erhalten nichts.
+#[allow(clippy::too_many_arguments)]
+fn award_monster_exp(
+    world: &mut World,
+    groups: &GroupManager,
+    exp_reward: i64,
+    claim: &Option<String>,
+    fallback_killer: &str,
+) {
+    let exp_reward = exp_reward.max(0);
+    if exp_reward == 0 {
+        return;
+    }
+    let recipients: Vec<String> = match claim {
+        Some(c) if crate::group::is_group_claim(c) => {
+            if let Some(gid) = crate::group::decode_group_claim(c) {
+                let positions: HashMap<String, (f64, f64)> = world
+                    .players
+                    .iter()
+                    .map(|(id, p)| (id.clone(), (p.x, p.y)))
+                    .collect();
+                groups.active_members(gid, &positions, groups.cfg.range)
+            } else {
+                Vec::new()
+            }
+        }
+        Some(pid) => vec![pid.clone()],
+        None => vec![fallback_killer.to_string()],
+    };
+    if recipients.is_empty() {
+        return;
+    }
+    let amounts = crate::group::split_exp_equally(exp_reward, recipients.len());
+    for (pid, amt) in recipients.iter().zip(&amounts) {
+        if let Some(p) = world.players.get_mut(pid) {
+            p.exp += amt;
+            p.send(&Frame::new(
+                0,
+                s2c::GROUP_TOAST,
+                serde_json::json!({"text": format!("+{amt} EXP"), "kind": "exp"}),
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +525,10 @@ mod tests {
         }
     }
 
+    fn groups() -> GroupManager {
+        GroupManager::new(crate::group::GroupCfg::default())
+    }
+
     fn player(
         id: &str,
         hp: i32,
@@ -488,6 +556,7 @@ mod tests {
                 class: crate::class::ClassStatus::from_db_name(class),
                 faction_transition: false,
                 level: 1,
+                exp: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -626,6 +695,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1,
             wall(),
@@ -641,6 +711,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t2,
             wall(),
@@ -657,6 +728,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t3,
             wall(),
@@ -681,6 +753,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -705,6 +778,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -725,6 +799,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -753,6 +828,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -801,6 +877,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+            &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -811,5 +888,53 @@ mod tests {
             w.players["a"].combat.is_none(),
             "toter Angreifer entwaffnet"
         );
+    }
+
+    #[test]
+    fn exp_group_claim_split_among_active_only() {
+        let mut w = World::new();
+        let t = Instant::now();
+        let mut gm = GroupManager::new(crate::group::GroupCfg::default());
+        let gid = gm.create_group("a", t).unwrap();
+        gm.invite(gid, "a", "b", t).unwrap();
+        gm.accept_invite(gid, "b", t).unwrap();
+        gm.invite(gid, "a", "c", t).unwrap();
+        gm.accept_invite(gid, "c", t).unwrap();
+        gm.on_disconnect("c", t);
+        // a (Leiter) bei 0,0; b bei 5,0 → beide aktiv. c ist offline.
+        let mut a = player("a", 1, "Warrior").0;
+        let mut b = player("b", 1, "Mage").0;
+        a.x = 0.0;
+        a.y = 0.0;
+        b.x = 5.0;
+        b.y = 0.0;
+        w.players.insert("a".into(), a);
+        w.players.insert("b".into(), b);
+
+        super::award_monster_exp(
+            &mut w,
+            &gm,
+            100,
+            &Some(crate::group::encode_group_claim(gid)),
+            "x",
+        );
+        assert_eq!(w.players["a"].exp, 50);
+        assert_eq!(w.players["b"].exp, 50);
+    }
+
+    #[test]
+    fn exp_solo_claim_and_no_claim_fallback() {
+        let mut w = World::new();
+        let gm = groups();
+        let (a, _) = player("a", 1, "Warrior");
+        w.players.insert("a".into(), a);
+
+        // Solo-Claim → 100 % an den Claim-Spieler.
+        super::award_monster_exp(&mut w, &gm, 40, &Some("a".into()), "x");
+        assert_eq!(w.players["a"].exp, 40);
+
+        // Kein Claim → Fallback auf den Killer (100 %).
+        super::award_monster_exp(&mut w, &gm, 10, &None, "a");
+        assert_eq!(w.players["a"].exp, 50);
     }
 }

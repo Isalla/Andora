@@ -414,7 +414,7 @@ Umsetzungsstand in Kürze:
 * **Events:** Realm-autoritative S2C-Frames für Cast- und Effektzustände (ABLITY/EFFECT), Instants senden ihre Wirkung sofort.
 * **Programmstruktur:** modulares Kampf-Modul unter `src/realm-rs/src/combat/` (`ability.rs`, `effects.rs`, `cooldowns.rs`, `aoe.rs`, `events.rs`, `targeting.rs`), wiederverwendbar für Spieler, NPCs, Named und Bosse (Details: `Kampfsystem_V3_Wiederverwendung.md`).
 
-**Nicht Bestandteil von Combat V3** (bleiben offen): Claim/Ownership-Ability-Logik, Gruppensystem, Cleanse/Dispel, vollständige Channel-Regeln, Passive Fähigkeiten, Meisterschaft, Klassenfähigkeiten, endgültiges Balancing.
+**Nicht Bestandteil von Combat V3** (bleiben offen): Claim/Ownership-Ability-Logik, Gruppensystem (V1-Design siehe `Gruppensystem.md`, Code-Implementierung im Realm-Server steht aus), Cleanse/Dispel, vollständige Channel-Regeln, Passive Fähigkeiten, Meisterschaft, Klassenfähigkeiten, endgültiges Balancing.
 
 > **Stand:** Combat V3 **umgesetzt** (Realm-Binär, 82 Unit-Tests grün); Probe-Fähigkeiten als Seed in Migration 010 (`fire_bolt`, `healing_light`, `soul_rend`, `frost_nova`, `choke`, `battle_shout`). NPC-Ausführung ihrer Lernfähigkeiten ist noch nicht verdrahtet und folgt mit den Boss-Fähigkeiten.
 

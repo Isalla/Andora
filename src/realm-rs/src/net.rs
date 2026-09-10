@@ -13,6 +13,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::auth_api::AuthApi;
 use crate::config::Config;
 use crate::db;
+use crate::group::SharedGroups;
 use crate::handlers::{self, Ctx};
 use crate::parental::{self, SharedParental};
 use crate::protocol::{c2s, Frame};
@@ -26,6 +27,7 @@ pub async fn serve(
     auth: AuthApi,
     shared: Shared,
     parental: SharedParental,
+    groups: SharedGroups,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
     // Ability-Registry aus Content-Schicht laden (Migration 010).
@@ -43,6 +45,7 @@ pub async fn serve(
         shared,
         parental,
         registry,
+        groups,
     });
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -136,17 +139,18 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         dispatch(&ctx, &tx, conn_id, frame).await;
     }
 
-    // Disconnect: Parental-State abräumen, Position speichern,
-    // DESPAWN-Broadcast, Registry putzen (wie Übergangsstand).
+    // Disconnect: Parental-State abräumen, Position + EXP speichern,
+    // DESPAWN-Broadcast, Registry putzen, Gruppenzustand (§9) aktualisieren.
     let pid: Option<String> = {
         let mut world = ctx.shared.lock().await;
         world.closers.remove(&conn_id);
         let pid = world.by_conn.get(&conn_id).cloned();
         if let Some(ref pid) = pid {
             if let Some(me) = world.players.get(pid) {
-                let (id, x, y) = (me.id.clone(), me.x, me.y);
+                let (id, x, y, exp) = (me.id.clone(), me.x, me.y, me.exp);
                 drop(world);
                 db::save_position(&ctx.db, &id, x, y).await;
+                db::save_exp(&ctx.db, &id, exp).await;
                 let mut world = ctx.shared.lock().await;
                 disconnect_player(&mut world, pid);
             }
@@ -155,6 +159,8 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
     };
     if let Some(pid) = pid {
         parental::detach(&ctx.parental, &pid).await;
+        let mut groups = ctx.groups.lock().await;
+        groups.on_disconnect(&pid, std::time::Instant::now());
         log::info!("client disconnected: {pid}");
     }
     forward.abort();
@@ -196,6 +202,13 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
             )
             .await
         }
+        c2s::GROUP_INVITE => handlers::handle_group_invite(ctx, conn_id, &data).await,
+        c2s::GROUP_INVITE_REACT => handlers::handle_group_invite_react(ctx, conn_id, &data).await,
+        c2s::GROUP_SUGGEST => handlers::handle_group_suggest(ctx, conn_id, &data).await,
+        c2s::GROUP_SUGGEST_DECIDE => handlers::handle_group_suggest_decide(ctx, conn_id, &data).await,
+        c2s::GROUP_LEAVE => handlers::handle_group_leave(ctx, conn_id, &data).await,
+        c2s::GROUP_KICK => handlers::handle_group_kick(ctx, conn_id, &data).await,
+        c2s::GROUP_TRANSFER => handlers::handle_group_transfer(ctx, conn_id, &data).await,
         c2s::PARENTAL => {
             let pid: Option<String> = {
                 let world = ctx.shared.lock().await;

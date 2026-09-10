@@ -19,6 +19,7 @@ pub struct Character {
     pub x: f64,
     pub y: f64,
     pub level: u32,
+    pub exp: i64,
     pub hp: i32,
     pub char_class: String,
     /// Typsichere Klassenbasis (docs/Klassensystem.md); aus
@@ -85,6 +86,7 @@ struct CharacterRow {
     id: i64,
     name: String,
     level: i32,
+    exp: i64,
     hp: i32,
     char_class: String,
     faction_transition: i8,
@@ -110,6 +112,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             level: row.try_get("level")?,
+            exp: row.try_get("exp")?,
             hp: row.try_get("hp")?,
             char_class: row.try_get("char_class")?,
             faction_transition: row.try_get("faction_transition")?,
@@ -135,7 +138,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
-        "SELECT id, name, level, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
+        "SELECT id, name, level, exp, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
          endurance FROM characters WHERE id = ?",
     )
@@ -151,6 +154,7 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             x: row.x,
             y: row.y,
             level: row.level.max(0) as u32,
+            exp: row.exp.max(0),
             hp: row.hp,
             char_class: row.char_class,
             class,
@@ -183,6 +187,7 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         x: 0.0,
         y: 0.0,
         level: 1,
+        exp: 0,
         hp: 100,
         char_class: class.canonical_db_name().to_string(),
         class,
@@ -227,6 +232,18 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
     }
 }
 
+/// Speichert EXP-Punktestand (Fehler nur loggen — kein Crash).
+pub async fn save_exp(pool: &Pool<MySql>, char_id: &str, exp: i64) {
+    if let Err(e) = sqlx::query("UPDATE characters SET exp = ? WHERE id = ?")
+        .bind(exp)
+        .bind(char_id)
+        .execute(pool)
+        .await
+    {
+        log::error!("saveExp {char_id}: {e}");
+    }
+}
+
 /// Content-Definition eines Monsters (monster_definitions, Migration 009).
 #[derive(Debug, Clone)]
 pub struct NpcDefRow {
@@ -245,6 +262,8 @@ pub struct NpcDefRow {
     pub move_speed: f64,
     pub respawn_ms: Option<i64>,
     pub faction: Option<String>,
+    #[allow(dead_code)]
+    pub exp_reward: i64,
 }
 
 /// Spawn-Platzierung (monster_spawns: Home-Zone, Leash, Pack, Overrides).
@@ -286,11 +305,12 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
             f64,
             Option<i64>,
             Option<String>,
+            i64,
         ),
     >(
         "SELECT id, name, kind, attackable, aggressive, aggro_range, attack_range, \
          attack_duration_ms, weapon_damage, weapon_skill, armor, max_hp, move_speed, \
-         respawn_ms, faction FROM monster_definitions",
+         respawn_ms, faction, exp_reward FROM monster_definitions",
     )
     .persistent(false)
     .fetch_all(&mut *conn)
@@ -315,6 +335,7 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
                 move_speed,
                 respawn_ms,
                 faction,
+                exp_reward,
             )| {
                 NpcDefRow {
                     id,
@@ -332,6 +353,7 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
                     move_speed,
                     respawn_ms,
                     faction,
+                    exp_reward,
                 }
             },
         )

@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
+use crate::group::GroupCfg;
+
 #[derive(Debug, Clone)]
 pub struct DbConfig {
     pub host: String,
@@ -256,6 +258,14 @@ pub fn npc_config(env: &HashMap<String, String>) -> NpcCfg {
     }
 }
 
+pub fn group_config(env: &HashMap<String, String>) -> GroupCfg {
+    GroupCfg {
+        max_members: num1(env, "GROUP_MAX_SIZE", 4) as u32,
+        range: numf(env, "GROUP_RANGE", 100.0),
+        reconnect_ms: num1(env, "GROUP_RECONNECT_MS", 300_000),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Eigene Realm-ID (prüft Handoff-Bindung: handoff.realm_id muss passen).
@@ -284,6 +294,8 @@ pub struct Config {
     pub combat: CombatCfg,
     /// Vorläufige NPC/Combat-V2-Mechanikwerte.
     pub npc: NpcCfg,
+    /// Gruppensystem V1 (docs/Gruppensystem.md §§1–9).
+    pub group: GroupCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -398,6 +410,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         allow_destructive: g("ALLOW_DESTRUCTIVE_MIGRATIONS") == "1",
         combat: combat_config(&env),
         npc: npc_config(&env),
+        group: group_config(&env),
     })
 }
 
