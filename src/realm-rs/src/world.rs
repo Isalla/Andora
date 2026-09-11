@@ -86,6 +86,10 @@ pub struct Player {
     /// ohne vorgezogenes Runden über Ticks.
     pub hp_regen_carry: f64,
     pub mana_regen_carry: f64,
+    /// Inventory System V1 (docs/inventory_system.md): Grundinventar,
+    /// Rucksäcke, Equipment, temporärer Sicherheits-Puffer. Wird bei HELLO
+    /// aus realm_state geladen, bei Änderung/Disconnect persistiert.
+    pub inventory: crate::inventory::InventoryState,
 }
 
 impl Player {
@@ -388,6 +392,7 @@ mod tests {
                 mana_regen_bonus: 0.0,
                 hp_regen_carry: 0.0,
                 mana_regen_carry: 0.0,
+                inventory: Default::default(),
             },
             rx,
         )

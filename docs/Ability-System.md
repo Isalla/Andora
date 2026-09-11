@@ -199,7 +199,7 @@ Seltene Herstellungsrezepte können gehandelt werden und sollen dadurch wertvoll
 
 Fähigkeitsbücher, Schriftrollen und Rezepte sind grundsätzlich handelbare Gegenstände. Binding (Charakterbindung) erfolgt nur, wenn die jeweilige Gegenstandsdefinition dies explizit vorsieht (siehe `Lootsystem.md` und `item_properties.md`).
 
-**Abgrenzung:** Die Fähigkeitsqualität ist ein eigenständiges Progressionssystem und nicht mit der Item-Quality (1–6) in `item_properties.md`, `inventory_system.md` oder `Crafting.md` identisch. Ein Fähigkeitsbuch ist ein Item mit eigener Quelle und eigener Qualitätsstufe, folgt aber nicht dem regulären Crafting-Overcap-System.
+**Abgrenzung:** Die Fähigkeitsqualität ist ein eigenständiges Progressionssystem und nicht mit der numerischen Item-Quality in `item_properties.md` oder der Quality-Overcap-Skala in `Crafting.md` identisch. Ein Fähigkeitsbuch ist ein Item mit eigener Quelle und eigener Qualitätsstufe, folgt aber nicht dem regulären Crafting-Overcap-System.
 
 Der Begriff „Meisterhaft" wird im Ability-System als Fähigkeits-Qualitätsstufe verwendet und ist nicht mit der Crafting-Qualitätsstufe „meisterhaft" in `Crafting_Grundprinzip.md` identisch.
 
@@ -347,7 +347,7 @@ Dafür soll kein separates zweites Ability-System entstehen. Content/Lua definie
 | Loot | `Lootsystem.md` | Fähigkeitsbücher als Loot-Quellen: Truhen (Fortgeschritten 1, Meisterhaft 1), normale Monster (Lehrling 4), Boss-/Raidboss-Loot (Legendär). |
 | Crafting | `Crafting_Grundprinzip.md`, `Crafting.md`, `Handwerks_und_Sammelsystem.md` | Seltene Rezepte für Fortgeschritten 2 und Meisterhaft 2; seltenes Rezept + seltene Rohstoffe als Wirtschaftskreislauf. |
 | Auktionshaus | `Auktionshaus und Marktplatz` | Seltene Herstellungsrezepte als handelbare Wirtschaftsgüter. |
-| Item-System | `item_properties.md`, `inventory_system.md` | Fähigkeitsbücher sind Items; Ability-Qualität ist nicht identisch mit Item-Quality (1–6). |
+| Item-System | `item_properties.md` | Fähigkeitsbücher sind Items; Ability-Qualität ist nicht identisch mit der numerischen Item-Quality. |
 | Datenarchitektur | `Datenbank_Architektur.md` | Persistente Cooldown-Zustände über Tod/Logout; Meisterschaftsstände als Realm-Daten. |
 | Rassen-Fraktionen | `Rassen-Fraktionen.md`, Rasse-Dokumente | Rassenfähigkeiten können außerhalb des Ability-Qualitätssystems stehen. |
 | Storytelling | `Storytelling_und_Weltgeheimnisse.md` | Bücher als Gameplay; Fähigkeitsbücher als Fundgegenstände in der Welt. |

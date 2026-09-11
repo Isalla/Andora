@@ -133,7 +133,7 @@ Ausnahmen:
 
 * **Erfolge und Titel:** `Erfolge_und_Titel.md` definiert Titel als kosmetisches Prestige ohne Gameplay-Vorteil. Der Unterstützer-Titel aus den Spenden ist ein Titel im selben System – ohne Bezugsmauer und ohne Vorteil.
 * **Auktionshaus / Marktplatz:** `Auktionshaus und Marktplatz` definiert Ingame-Geld und AH-Depot. Reale Ingame-Guthaben sind Spielwährung und dürfen nie mit Echtgeld aufgeladen oder aus Echtgeld bezogen werden.
-* **Inventar-/Backpack-Expansion:** `inventory_system.md` definiert Level-Abhängige Erweiterungen. Solche Erweiterungen entstehen durch Level/Ingame-Fortschritt, nicht durch Kauf.
+* **Inventar-/Backpack-Expansion:** Rucksackgrößen und deren Erwerb sind Content- und Progressionsfragen (siehe `inventory_system.md`). Solche Erweiterungen entstehen durch Ingame-Fortschritt, nicht durch Kauf. Level-Abhängige Hartschranken werden im Inventory-Kern nicht fest codiert.
 * **Item-Erwerb:** `item_properties.md` listet „Shop purchases“ als Erwerbsweg. Gemeint sind ausschließlich Ingame-Händler, die Ingame-Geld annehmen, keine Echtgeld-Shops.
 * **Gildenstadt-Wirtschaft:** `exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md` ist vollständig Ingame-Wirtschaft (Stadtkasse, Steuern, Handel, Transport); keine Echtgeld-Grenze, sondern ein Beispiel für die erlaubte Spielerwirtschaft.
 * **Elternkontrolle:** `parental_control.md` führt „Käufe (ausschließlich Ingame-Käufe mit Ingame-Währung)“ als mögliche spätere Regel. Echtgeldfunktionen existieren in Andora nicht und sind als Thema der Elternkontrolle nicht vorgesehen; die freiwillige Website-Donation ist eine nicht-spielrelevante Unterstützungsleistung und damit auch kein Regelungsgegenstand der Elternkontrolle.

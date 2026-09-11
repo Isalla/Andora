@@ -786,6 +786,20 @@ pub async fn save_item_instance(
         .begin()
         .await
         .map_err(|e| format!("Item-Transaktion beginnen: {e}"))?;
+    write_item_instance(&mut tx, instance).await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Item-Instanz commit: {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: Item-Instanz + Modifikatoren in einen
+/// laufenden Transaction upserten. Wird von save_item_instance und
+/// save_inventory gemeinsam genutzt.
+async fn write_item_instance(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    instance: &crate::item::ItemInstance,
+) -> Result<(), String> {
     sqlx::query(
         "INSERT INTO item_instances \
            (item_uuid, item_id, count, durability_current, durability_max, binding, creator_id) \
@@ -802,7 +816,7 @@ pub async fn save_item_instance(
     .bind(instance.durability_max)
     .bind(instance.binding.as_db())
     .bind(instance.creator_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|e| format!("Item-Instanz speichern: {e}"))?;
 
@@ -819,7 +833,7 @@ pub async fn save_item_instance(
     .bind(instance.modifiers.armor_modifier)
     .bind(instance.modifiers.weight_modifier)
     .bind(instance.modifiers.quality_modifier)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|e| format!("Item-Modifikatoren speichern: {e}"))?;
 
@@ -831,7 +845,7 @@ pub async fn save_item_instance(
         .bind(&instance.item_uuid)
         .bind(attribute)
         .bind(value)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Item-Attribut-Mod speichern: {e}"))?;
     }
@@ -843,13 +857,283 @@ pub async fn save_item_instance(
         .bind(&instance.item_uuid)
         .bind(resistance)
         .bind(value)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Item-Resistenz-Mod speichern: {e}"))?;
     }
+    Ok(())
+}
+
+// ===== Inventory System V1 (Migration 016) =====
+// Realm-autoritative Persistierung von Grundinventar, Rucksäcken, Equipment
+// und dem temporären Sicherheits-Puffer (docs/inventory_system.md).
+//
+// Volles Transaktions-Schreiben (Vollwrite je Mutation): Alle Instanzen
+// werden in item_instances upsertet, danach alle Platzierungs-Tabellen
+// komplett neu befüllt. Puffer-Zeilen werden beim Logout gelöscht.
+
+/// Hilfsfunktion: Item-Instanz laden oder None (verschwundene
+/// FK-Zeilen → leerer Slot).
+async fn load_instance_opt(
+    pool: &Pool<MySql>,
+    uuid: &str,
+) -> Option<crate::item::ItemInstance> {
+    match load_item_instance(pool, uuid).await {
+        Ok(Some(i)) => Some(i),
+        _ => None,
+    }
+}
+
+/// Lädt das Inventar eines Charakters (Migration 016): Grundinventar,
+/// Rucksäcke + Slots, Equipment sowie den Sicherheits-Puffer.
+/// `base_slots` ist die Anzahl der konfigurierten Basis-Slots
+/// (INVENTORY_BASE_SLOTS, Config-Wert).
+pub async fn load_inventory(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    base_slots: usize,
+) -> Result<crate::inventory::InventoryState, String> {
+    use crate::inventory::{EquipSlot, InventoryState};
+
+    let mut state = InventoryState::new(base_slots);
+
+    // --- Grundinventar (Basis-Slots) ---
+    let rows: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT slot, item_uuid FROM character_inventory WHERE char_id = ? ORDER BY slot")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Inventar laden: {e}"))?;
+    for (slot, uuid) in rows {
+        if slot < 0 || slot as usize >= state.base_slots.len() {
+            log::warn!(
+                "loadInventory {char_id}: Slot {slot} ausserhalb Basis ({base_slots}); ignoriert"
+            );
+            continue;
+        }
+        if let Some(u) = uuid {
+            state.base_slots[slot as usize] = load_instance_opt(pool, &u).await;
+        }
+    }
+
+    // --- Rucksäcke (Definitionen) ---
+    let bag_rows: Vec<(i64, String, i64)> =
+        sqlx::query_as("SELECT bag_id, name, slot_count FROM character_bags WHERE char_id = ? ORDER BY bag_id")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Rucksäcke laden: {e}"))?;
+    for (bag_id, name, slot_count) in bag_rows {
+        let n = slot_count.max(0) as usize;
+        if n == 0 {
+            continue;
+        }
+        state.bags.push(crate::inventory::Bag {
+            bag_id: bag_id as u64,
+            name,
+            slots: vec![None; n],
+        });
+    }
+    // --- Bag-Slots (Inhalt) ---
+    let slot_rows: Vec<(i64, i64, Option<String>)> =
+        sqlx::query_as(
+            "SELECT bag_id, slot, item_uuid FROM bag_slots WHERE char_id = ? ORDER BY bag_id, slot",
+        )
+        .bind(char_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Rucksack-Slots laden: {e}"))?;
+    for (bag_id, slot, uuid) in slot_rows {
+        if let Some(b) = state.bags.iter_mut().find(|b| b.bag_id == bag_id as u64) {
+            if slot >= 0 && (slot as usize) < b.slots.len() {
+                if let Some(u) = uuid {
+                    b.slots[slot as usize] = load_instance_opt(pool, &u).await;
+                }
+            }
+        }
+    }
+
+    // --- Equipment-Slots ---
+    let eq_rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT slot, item_uuid FROM character_equipment WHERE char_id = ?")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Equipment laden: {e}"))?;
+    for (slot, uuid) in eq_rows {
+        if let (Some(u), Some(es)) = (uuid, EquipSlot::from_db(&slot)) {
+            if let Some(inst) = load_instance_opt(pool, &u).await {
+                state.equipped.insert(es, inst);
+            }
+        }
+    }
+
+    // --- Sicherheits-Puffer (temporär) ---
+    let buf_rows: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT slot, item_uuid FROM inventory_buffer WHERE char_id = ? ORDER BY slot")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Puffer laden: {e}"))?;
+    for (slot, uuid) in buf_rows {
+        if slot < 0 {
+            continue;
+        }
+        let idx = slot as usize;
+        if idx >= state.buffer.len() {
+            state.buffer.resize(idx + 1, None);
+        }
+        if let Some(u) = uuid {
+            state.buffer[idx] = load_instance_opt(pool, &u).await;
+        }
+    }
+
+    Ok(state)
+}
+
+/// Volles Transaktions-Schreiben (Vollwrite) des Inventar-Zustands:
+/// Alle aktuell vorhandenen item_instances werden upsertet, danach alle
+/// Platzierungs-Tabellen (Inventar, Rucksäcke, Equipment) komplett neu
+/// befüllt. Der Sicherheits-Puffer wird NICHT persistiert (temporär,
+///docs/inventory_system.md §11).
+pub async fn save_inventory(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    state: &crate::inventory::InventoryState,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Inventar-Transaktion beginnen: {e}"))?;
+
+    // --- 1. Alle betroffenen item_instances upserten ---
+    let mut seen = std::collections::HashSet::new();
+    let instances: Vec<&crate::item::ItemInstance> = state
+        .base_slots
+        .iter()
+        .chain(state.bags.iter().flat_map(|b| &b.slots))
+        .filter_map(|s| s.as_ref())
+        .chain(state.equipped.values())
+        .collect();
+    for inst in &instances {
+        if seen.insert(inst.item_uuid.as_str()) {
+            write_item_instance(&mut tx, inst).await?;
+        }
+    }
+
+    // --- 2. Platzierungen komplett neu schreiben (Transaktions-Vollwrite) ---
+    sqlx::query("DELETE FROM character_inventory WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Altes Inventar löschen: {e}"))?;
+    sqlx::query("DELETE FROM bag_slots WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Alte Bag-Slots löschen: {e}"))?;
+    sqlx::query("DELETE FROM character_bags WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Alte Rucksäcke löschen: {e}"))?;
+    sqlx::query("DELETE FROM character_equipment WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Altes Equipment löschen: {e}"))?;
+
+    // Grundinventar (nur belegte Slots werden geschrieben).
+    for (i, slot) in state.base_slots.iter().enumerate() {
+        if let Some(inst) = slot {
+            sqlx::query(
+                "INSERT INTO character_inventory (char_id, slot, item_uuid) VALUES (?, ?, ?)",
+            )
+            .bind(char_id)
+            .bind(i as i64)
+            .bind(&inst.item_uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Inventar-Slot speichern: {e}"))?;
+        }
+    }
+    // Rucksäcke + Bag-Slots.
+    for b in &state.bags {
+        sqlx::query(
+            "INSERT INTO character_bags (char_id, bag_id, name, slot_count) VALUES (?, ?, ?, ?)",
+        )
+        .bind(char_id)
+        .bind(b.bag_id as i64)
+        .bind(&b.name)
+        .bind(b.slots.len() as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Rucksack speichern: {e}"))?;
+        for (i, slot) in b.slots.iter().enumerate() {
+            if let Some(inst) = slot {
+                sqlx::query(
+                    "INSERT INTO bag_slots (char_id, bag_id, slot, item_uuid) VALUES (?, ?, ?, ?)",
+                )
+                .bind(char_id)
+                .bind(b.bag_id as i64)
+                .bind(i as i64)
+                .bind(&inst.item_uuid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Bag-Slot speichern: {e}"))?;
+            }
+        }
+    }
+    // Equipment-Slots.
+    for (slot, inst) in &state.equipped {
+        sqlx::query(
+            "INSERT INTO character_equipment (char_id, slot, item_uuid) VALUES (?, ?, ?)",
+        )
+        .bind(char_id)
+        .bind(slot.as_db())
+        .bind(&inst.item_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Equipment speichern: {e}"))?;
+    }
+    // Puffer: in V1 nicht persistiert (temporär; §11). Zeilen werden
+    // beim Logout gelöscht (wipe_logout_buffer) und niemals geschrieben.
 
     tx.commit()
         .await
-        .map_err(|e| format!("Item-Instanz commit: {e}"))?;
+        .map_err(|e| format!("Inventar-Transaktion commit: {e}"))?;
+    Ok(())
+}
+
+/// Löscht beim Logout den Sicherheits-Puffer (docs/inventory_system.md §11):
+/// Puffer-Zeilen des Charakters sowie die zugehörigen, nun verwaisten
+/// item_instances-Zeilen (drop_buffer liefert die verfallenen UUIDs).
+/// In V1 werden Pufferzeilen nie geschrieben, daher ist dieser Aufruf
+/// ein No-Op; die Funktion steht für künftige Crash-Recovery bereit.
+#[allow(dead_code)]
+pub async fn wipe_logout_buffer(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    uuids: &[String],
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Puffer-Transaktion beginnen: {e}"))?;
+    sqlx::query("DELETE FROM inventory_buffer WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Puffer-Zeilen löschen: {e}"))?;
+    for u in uuids {
+        sqlx::query("DELETE FROM item_instances WHERE item_uuid = ?")
+            .bind(u)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Verwaiste Instanz löschen ({u}): {e}"))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Puffer-Transaktion commit: {e}"))?;
     Ok(())
 }

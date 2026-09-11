@@ -7,6 +7,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 
 use crate::group::GroupCfg;
+use crate::inventory::InventoryCfg;
 
 #[derive(Debug, Clone)]
 pub struct DbConfig {
@@ -266,6 +267,24 @@ pub fn group_config(env: &HashMap<String, String>) -> GroupCfg {
     }
 }
 
+pub fn inventory_config(env: &HashMap<String, String>) -> InventoryCfg {
+    let base = num1(env, "INVENTORY_BASE_SLOTS", 8) as u16;
+    let max_bags = env
+        .get("INVENTORY_MAX_EQUIPPED_BAGS")
+        .and_then(|v| {
+            let t = v.trim().to_lowercase();
+            if t.is_empty() || t == "none" || t == "unlimited" {
+                None
+            } else {
+                t.parse::<u16>().ok()
+            }
+        });
+    InventoryCfg {
+        base_slots: base,
+        max_equipped_bags: max_bags,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Eigene Realm-ID (prüft Handoff-Bindung: handoff.realm_id muss passen).
@@ -296,6 +315,8 @@ pub struct Config {
     pub npc: NpcCfg,
     /// Gruppensystem V1 (docs/Gruppensystem.md §§1–9).
     pub group: GroupCfg,
+    /// Inventory System V1 (docs/inventory_system.md).
+    pub inventory: InventoryCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -411,6 +432,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         combat: combat_config(&env),
         npc: npc_config(&env),
         group: group_config(&env),
+        inventory: inventory_config(&env),
     })
 }
 

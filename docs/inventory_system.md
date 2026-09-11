@@ -1,135 +1,400 @@
-# Inventory System Documentation
+# Andora – Inventory-System V1
 
-## Overview
+## Status
 
-This system manages player inventory with backpack expansion capabilities, allowing players to store and organize items during gameplay. The system encompasses all game elements including weapons, armor, equipment, and crafting materials.
+**Implementiert (Konzept – verbindlicher Stand).**
 
-## Core Functionality
+Rust-Umsetzung in `src/realm-rs/src/inventory.rs` (reine Zustandslogik, 18 Unit-Tests,
+uncommittet): Grundinventar (Basis-Slots via `INVENTORY_BASE_SLOTS`, Default 8), ausrüstbare
+Rucksäcke/Taschen (eigene Slots, benennbar, keine Kategoriebindung; optional
+`INVENTORY_MAX_EQUIPPED_BAGS`), 21 Equipment-/Funktionsslots (`EquipSlot`), temporärer
+Sicherheits-Puffer (verfällt beim Logout). Persistierung über Migration 016 und
+`db.rs` (`load_inventory`/`save_inventory`, Transaktions-Vollwrite; Puffer wird nicht
+persistiert). Anbindung: Laden + serverseitiges Entfernen defekten Equipments beim Einstieg
+(`handle_hello`), Speichern beim Disconnect (`net.rs`); Config in `config.rs`.
 
-### Item Management
-The inventory system handles:
-- Item storage and organization
-- Equipment management (weapons, armor, etc.)
-- Inventory size constraints (standard 8 slots)
-- Backpack expansion system (4/8/12/16/20/24/30/38/42/48/52/64 slot sizes)
-- Crafting material storage and organization
-- Equipment slot management for weapons, armor and accessories
+Kein Client-UI, keine Protokoll-IDs (folgen mit dem Spiellayer). Loot-/Quest-Aufrufer
+nutzen die Kern-API (`try_add`/`fits`/`capacity_for`) — im V1-Loop noch kein Aufrufer.
 
-## Technical Implementation
+Die bestehende Item-System-V1-Architektur (`item_properties.md`, Abschnitt „Item System V1 – Implementierungsstand") ist verbindlich und wird hier nicht verändert.
 
-### Item Structure
-Each item in the inventory follows a standardized structure:
-```json
-{
-  "name": "Ancient Sword",
-  "type": "weapon",
-  "quality": 5,
-  "size": 16,
-  "weight": 3.2,
-  "description": "A legendary sword that glows with ancient power"
-}
+---
+
+## 1. Grundprinzip
+
+Das Inventory-System verwaltet:
+
+* Grundinventar
+* mehrere ausrüstbare Rucksäcke / Taschen
+* Equipment- und Funktionsslots
+* einen temporären Sicherheits-Puffer für Ausnahmefälle
+
+Verbindlich gilt:
+
+> **1 Item oder 1 Stack = exakt 1 Inventarslot.**
+
+Die alte Item-„size"-Mechanik ist verworfen.
+Items belegen niemals mehrere Inventarslots aufgrund ihrer Größe.
+
+Numerische Quality und Rarity sind getrennte Eigenschaften gemäß Item System V1
+(vereinbart in `item_properties.md`, Abschnitt „Numerische Qualität" und
+„Seltenheiten"). Alte Dokumentation, die Quality und Rarity koppelt oder
+daraus Item-Größe ableitet, wurde hiermit korrigiert.
+
+---
+
+## 2. Grundinventar und Rucksäcke
+
+Der Charakter besitzt ein Grundinventar und mehrere ausrüstbare Rucksack- / Taschenplätze.
+
+### Grundinventar
+
+Das Grundinventar hat eine feste Anzahl von Slots
+(derzeitiger Inhaltswert: **8 Slots**).
+
+Die konkrete Startgröße ist ein Content-Wert; sie wird nicht als Architekturregel
+im Inventory-Kern interpretiert und kann bei Bedarf über Konfiguration angepasst werden.
+
+### Ausrüstbare Rucksäcke / Taschen
+
+Jeder ausgerüstete Rucksack:
+
+* besitzt eine eigene Anzahl von Slots,
+* stellt einen eigenen Inventarbereich dar,
+* kann vom Spieler individuell benannt werden.
+
+Beispiele für Namen:
+
+* Ausrüstung
+* Rohstoffe
+* Zu verkaufen
+* Tränke
+
+Der Name ist ausschließlich Organisations- / Anzeigedaten.
+Eine Tasche namens „Rohstoffe" darf trotzdem beliebige normale Items enthalten.
+Es gibt **keine** serverseitige Item-Kategoriebeschränkung aufgrund des Taschennamens.
+
+### Gesamtkapazität
+
+Die Gesamtkapazität ergibt sich aus:
+
+```text
+Grundinventar (Slots)
++ Summe (Slots aller ausrüsteten Rucksäcke)
+= Gesamtkapazität
 ```
 
-### Quality Color System
-Items dropped in the world are classified by quality colors with decreasing rarity:
-- **Gray (Poor)**: Lowest quality, basic stats
-- **Green (Common)**: Standard quality items
-- **Blue (Uncommon)**: Better quality with enhanced stats
-- **Yellow (Rare)**: High quality with significant bonuses
-- **Orange (Epic)**: Very rare items with powerful attributes
-- **Purple (Legendary)**: Highest quality, exceptional stats and abilities
+### Kein Level-Hardcoding für Rucksackgrößen
 
-### Quality Levels
-Equipment items have minimum level requirements and multiple quality levels with additional attributes:
-- **Quality 1 (Common)**: Basic stats, no special attributes
-- **Quality 2 (Uncommon)**: +10% stat bonus, basic special attributes
-- **Quality 3 (Rare)**: +20% stat bonus, moderate special attributes
-- **Quality 4 (Epic)**: +30% stat bonus, significant special attributes
-- **Quality 5 (Legendary)**: +40% stat bonus, powerful special attributes
+Die alten fest an Charakterlevel gekoppelten Rucksackgrößen
+(4/8/12/16/20/24/30/38/42/48/52/64) werden **nicht** als harte Rust-Logik
+übernommen.
 
-Each quality level provides:
-- Enhanced base stats
-- Unique special abilities or bonuses
-- Higher item size requirements
-- Increased weight and durability
+Tier- und Progressionsgrenzen sollen nicht im Inventory-Kern hartcodiert werden.
 
-### Minimum Level Requirements
-All equipment items have minimum level requirements for usage:
-- Common items: Level 1
-- Uncommon items: Level 5
-- Rare items: Level 10
-- Epic items: Level 20
-- Legendary items: Level 30
+Rucksackgrößen und deren Erwerb sind Content- und Progressionsfragen
+(siehe `Tier-Progression.md`).
 
-### Equipment Tier System
-All equipment (weapons, armor, accessories) follows a tier-based system that aligns with player levels:
-- Tier 0: Level 1-10
-- Tier 1: Level 11-20
-- Tier 2: Level 21-30
-- Tier 3: Level 31-40
-- Tier 4: Level 41-50
-- Tier 5: Level 51-60
-- Tier 6: Level 61-70
-- Tier 7: Level 71-80
-- Tier 8: Level 81-90
-- Tier 9: Level 91-100
-- Tier 10: Level 101-110
-- Tier 11: Level 111+
+---
 
-### Backpack Expansion System
-Backpack expansions are earned through in-game progression (level tiers). They are never purchased with real money or with gold; expansion is tied to player level and remains an in-game progression reward (see `Monetarisierung_und_Donations.md`).
+## 3. Client-Darstellung
 
-The system allows players to expand their inventory through:
-- Tier 0 backpacks (4 slots) - Level 1-10
-- Tier 1 backpacks (8 slots) - Level 11-20
-- Tier 2 backpacks (12 slots) - Level 21-30
-- Tier 3 backpacks (16 slots) - Level 31-40
-- Tier 4 backpacks (20 slots) - Level 41-50
-- Tier 5 backpacks (24 slots) - Level 51-60
-- Tier 6 backpacks (30 slots) - Level 61-70
-- Tier 7 backpacks (38 slots) - Level 71-80
-- Tier 8 backpacks (42 slots) - Level 81-90
-- Tier 9 backpacks (48 slots) - Level 91-100
-- Tier 10 backpacks (52 slots) - Level 101-110
-- Tier 11 backpacks (64 slots) - Level 111+
+Der Realm verwaltet Inventarbereiche, Slots und Inhalte.
 
-Each backpack size corresponds to a specific level tier:
-- Tier 0: Level 1-10
-- Tier 1: Level 11-20
-- Tier 2: Level 21-30
-- Tier 3: Level 31-40
-- And so on...
+Die Darstellung ist Sache des Godot-Clients.
 
-### Inventory System Architecture
-The inventory system consists of:
-1. **Item Storage**: Core inventory management
-2. **Backpack Management**: Expansion and sizing logic
-3. **Equipment Slot**: Specialized areas for equipped items (weapons, armor, accessories)
-4. **Crafting Materials**: Dedicated storage for crafting resources
-5. **UI Integration**: Visual representation in the game
-6. **Consumable Slots**: Dedicated item/consumable slots for food and drinks/potions (Speisen/Getränke mit Dauerwirkung, direkte Heil-/Manatränke). These can later be used manually or automatically. Details and the conceptual distinction (duration effects vs. direct resource restoration) are defined in `Attribute_und_Regeneration.md` (Abschnitt 9).
+Der Client soll später beispielsweise:
 
-## Integration Points
+* Rucksäcke als Tabs / Reiter darstellen können,
+* mehrere Rucksäcke an ein gemeinsames Inventarfenster binden können,
+* gegebenenfalls mehrere Inventarfenster verwenden können.
 
-### Boss System Integration
-- Item rewards from boss battles are added to player inventory
-- Special item drops that trigger personal cutscenes when found
-- Inventory size affects how many items the player can carry,
-  but does not affect item drop chance or item quality.
+Diese UI-Gruppierung ist **keine** Realm-Server-Architektur.
 
-### Quest System Integration
-- Items required for quests are tracked
-- Quest completion rewards are added to inventory
-- Special quest items have unique properties and storage requirements
+---
 
-### AI Cutscene Integration
-- Personalized cutscenes based on item discoveries
-- Inventory expansion events trigger celebration cutscenes
-- Rare item finds generate unique storytelling moments
+## 4. Stacks
 
-### Crafting System Integration
-- Crafting materials stored in dedicated inventory slots
-- Equipment crafting requires specific item combinations
-- Crafted items are added to player inventory with proper sizing calculations
-- Recipe availability is restricted to player level ranges
-- Only recipes corresponding to the player's level tier can be used for crafting
+Die Stackregeln stammen aus Item System V1
+(siehe `item_properties.md`, Abschnitt „Kategorien und Stack-Regeln").
+
+Beim Hinzufügen eines stackbaren Items gilt grundsätzlich:
+
+1. Vorhandene passende Stacks auffüllen.
+2. Verbleibende Menge auf freie Slots verteilen.
+3. Wenn nicht alles untergebracht werden kann, darf der Rest nicht verschwinden
+   (die normale Aufnahme schlägt fehl; siehe Abschnitt 5).
+
+Individuelle Items mit `item_uuid` bzw. individuellen dynamischen Eigenschaften
+werden **nicht** mit normalen identischen Items zusammengestackt.
+
+Es wird **keine** parallele Stack-Architektur im Inventory-System erfunden.
+
+---
+
+## 5. Volles Inventar
+
+Normales Looten darf den temporären Sicherheits-Puffer **nicht** verwenden.
+
+Ist das normale Inventar voll und kann auch kein vorhandener Stack aufgefüllt werden:
+
+* Schlägt die normale Aufnahme fehl.
+* Das World-Loot-Item bleibt in der Welt.
+
+Es gibt kein:
+
+* automatisches Postfach,
+* versteckten Überlaufspeicher,
+* automatisches temporäres Loot-Inventar.
+
+---
+
+## 6. Questbelohnungen
+
+Quests folgen dem normalen Inventarprinzip.
+
+Vor Abschluss einer Quest mit Itembelohnung muss geprüft werden,
+ob die benötigten Items normal aufgenommen werden können.
+
+Ist nicht genügend Platz vorhanden:
+
+* Kann die Quest nicht abgeschlossen werden.
+* Die Belohnung wird **nicht** in den Sicherheits-Puffer gelegt.
+* Der Spieler muss zuerst Inventarplatz schaffen.
+
+---
+
+## 7. Equipment- und Funktionsslots
+
+Für V1 sind folgende **21 Slots** vorgesehen:
+
+| Nr | Slot |
+|----|------|
+| 1 | Kopf |
+| 2 | Ohrring 1 |
+| 3 | Ohrring 2 |
+| 4 | Hals |
+| 5 | Schultern |
+| 6 | Arme |
+| 7 | Hände |
+| 8 | Brust |
+| 9 | Taille |
+| 10 | Beine |
+| 11 | Füße |
+| 12 | Rücken |
+| 13 | Hauptwaffe |
+| 14 | Nebenhand |
+| 15 | Ring 1 |
+| 16 | Ring 2 |
+| 17 | Lichtquelle |
+| 18 | Distanzwaffe |
+| 19 | Köcher / Munition |
+| 20 | Essen |
+| 21 | Trinken |
+
+Anmerkungen:
+
+* „Lichtquelle" soll technisch nicht ausschließlich auf Fackeln beschränkt sein.
+  Später können beispielsweise Fackeln, Laternen oder andere passende
+  Lichtquellen verwendet werden.
+* Der Distanzwaffen-Slot ist vom Haupt- / Nebenhand-System getrennt.
+* Der Köcher- / Munitionsslot ist für die zur Distanzwaffe gehörende
+  Munition vorgesehen.
+
+Die konkrete Prüfung, welche Item-Kategorien / Definitionen in welchen
+Equipment-Slot passen, muss später mit Item System und Equipment-Logik
+verbunden werden. Es werden keine neuen Itemtypen erfunden.
+
+---
+
+## 8. Essen und Trinken
+
+Essen und Trinken besitzen eigene Funktionsslots (Slots 20 und 21).
+
+Diese Slots existieren, damit Nahrung / Getränke später automatisch
+konsumiert werden können.
+
+**Wichtig:**
+
+* Die eigentliche Auto-Consume- / Regenerationslogik gehört **nicht** zu Inventory V1.
+* Inventory V1 stellt lediglich die Slots und ihren Zustand bereit.
+
+Normale Tränke bleiben normale Inventargegenstände.
+
+Heil- / Manatränke:
+
+* Besitzen **keinen** eigenen Auto-Consume-Slot.
+* Werden **manuell** benutzt.
+* Dürfen **nicht** automatisch aufgrund niedriger HP / Mana konsumiert werden.
+
+(Regenerative Wirkung von Essen / Getränken mit Dauerwirkung versus
+direkte Heil- / Manatränke: konzeptionelle Abgrenzung in
+`Attribute_und_Regeneration.md`, Abschnitt 9.)
+
+---
+
+## 9. Equipment und Inventar
+
+Ein ausgerüstetes Item befindet sich **nicht** gleichzeitig in einem
+normalen Inventarslot.
+
+Beim normalen manuellen Ablegen / Ausziehen muss das Inventory-System
+entsprechend einen Zielplatz verwalten und prüfen.
+
+Equipment-Boni dürfen ausschließlich von tatsächlich aktiven und
+funktionsfähigen ausgerüsteten Items stammen.
+
+---
+
+## 10. Temporärer Sicherheits-Puffer
+
+Es gibt einen kleinen temporären Sicherheits-Puffer für serverseitige
+Ausnahmefälle.
+
+Dieser Puffer ist ausdrücklich **keine** zusätzliche Inventarkapazität.
+
+Er darf **nicht** verwendet werden für:
+
+* normales Looten,
+* Questbelohnungen bei vollem Inventar,
+* Crafting-Ausgaben als normale Umgehung,
+* zusätzliche reguläre Lagerkapazität.
+
+### Wichtiger Anwendungsfall
+
+Ein ausgerüstetes Item erreicht 0 Haltbarkeit und muss aus dem aktiven
+Equipment entfernt werden.
+
+Dadurch wird verhindert, dass ein kaputtes Item weiterhin Statuswerte
+oder andere Equipment-Effekte liefert
+(siehe Abschnitt 12).
+
+Verbindliche Regel:
+
+* Ist normaler Inventarplatz vorhanden, wird das Item
+  **automatisch** in das normale Inventar gelegt.
+* Ist das normale Inventar voll, wird das Item
+  **automatisch** in den temporären Sicherheits-Puffer gelegt.
+
+Die automatische Ablegung gilt ausschließlich für diesen Ausnahmefall
+(serverseitige Entfernung aus dem Equipment). Das Hinauslegen aus dem
+Puffer ins normale Inventar folgt den Regeln aus Abschnitt 11.
+
+---
+
+## 11. Verhalten des Sicherheits-Puffers
+
+Items im Sicherheits-Puffer werden **niemals** automatisch in frei werdende
+Inventarslots verschoben.
+
+Auch wenn später ein Inventarslot frei wird, bleibt das Item im Puffer.
+
+Der Spieler muss:
+
+1. selbst Platz im normalen Inventar schaffen,
+2. das Item im Puffer bewusst anklicken,
+3. dadurch die Übertragung ins normale Inventar auslösen.
+
+Der Server prüft beim Klick erneut, ob Platz vorhanden ist.
+
+### Begründung
+
+Ein Spieler könnte beispielsweise beim Händler durch Doppelklick Items
+verkaufen. Würde ein Puffer-Item automatisch in einen gerade frei
+gewordenen Slot springen, könnte ein weiterer Klick versehentlich
+das wertvolle Item verkaufen.
+
+> **Puffer → Inventar ausschließlich durch bewusste Spieleraktion.**
+
+Items im Puffer können dort **nicht**:
+
+* benutzt,
+* ausgerüstet,
+* verkauft,
+* gehandelt,
+* gecraftet / verarbeitet
+
+werden.
+
+Der Puffer ist **temporär**.
+
+> **Beim Logout verbleibende Items im Puffer gehen verloren.**
+
+Dies muss in der Dokumentation ausdrücklich als bewusstes
+Sicherheits- / Ausnahmesystem beschrieben werden.
+
+---
+
+## 12. Haltbarkeit
+
+Item System V1 definiert bereits:
+
+> 0 Haltbarkeit = Item liefert keine Gameplay-Werte.
+
+Für die Inventory- / Equipment-Integration gilt zusätzlich:
+
+Ein Item mit 0 Haltbarkeit darf nicht als aktives Equipment weiterwirken.
+
+Falls das bestehende Item-System aktuell lediglich die Werte deaktiviert
+und das Item technisch ausgerüstet lässt, wird die gewünschte spätere
+Inventory- / Equipment-Integration hier dokumentiert:
+
+* Ein defektes Item (0 Haltbarkeit) muss beim Ablegen / Entfernen
+  aus dem Equipment-Slot wie ein normaler Gegenstand behandelt werden:
+  Es benötigt einen Zielplatz im Inventar.
+* Kann kein Zielplatz bereitgestellt werden, greift der Sicherheits-Puffer
+  (Abschnitt 10).
+* Der Zustand „defekt" bleibt an der Item-Instanz erhalten
+  (siehe `item_properties.md`, Abschnitt „Haltbarkeit").
+
+In diesem Dokumentationsauftrag wird **kein Rust-Code** geändert.
+
+---
+
+## 13. Nicht Teil von Inventory V1
+
+Nicht jetzt auszuarbeiten oder zu implementieren:
+
+* Loot-System
+* Händler-System
+* Auktionshaus
+* Crafting-Ausführung
+* automatische Sortierung
+* automatische Zuordnung nach Taschennamen
+* Godot-Fenster- / Tab-Implementierung
+* vollständige Auto-Essen- / Auto-Trinken-Logik
+* neue Progressions- / Tierregeln
+
+Es werden nur die notwendigen Integrationspunkte dokumentiert.
+
+---
+
+## 14. Alte Dokumentation – Korrekturen und Korrekturbedarf
+
+Die folgenden veralteten Aussagen wurden im Rahmen dieser Aktualisierung
+beseitigt oder korrigiert (vor allem in dieser Datei, teilweise auch
+in angrenzenden Dokumenten):
+
+| Veraltete Aussage | Status |
+|---|---|
+| Item size / Items belegen mehrere Slots | **Verworfen.** 1 Item = 1 Slot. |
+| Quality = Rarity (Quality 1 Gray … 5 Purple) | **Verworfen.** Numerische Quality und Rarity sind getrennt (Item System V1). |
+| Höhere Rarity benötigt größere Items / mehr Slots | **Verworfen.** Keine Item-Größe. |
+| Feste Level → Rucksackgröße (4/8/12/…/64) | **Nicht als harte Inventory-Kern-Logik.** Content-/Progressionsfrage. |
+| Crafting mit „proper sizing calculations" | **Verworfen.** Keine Item-Größe, keine Multi-Slot-Berechnung. |
+
+Bestehende sinnvolle Inhalte bleiben erhalten, sofern sie den neuen
+verbindlichen Entscheidungen nicht widersprechen.
+
+---
+
+## 15. Integrierte Systeme – Bezugspunkte
+
+| System | Bezug |
+|---|---|
+| Item System V1 | Stack-Regeln, Gewicht, Bindung, Haltbarkeit, Kategorien, Seltenheiten, numerische Quality (`item_properties.md`) |
+| Attribute und Regeneration | Essen / Getränke / Tränke – konzeptionelle Abgrenzung (`Attribute_und_Regeneration.md`, Abschnitt 9) |
+| Tier-Progression | Rucksackgrößen und deren Erwerb als Content-Frage (`Tier-Progression.md`) |
+| Quest-System | Questbelohnungen folgen dem normalen Inventarprinzip |
+| Loot-System | World-Loot bleibt bei vollem Inventar in der Welt (nicht Teil von V1) |
+| Coordinator / Mail-System | Rückerstattungen über das Realm-Mail-System; kein Bestandteil von Inventory V1 (`Coordinator.md`) |

@@ -14,6 +14,7 @@ mod db;
 mod group;
 mod handlers;
 mod health;
+mod inventory;
 mod item;
 mod migrations;
 mod net;

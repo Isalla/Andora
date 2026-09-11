@@ -121,6 +121,20 @@ pub async fn handle_hello(
     let weapon_skill = db::load_weapon_skill(&ctx.db, &c.id, &ctx.cfg.combat.weapon_skill_id).await;
     let learned_abilities: std::collections::HashSet<String> =
         db::load_character_abilities(&ctx.db, &c.id).await.unwrap_or_default().into_iter().collect();
+    // Inventory V1: Inventar + Rucksäcke + Equipment laden; serverseitig
+    // defektes Equipment (0 Haltbarkeit) beim Einstieg entfernen
+    // (docs/inventory_system.md §10/§12). Fehler am Laden => leeres
+    // Inventar (Fallback wie save_position, kein Login-Abbruch).
+    let mut inventory = db::load_inventory(&ctx.db, &c.id, ctx.cfg.inventory.base_slots as usize)
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("HELLO load inventory: {e}");
+            crate::inventory::InventoryState::new(ctx.cfg.inventory.base_slots as usize)
+        });
+    let broken_moved = {
+        let world = ctx.shared.lock().await;
+        inventory.remove_broken_equipment(&world.item_definitions)
+    };
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -167,6 +181,7 @@ pub async fn handle_hello(
         mana_regen_bonus: 0.0,
         hp_regen_carry: 0.0,
         mana_regen_carry: 0.0,
+        inventory,
     };
     let mut me = me;
     attributes::recompute_max_resources(&mut me);
@@ -174,6 +189,20 @@ pub async fn handle_hello(
         let mut world = ctx.shared.lock().await;
         world.players.insert(me.id.clone(), me);
         world.by_conn.insert(conn_id, c.id.clone());
+    }
+    // Serverseitige Entfernung defekten Equipments beim Einstieg persistent
+    // nachschreiben (Fehler nur loggen — kein Login-Abbruch).
+    if broken_moved > 0 {
+        log::info!("HELLO {char_id}: {broken_moved} defekte Equipment-Items entfernt");
+        let inventory = {
+            let world = ctx.shared.lock().await;
+            world.players.get(&c.id).map(|p| p.inventory.clone())
+        };
+        if let Some(ref inv) = inventory {
+            if let Err(e) = db::save_inventory(&ctx.db, &c.id, inv).await {
+                log::error!("HELLO save inventory: {e}");
+            }
+        }
     }
 
     // Elternkontrolle: BLOCKED am Login -> Einstieg verweigert.
@@ -1039,6 +1068,7 @@ mod tests {
                     mana_regen_bonus: 0.0,
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
+                    inventory: Default::default(),
                 },
             );
             w.players.insert(
@@ -1081,6 +1111,7 @@ mod tests {
                     mana_regen_bonus: 0.0,
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
+                    inventory: Default::default(),
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1183,6 +1214,7 @@ mod tests {
                     mana_regen_bonus: 0.0,
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
+                    inventory: Default::default(),
                 },
             );
             w.players.insert(
@@ -1225,6 +1257,7 @@ mod tests {
                     mana_regen_bonus: 0.0,
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
+                    inventory: Default::default(),
                 },
             );
             w.by_conn.insert(7, "a".into());

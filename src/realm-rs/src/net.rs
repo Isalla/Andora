@@ -148,9 +148,18 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         if let Some(ref pid) = pid {
             if let Some(me) = world.players.get(pid) {
                 let (id, x, y, exp) = (me.id.clone(), me.x, me.y, me.exp);
+                let mut inventory = me.inventory.clone();
                 drop(world);
                 db::save_position(&ctx.db, &id, x, y).await;
                 db::save_exp(&ctx.db, &id, exp).await;
+                // Inventory V1: Grundinventar/Rucksäcke/Equipment persistieren.
+                // Der Sicherheits-Puffer (temporär) verfällt beim Logout
+                // (docs/inventory_system.md §11); er wird nie persistiert,
+                // daher sind hier keine DB-Aufträumungen nötig.
+                if let Err(e) = db::save_inventory(&ctx.db, &id, &inventory).await {
+                    log::error!("disconnect saveInventory {id}: {e}");
+                }
+                inventory.drop_buffer();
                 let mut world = ctx.shared.lock().await;
                 disconnect_player(&mut world, pid);
             }

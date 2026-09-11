@@ -167,6 +167,7 @@ mod tests {
             sitting: false,
             hp_regen_bonus: 0.0, mana_regen_bonus: 0.0,
             hp_regen_carry: 0.0, mana_regen_carry: 0.0,
+            inventory: Default::default(),
         }
     }
 

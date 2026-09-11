@@ -8,25 +8,27 @@ This document describes all properties and characteristics of items in the game 
 ### Core Attributes
 - **name**: Unique identifier for the item
 - **type**: Category of the item (weapon, armor, accessory, consumable, crafting material)
-- **quality**: Quality level (1-5) determining stats and rarity
-- **size**: Storage space required in inventory (measured in slots)
+- **quality**: numerische Quality (getrennt von Seltenheit; siehe Abschnitt „Item System V1")
 - **weight**: Item weight affecting player movement and carrying capacity
 - **description**: Detailed description of the item's purpose and properties
 
-### Quality Levels
-- **Quality 1 (Gray/Poor)**: Basic functionality, lowest stat bonuses
-- **Quality 2 (Green/Common)**: Standard stats and attributes
-- **Quality 3 (Blue/Uncommon)**: Enhanced stats with moderate bonuses
-- **Quality 4 (Yellow/Rare)**: Significant stat improvements
-- **Quality 5 (Orange/Epic)**: Powerful abilities with high bonuses
-- **Quality 6 (Purple/Legendary)**: Maximum stat bonuses and exceptional abilities
+### Quality und Rarity (V1 – verbindlich)
 
-### Rarity System
-- **Common**: 70% chance of appearing
-- **Uncommon**: 20% chance of appearing  
-- **Rare**: 7% chance of appearing
-- **Epic**: 2.5% chance of appearing
-- **Legendary**: 0.5% chance of appearing
+Numerische Quality und Rarity sind **getrennte Eigenschaften** (siehe Abschnitt „Item System V1 – Implementierungsstand").
+
+Die nachfolgend beschriebene ehemalige Verknüpfung von Quality-Stufen mit Rarity-Farben (Quality 1 Gray … 5 Purple) und die alten %igen Stat-Boni je Quality-Stufe sind **veraltet** und wurden durch die V1-Regelung ersetzt:
+
+* **Seltenheiten** (5 Stufen): Common / Uncommon / Rare / Epic / Legendary – rein kategorial.
+* **Numerische Quality** (0–100, f64): gewichtete Materialqualität, CraftQuality-Faktoren.
+
+### Minimalstufen und Tier-Einteilung (veraltet)
+
+Die ehemalige Zuordnung von Quality-Stufen zu minimalen Levelanforderungen
+(Common Level 1 … Legendary Level 30) und die ehemalige Equipment-Tier-Einteilung
+(Tier 0 Level 1–10 … Tier 11 Level 111+) sind veraltet und wurden aus
+`inventory_system.md` entfernt. Minimalstufen sind jetzt pro Item-Definition
+einzeln hinterlegt (`item_definitions.min_level`). Tier- und
+Progressionsgrenzen sind Content-/Progressionsfragen (siehe `Tier-Progression.md`).
 
 ## Equipment-Specific Properties
 
@@ -60,10 +62,9 @@ Weapons, armor, and accessories can increase the seven basic attributes (Kraft, 
 - Shop purchases (ausschließlich Ingame-Händler, die Ingame-Währung annehmen; keine Echtgeld-Käufe, siehe `Monetarisierung_und_Donations.md`)
 
 ### Storage
-- Inventory slots
-- Backpack expansion tiers
+- Inventory slots (1 Item / 1 Stack = 1 Slot; keine Item-Größe)
+- Ausrüstbare Rucksäcke / Taschen (eigene Inventarbereiche, siehe `inventory_system.md`)
 - Equipment slots
-- Crafting material storage
 
 ### Usage
 - Equipping to character

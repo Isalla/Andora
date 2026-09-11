@@ -181,6 +181,7 @@ mod tests {
             combat: crate::config::combat_config(&Default::default()),
             npc: crate::config::npc_config(&Default::default()),
             group: crate::group::GroupCfg::default(),
+            inventory: Default::default(),
         }
     }
 

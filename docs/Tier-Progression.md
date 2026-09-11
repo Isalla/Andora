@@ -620,7 +620,6 @@ Die Gegenstände verwenden weiterhin die bestehenden Regeln für:
 * Qualität
 * Werte
 * Gewicht
-* Größe
 * Inventar
 
 Die Tier-Klassenquest bestimmt lediglich, welche passenden Basic-Gegenstände als Belohnung vorgesehen sind.

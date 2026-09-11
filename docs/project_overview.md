@@ -334,13 +334,12 @@ Geplant sind unter anderem:
 * besondere Gegenstände
 * verschiedene Qualitätsstufen
 * Gewicht
-* unterschiedliche Platzanforderungen
 
 Rucksäcke können unterschiedliche Kapazitäten besitzen.
 
 `weight` beschreibt das tatsächliche Gewicht eines Gegenstands.
 
-`size` beschreibt den benötigten Inventarplatz.
+1 Item / 1 Stack = 1 Inventarslot (Item System V1; siehe `item_properties.md`).
 
 ---
 
