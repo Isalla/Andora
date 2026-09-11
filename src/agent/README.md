@@ -36,7 +36,7 @@ Siehe `config.env.example` für alle Keys.
 
 Dienste werden über `AGENT_SERVICES` (komma-getrennte Keys) und
 pro-Key `AGENT_SERVICE_<KEY>_UNIT` / `_URL` / `_HEALTH_PATH`
-konfiguriert. Beispiele: `realm` (andora-server.service),
+konfiguriert. Beispiele: `realm` (andora-realm.service),
 `coordinator` (andora-coordinator.service), `auth` (andora-auth.service),
 `login` (andora-login.service).
 

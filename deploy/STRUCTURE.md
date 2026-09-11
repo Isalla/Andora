@@ -8,7 +8,7 @@
 ## Struktur
 deploy/
 ├── systemd/
-│   ├── andora-server.service        # Game-Server-Dienst (systemd, Restart nach Crash)
+│   ├── andora-realm.service         # Realm-Gameserver (Rust, src/realm-rs; WS 3001, HTTP 3002)
 │   ├── andora-monitor-fpm.service   # PHP-Panel: dedizierter PHP-FPM-Master (Nicht-root)
 │   ├── andora-monitor-apache.service# PHP-Panel: dedizierte Apache-Instance, Port 3003
 │   └── andora-agent.service         # Andora-Agent: lokaler Verwaltungsdaemon (Port 9443)

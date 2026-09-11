@@ -1,0 +1,35 @@
+# andora-realm.service — Realm-Gameserver (Rust, src/realm-rs)
+#
+# Reihenfolge im Betrieb: database -> login -> realm -> coordinator -> ollama.
+# Der Realm liest seine config.env neben dem Binary (argv[1]); migrations/
+# liegt neben dem Binary und läuft VOR Health/WebSocket (Fehler -> Exit 1,
+# keine Spieler).
+#
+# Die Node-Unit andora-server.service ist Übergangsstand (legacy, wird in
+# einem Folgeauftrag entfernt) — diese Unit ist der produktive
+# Realm-Service (WS 3001, Health/Status-HTTP 3002).
+
+[Unit]
+Description=Andora Realm-Gameserver (Rust, src/realm-rs)
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Produktionsbenutzer ohne root-Privilegien; in der README anpassen.
+User=andora
+Group=andora
+WorkingDirectory=/opt/andora/server
+ExecStart=/opt/andora/server/andora-realm /opt/andora/server/config.env
+# Automatik-Neustart nach Crash ist hier verantwortlich (nicht das Panel).
+Restart=on-failure
+RestartSec=5
+# Nur das, was der Prozess wirklich braucht:
+NoNewPrivileges=true
+ProtectSystem=true
+ProtectHome=true
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

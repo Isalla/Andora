@@ -35,7 +35,7 @@ const CONFIG_VISIBLE = [...CONFIG_WHITELIST];
 
 // Projekt-Root ableiten (falls web/andora-monitor/webroot, sonst /)
 $projectRoot = dirname(__DIR__, 2); // von web/andora-monitor nach root (repositorium)
-$defaultServerConfig = $projectRoot . '/src/realm/config.env';
+$defaultServerConfig = $projectRoot . '/src/realm-rs/config.env';
 
 // Config-Path kann per ANDORA_SERVER_CONFIG überschrieben werden
 $serverConfigPath = andora_env_str('ANDORA_SERVER_CONFIG', $defaultServerConfig);
@@ -91,7 +91,7 @@ function panel_config(): array {
     $bindHost = andora_env_str('ANDORA_MONITOR_BIND', '127.0.0.1');
     $bindPort = andora_env_int('ANDORA_MONITOR_PORT', 3003);
     $gameServerUrl = andora_env_str('ANDORA_GAME_SERVER_URL', 'http://127.0.0.1:3002');
-    $gameServerService = andora_env_str('ANDORA_SERVICE_NAME', 'andora-server.service');
+    $gameServerService = andora_env_str('ANDORA_SERVICE_NAME', 'andora-realm.service');
     $sudoUser = andora_env_str('ANDORA_SUDO_USER', getenv('USER') ?: 'pi');
     $sudoUnit = andora_env_str('ANDORA_SUDO_UNIT', 'andora-monitor');
     $sudoDir = andora_env_str('ANDORA_SUDO_DIR', '/etc/sudoers.d');

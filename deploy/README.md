@@ -4,7 +4,8 @@ Diese Dateien sind **Vorlagen**. Sie werden manuell auf dem Produktionsserver
 installiert. Auf dem Entwicklungsrechner wurde **nichts** installiert.
 
 > Produktions-Root-Beispiel (anpassen!): `/opt/andora`
-> - `/opt/andora/server`    = das komplette `src/realm/`-Verzeichnis (inkl. `build/`, `config.env`)
+> - `/opt/andora/server`    = Rust-Realm: Binary `andora-realm` (Release-Build aus
+>   `src/realm-rs/`) + `migrations/` (neben dem Binary) + `config.env`
 > - `/opt/andora/monitor`   = das komplette `web/andora-monitor/`-Verzeichnis (PHP-Panel)
 > - `/opt/andora/agent`     = `src/agent/` gebaut + `config.env` (Andora-Agent, Management-API)
 > - Das Repository selbst bleibt auf dem Dev-Rechner; nur Build-Artefakte landen bei Produktion.
@@ -34,12 +35,13 @@ IPv4-mapped-IPv6-Sockets vertraut (plattformabhängig).
 
 | Datei in diesem Projekt | Produktionsziel |
 |---|---|
-| `src/realm/` (inkl. `build/`, `config.env`) | `/opt/andora/server/` |
+| `src/realm-rs/` (Release-Build `andora-realm` + `migrations/` + `config.env`) | `/opt/andora/server/` |
 | `web/andora-monitor/` (PHP-Panel) | `/opt/andora/monitor/` |
 | `src/agent/` + Binär `agent` | `/opt/andora/agent/` |
+| `deploy/systemd/andora-realm.service` | `/etc/systemd/system/andora-realm.service` |
 | `deploy/systemd/andora-monitor-fpm.service` | `/etc/systemd/system/andora-monitor-fpm.service` |
 | `deploy/systemd/andora-monitor-apache.service` | `/etc/systemd/system/andora-monitor-apache.service` |
-| `deploy/systemd/andora-server.service` | `/etc/systemd/system/andora-server.service` |
+| `deploy/systemd/andora-server.service` (Legacy Node-Realm, Übergangsstand — wird im Folgeauftrag entfernt) | `/etc/systemd/system/andora-server.service` (nur bis dahin) |
 | `deploy/systemd/andora-agent.service` | `/etc/systemd/system/andora-agent.service` |
 | `deploy/conf/monitor.conf` | `/opt/andora/monitor/monitor.conf` |
 | `deploy/conf/monitor-fpm.conf` | `/opt/andora/monitor/monitor-fpm.conf` |
@@ -48,6 +50,14 @@ IPv4-mapped-IPv6-Sockets vertraut (plattformabhängig).
 | `deploy/conf/agent.conf` | `/opt/andora/agent/config.env` |
 | `deploy/sudoers/andora-monitor` | `/etc/sudoers.d/andora-monitor` |
 | `deploy/sudoers/andora-agent` | `/etc/sudoers.d/andora-agent` |
+
+Realm-Binary (Rust) bauen und mitkopieren:
+```bash
+source .tmp/rust/env.sh
+cargo build --release --manifest-path src/realm-rs/Cargo.toml
+# target/release/andora-realm + migrations/ + config.env (aus src/realm-rs/config.env
+# kopiert und befüllt) wandern nach /opt/andora/server/
+```
 
 Agent-Binary selbst bauen und mitkopieren:
 ```bash
@@ -67,7 +77,7 @@ sudo a2enmod proxy proxy_fcgi
 ## 2. Besitzer & Dateirechte
 
 ```bash
-# Game-Server (läuft als User "andora")
+# Realm-Gameserver (Rust, läuft als User "andora")
 sudo chown -R andora:andora /opt/andora/server
 sudo chmod 755 /opt/andora/server
 sudo chmod 600 /opt/andora/server/config.env   # enthält DB-Passwort/Token
@@ -91,8 +101,8 @@ sudo chmod 755 /opt/andora/agent
 sudo chmod 600 /opt/andora/agent/config.env   # enthält AGENT_TOKEN
 
 # systemd-Units: root-eigenn, standard Rechte
-sudo chown root:root /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
-sudo chmod 644 /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
+sudo chown root:root /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
+sudo chmod 644 /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
 
 # sudoers-Dateien: root-eigenn, genau 0440 (wichtig!)
 sudo chown root:root /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
@@ -106,7 +116,7 @@ sudo visudo -cf /etc/sudoers.d/andora-agent     # Syntax-Check
 ## 3. systemd-Befehle (Installation + Aktivierung)
 
 ```bash
-sudo cp deploy/systemd/andora-server.service            /etc/systemd/system/andora-server.service
+sudo cp deploy/systemd/andora-realm.service             /etc/systemd/system/andora-realm.service
 sudo cp deploy/systemd/andora-monitor-fpm.service       /etc/systemd/system/andora-monitor-fpm.service
 sudo cp deploy/systemd/andora-monitor-apache.service    /etc/systemd/system/andora-monitor-apache.service
 sudo cp deploy/systemd/andora-agent.service             /etc/systemd/system/andora-agent.service
@@ -116,11 +126,14 @@ sudo cp deploy/sudoers/andora-monitor       /etc/sudoers.d/andora-monitor
 sudo cp deploy/sudoers/andora-agent         /etc/sudoers.d/andora-agent
 
 sudo systemctl daemon-reload
-sudo systemctl enable andora-server andora-monitor-fpm andora-monitor-apache andora-agent
-sudo systemctl start andora-server
+sudo systemctl enable andora-realm andora-monitor-fpm andora-monitor-apache andora-agent
+sudo systemctl start andora-realm
 sudo systemctl start andora-monitor-fpm
 sudo systemctl start andora-monitor-apache
 sudo systemctl start andora-agent
+# Übergangsstand: andora-server.service (Node-Realm) bleibt in der
+# Übergangsphase installiert und wird im Folgeauftrag entfernt; nach dem
+# Rollout auf andora-realm.service nicht mehr starten/aktivieren.
 ```
 
 **Agent nach dem Start prüfen:** `AGENT_TOKEN` in `/opt/andora/agent/config.env`
@@ -142,9 +155,9 @@ maßgeblich).
 `deploy/sudoers/andora-monitor` erlaubt **nur** für einen explizit genannten User:
 
 ```
-pi ALL=(root) NOPASSWD: /usr/bin/systemctl start andora-server.service, \
-                        /usr/bin/systemctl stop andora-server.service, \
-                        /usr/bin/systemctl restart andora-server.service
+pi ALL=(root) NOPASSWD: /usr/bin/systemctl start andora-realm.service, \
+                        /usr/bin/systemctl stop andora-realm.service, \
+                        /usr/bin/systemctl restart andora-realm.service
 ```
 
 - Nur diese drei Befehle, nicht `systemctl` allgemein, keine Shell.
@@ -156,9 +169,9 @@ genau diese Befehle (NOPASSWD) für die konfigurierten „Standard"-Units:
 
 ```
 andora ALL=(root) NOPASSWD: \
-  /usr/bin/systemctl start andora-server.service, ... restart ..., \
+  /usr/bin/systemctl start andora-realm.service, ... restart ..., \
   ... andora-coordinator.service ...,
-  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-server.service, \
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-realm.service, \
   /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-coordinator.service
 ```
 
@@ -183,10 +196,10 @@ andora ALL=(root) NOPASSWD: \
 
 ```bash
 # Services laufen?
-sudo systemctl status andora-server andora-monitor-fpm andora-monitor-apache andora-agent
+sudo systemctl status andora-realm andora-monitor-fpm andora-monitor-apache andora-agent
 
 # Sudo-Regel ohne Passwort (sollte "active" liefern):
-sudo -n systemctl is-active andora-server.service
+sudo -n systemctl is-active andora-realm.service
 
 # Health/Status des Gameservers:
 curl -s http://127.0.0.1:3002/health
@@ -223,9 +236,12 @@ curl -s -g "http://[::1]:3003/api/status"
 ## 6. Rollback (Zurückführen)
 
 ```bash
-sudo systemctl stop andora-monitor-apache andora-monitor-fpm andora-server andora-agent
-sudo systemctl disable andora-monitor-apache andora-monitor-fpm andora-server andora-agent
+sudo systemctl stop andora-monitor-apache andora-monitor-fpm andora-realm andora-agent
+sudo systemctl disable andora-monitor-apache andora-monitor-fpm andora-realm andora-agent
+# Legacy-Node-Realm (Übergangsstand) auch deaktivieren, falls noch aktiv:
+sudo systemctl disable andora-server.service
 sudo rm /etc/systemd/system/andora-monitor-apache.service /etc/systemd/system/andora-monitor-fpm.service
+sudo rm /etc/systemd/system/andora-realm.service
 sudo rm /etc/systemd/system/andora-server.service
 sudo rm /etc/systemd/system/andora-agent.service
 sudo rm /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent

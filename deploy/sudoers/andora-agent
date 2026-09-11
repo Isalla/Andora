@@ -18,11 +18,11 @@
 # User anpassen: 'andora' muss zum [Service] User=andora der
 # andora-agent.service passen.
 andora ALL=(root) NOPASSWD: \
-  /usr/bin/systemctl start andora-server.service, \
-  /usr/bin/systemctl stop andora-server.service, \
-  /usr/bin/systemctl restart andora-server.service, \
+  /usr/bin/systemctl start andora-realm.service, \
+  /usr/bin/systemctl stop andora-realm.service, \
+  /usr/bin/systemctl restart andora-realm.service, \
   /usr/bin/systemctl start andora-coordinator.service, \
   /usr/bin/systemctl stop andora-coordinator.service, \
   /usr/bin/systemctl restart andora-coordinator.service, \
-  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-server.service, \
+  /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-realm.service, \
   /usr/bin/journalctl --no-pager --lines [0-9]* -u andora-coordinator.service
