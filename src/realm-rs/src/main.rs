@@ -14,6 +14,7 @@ mod db;
 mod group;
 mod handlers;
 mod health;
+mod item;
 mod migrations;
 mod net;
 mod npc;
@@ -104,6 +105,21 @@ async fn async_main() -> Result<(), String> {
     {
         let mut w = tick_shared.lock().await;
         w.npcs = npcs;
+    }
+
+    // Item-Definitionen (Item System V1, Migration 014): Content-Schicht der
+    // Realm-Inhaltsversion. Ein Ladefehler bremst den Start (kein halber Realm).
+    // Nutzung durch Inventory/Crafting/Loot folgt in späteren Systemen.
+    let item_definitions: std::collections::HashMap<String, item::ItemDefinition> =
+        db::load_item_definitions(&pool)
+            .await?
+            .into_iter()
+            .map(|d| (d.item_id.clone(), d))
+            .collect();
+    log::info!("{} Item-Definitionen geladen", item_definitions.len());
+    {
+        let mut w = tick_shared.lock().await;
+        w.item_definitions = item_definitions;
     }
 
     let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);

@@ -82,3 +82,103 @@ Die Bindung wird insbesondere für besonders wertvolle Raid-, Boss-, Quest- oder
 Rohstoffe, hergestellte Gegenstände und andere für die Spielerwirtschaft vorgesehene Gegenstände bleiben grundsätzlich handelbar.
 
 Welche Gegenstände gebunden sind, wird über die jeweilige Gegenstandsdefinition festgelegt.
+
+## Item System V1 – Implementierungsstand (Migrationen 014/015)
+
+### Datenmodell
+
+Das Item-System trennt **statische Definitionen** (Basiswerte, Content) von **individuellen Instanzen** (Zustand, Modifier). Beide liegen in der Realm-Datenbank:
+
+- **`item_definitions`**: Vorlagen für jeden Item-Typ (id, name, description, category, rarity, item_level, base_quality, max_stack, weight, weapon_type, base_damage, duration_ms, range, armor_value, min_level, binding_rule)
+- **`item_instances`**: Individuelle Objekte (item_uuid, item_id → Definition, count, durability_current/max, binding, creator_id)
+- **Modifier-Satelliten**: `item_instance_modifiers` (damage/armor/weight/quality_modifier), `item_instance_attribute_modifiers`, `item_instance_resistance_modifiers`
+- **Definition-Satelliten**: `item_definition_classes` (erlaubte Klassen), `item_definition_attributes` (Attributboni), `item_definition_resistances` (Resistenzboni)
+
+Effektiver Wert = Basiswert (Definition) + Modifier (Instanz). Das Ändern von Basiswerten in der Definition beeinflusst alle betroffenen Instanzen.
+
+### Kategorien und Stack-Regeln
+
+| Kategorie | `max_stack`-Default | Gewicht |
+|---|---|---|
+| Potion | 20 | pro Stk (volles Stack-Gewicht) |
+| Food/Drink | 50 | pro Stk |
+| RawMaterial | 100 | pro Stk |
+| Weapon/Armor | 1 | pro Stück |
+| QuestItem/Accessory | 1 | pro Stück |
+
+1 Item/Stack = 1 Inventar-Slot. Keine Item-Größe und kein Multi-Slot.
+
+### Gewichtsberechnung
+
+- **Stackable**: Stack-Gewicht = `full_stack_weight` (unabhängig von `count` im Inventar)
+- **Partial**: `full_stack_weight × count / max_stack`
+- **Crafted Non-Stackable**: `75 %` der verbrauchten Materialmasse (berechnet beim Crafting, als `weight` in die Instanz geschrieben)
+
+`full_stack_weight` = Gewicht einer Definition (`item_definitions.weight`), nicht veränderlich pro Instanz.
+
+### Seltenheiten (5 Stufen, numerisch)
+
+`Common` / `Uncommon` / `Rare` / `Epic` / `Legendary` – rein kategorial, kein numerischer Wert. Seltenheit erzwingt keine Bindung und keinen Itemschaden. Drop-Raten sind Balance-Werte, nicht im Code verankert.
+
+### Numerische Qualität (separat von Seltenheit)
+
+Die Quality-Metriken für Crafting:
+
+- `weighted_material_quality = Σ(q × a) / Σ(a)` (q = Materialqualität 0–100, a = Menge)
+- `CraftQuality::Inferior` = 0.75, `Normal` = 1.0, `Superior` = 1.25
+- Rare-Material: `rare_material_quality = Σ(q × a × 2) / Σ(a)`
+- Intern f64; finale Werte werden in der Instanz gespeichert (nicht gerundet)
+
+### Bindung (4 Zustände)
+
+| Zustand | Erlaubnis |
+|---|---|
+| `Tradeable` | Frei handelbar |
+| `BindOnPickup` | Sofort bound beim Aufheben |
+| `BindOnEquip` | Bound beim ersten Tragen |
+| `Bound` | Nicht handelbar (Quest/Event) |
+
+Bindungsregel wird in der Definition gesetzt; Seltenheit erzwingt keine Änderung.
+
+### Haltbarkeit (Durability)
+
+`durability_current: Option<i64>` / `durability_max: Option<i64>` (None = unbegrenzt):
+- `is_broken()` = `current == Some(0)` → Stats inaktiv
+- `stats_active()` = nicht defekt (kein current=0)
+- Defekt zerstört das Item **nicht**; es bleibt im Inventar
+
+### Equip-Voraussetzungen
+
+- `min_level: Option<i64>` (Minimal-Level des Charakters)
+- `allowed_classes: Vec<ClassStatus>` (leer = alle Klassen; DB via `item_definition_classes`)
+- **Keine Attributanforderungen** (V1 bewusst offen)
+
+### Waffen-Spezifika (Datenfelder, keine Balance-Formel)
+
+`weapon_type: Option<String>` – WeaponTypes werden aus dem Content geladen, nicht im Code-hardcoded. `Shield` ist **nicht** als WeaponType dokumentiert und in V1 nicht vorgesehen.
+
+### Rüstungs-Spezifika
+
+`armor_value: Option<f64>` – Basis-Rüstungswert. Skalierung/Reduktion ist Balancing, nicht Teil von V1-Code.
+
+### Attribut- und Resistenz-Boni
+
+Definitionen: `item_definition_attributes` (bonus) und `item_definition_resistances` (bonus)
+Instanzen: `item_instance_attribute_modifiers` (modifier) und `item_instance_resistance_modifiers` (modifier)
+
+Effektiv = Definition-Bonus + Instanz-Modifier. Attributnamen werden bei Validierung akzeptiert: kraft, konstitution, geschicklichkeit, intelligenz, weisheit, glueck/glück, ausdauer.
+
+### Bindungsregeln
+
+Die vier Bindungszustände werden in `binding_rule` der Definition gesetzt. Beim Aufheben/Anlegen:
+- `BindOnPickup`: Instanz wird sofort `Bound`
+- `BindOnEquip`: Instanz wird beim ersten `equip`-Event `Bound`
+- `Tradeable`/`Bound`: keine Änderung
+
+### Status
+
+**Eingebaut**, aber ohne Inventory/Crafting/Loot. Die Datenstruktur steht vollständig:
+- `validate()` prüft Instanzen- und Definitions-Konsistenz
+- `load_item_definitions` lädt beim Realm-Start in die Shared-World
+- `load_item_instance`/`save_item_instance` sind Hook-Funktionen für Inventory V1
+- Keine aktiven Spielereffekte (kein Loot, kein Inventar-Slots, kein Crafting)

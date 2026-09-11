@@ -578,3 +578,278 @@ pub async fn save_character_class(
         log::error!("saveCharacterClass {char_id}: {e}");
     }
 }
+
+// ===== Item System V1 (Migrationen 014/015) =====
+// Persistente Grundlage: Statische Definitionen (item_definitions) und
+// individuelle Instanzen (item_instances) in der OWN Realm-Datenbank
+// (docs/Datenbank_Architektur.md §5/§19). Effektiver Wert =
+// Basiswert (Definition) + Instanz-Modifikation. Die konkrete Nutzung
+// (Inventory/Crafting/Loot) ist NICHT Teil von Item System V1.
+
+/// Lädt alle statischen Item-Definitionen inkl. Klassen/Attributen/
+/// Resistenzen (Content-Schicht der Realm-Inhaltsversion).
+pub async fn load_item_definitions(pool: &Pool<MySql>) -> Result<Vec<crate::item::ItemDefinition>, String> {
+    use crate::item::{BindingRule, ItemCategory, ItemDefinition, Rarity};
+
+    let rows =
+        sqlx::query_as::<_, (String, String, Option<String>, String, String, i32, f64, i64, f64, Option<f64>, Option<i64>, Option<f64>, Option<String>, Option<f64>, Option<i32>, String)>(
+            "SELECT id, name, description, category, rarity, item_level, base_quality, \
+             max_stack, weight, base_damage, duration_ms, range, weapon_type, armor_value, \
+             min_level, binding_rule FROM item_definitions",
+        )
+        .persistent(false)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Item-Definitionen laden: {e}"))?;
+
+    let mut defs = Vec::new();
+    for (
+        id,
+        name,
+        description,
+        category,
+        rarity,
+        item_level,
+        base_quality,
+        max_stack,
+        weight,
+        base_damage,
+        duration_ms,
+        range,
+        weapon_type,
+        armor_value,
+        min_level,
+        binding_rule,
+    ) in rows
+    {
+        let category = match ItemCategory::from_db(&category) {
+            Some(c) => c,
+            None => {
+                log::error!("Item-Definition {id}: unbekannte Kategorie; übersprungen");
+                continue;
+            }
+        };
+        let rarity = match Rarity::from_db(&rarity) {
+            Some(r) => r,
+            None => {
+                log::error!("Item-Definition {id}: unbekannte Seltenheit; übersprungen");
+                continue;
+            }
+        };
+        let binding_rule = match BindingRule::from_db(&binding_rule) {
+            Some(b) => b,
+            None => {
+                log::error!("Item-Definition {id}: unbekannte Bindungsregel; übersprungen");
+                continue;
+            }
+        };
+
+        // Erlaubte Klassen (leer = keine Beschränkung).
+        let classes: Vec<(String,)> = sqlx::query_as(
+            "SELECT class FROM item_definition_classes WHERE item_id = ? ORDER BY class",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Item-Klassen laden ({id}): {e}"))?;
+        let allowed_classes = classes
+            .into_iter()
+            .map(|(c,)| crate::class::ClassStatus::from_db_name(&c))
+            .collect();
+
+        // Attributboni und Resistenzen.
+        let attrs: Vec<(String, f64)> =
+            sqlx::query_as("SELECT attribute, bonus FROM item_definition_attributes WHERE item_id = ?")
+                .bind(&id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| format!("Item-Attribute laden ({id}): {e}"))?;
+        let resists: Vec<(String, f64)> =
+            sqlx::query_as("SELECT resistance, bonus FROM item_definition_resistances WHERE item_id = ?")
+                .bind(&id)
+                .fetch_all(pool)
+                .await
+                .map_err(|e| format!("Item-Resistenzen laden ({id}): {e}"))?;
+
+        let def = ItemDefinition {
+            item_id: id,
+            name,
+            description,
+            category,
+            rarity,
+            item_level: item_level as i64,
+            base_quality,
+            max_stack,
+            weight,
+            weapon_type,
+            base_damage,
+            duration_ms,
+            range,
+            armor_value,
+            min_level: min_level.map(i64::from),
+            allowed_classes,
+            binding_rule,
+            attribute_bonuses: attrs.into_iter().collect(),
+            resistances: resists.into_iter().collect(),
+        };
+        if let Err(e) = def.validate() {
+            log::error!("Item-Definition {} ungültig: {e}", def.item_id);
+            continue;
+        }
+        defs.push(def);
+    }
+    Ok(defs)
+}
+
+/// Lädt eine individuelle Item-Instanz inkl. Modifikatoren.
+/// Hook für Inventory/Crafting V1 (noch kein Aufrufer im Realm-Loop).
+#[allow(dead_code)]
+pub async fn load_item_instance(
+    pool: &Pool<MySql>,
+    item_uuid: &str,
+) -> Result<Option<crate::item::ItemInstance>, String> {
+    use crate::item::{BindingState, ItemInstance, ItemModifiers};
+
+    let row = sqlx::query_as::<_, (String, String, i32, Option<i32>, Option<i32>, String, Option<i64>)>(
+        "SELECT item_uuid, item_id, count, durability_current, durability_max, binding, creator_id \
+         FROM item_instances WHERE item_uuid = ?",
+    )
+    .bind(item_uuid)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Item-Instanz laden ({item_uuid}): {e}"))?;
+
+    let Some((uuid, item_id, count, durab_cur, durab_max, binding, creator_id)) = row else {
+        return Ok(None);
+    };
+    let binding = match BindingState::from_db(&binding) {
+        Some(b) => b,
+        None => BindingState::Tradeable,
+    };
+
+    let mods = sqlx::query_as::<_, (f64, f64, f64, f64)>(
+        "SELECT damage_modifier, armor_modifier, weight_modifier, quality_modifier \
+         FROM item_instance_modifiers WHERE item_uuid = ?",
+    )
+    .bind(item_uuid)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Item-Modifikatoren laden ({item_uuid}): {e}"))?
+    .map(|(damage, armor, weight, quality)| ItemModifiers {
+        damage_modifier: damage,
+        armor_modifier: armor,
+        weight_modifier: weight,
+        quality_modifier: quality,
+        ..Default::default()
+    })
+    .unwrap_or_default();
+
+    let attr_mods: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT attribute, modifier FROM item_instance_attribute_modifiers WHERE item_uuid = ?",
+    )
+    .bind(item_uuid)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Item-Attribut-Mods laden ({item_uuid}): {e}"))?;
+    let res_mods: Vec<(String, f64)> = sqlx::query_as(
+        "SELECT resistance, modifier FROM item_instance_resistance_modifiers WHERE item_uuid = ?",
+    )
+    .bind(item_uuid)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Item-Resistenz-Mods laden ({item_uuid}): {e}"))?;
+
+    let instance = ItemInstance {
+        item_uuid: uuid,
+        item_id,
+        count: count.into(),
+        durability_current: durab_cur.map(i64::from),
+        durability_max: durab_max.map(i64::from),
+        binding,
+        creator_id,
+        modifiers: ItemModifiers {
+            attribute_modifiers: attr_mods.into_iter().collect(),
+            resistance_modifiers: res_mods.into_iter().collect(),
+            ..mods
+        },
+    };
+    Ok(Some(instance))
+}
+
+/// Schreibt eine individuelle Item-Instanz samt Modifikatoren (Upsert).
+#[allow(dead_code)]
+pub async fn save_item_instance(
+    pool: &Pool<MySql>,
+    instance: &crate::item::ItemInstance,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Item-Transaktion beginnen: {e}"))?;
+    sqlx::query(
+        "INSERT INTO item_instances \
+           (item_uuid, item_id, count, durability_current, durability_max, binding, creator_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE item_id = VALUES(item_id), count = VALUES(count), \
+           durability_current = VALUES(durability_current), \
+           durability_max = VALUES(durability_max), binding = VALUES(binding), \
+           creator_id = VALUES(creator_id)",
+    )
+    .bind(&instance.item_uuid)
+    .bind(&instance.item_id)
+    .bind(instance.count)
+    .bind(instance.durability_current)
+    .bind(instance.durability_max)
+    .bind(instance.binding.as_db())
+    .bind(instance.creator_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Item-Instanz speichern: {e}"))?;
+
+    sqlx::query(
+        "INSERT INTO item_instance_modifiers \
+           (item_uuid, damage_modifier, armor_modifier, weight_modifier, quality_modifier) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE damage_modifier = VALUES(damage_modifier), \
+           armor_modifier = VALUES(armor_modifier), weight_modifier = VALUES(weight_modifier), \
+           quality_modifier = VALUES(quality_modifier)",
+    )
+    .bind(&instance.item_uuid)
+    .bind(instance.modifiers.damage_modifier)
+    .bind(instance.modifiers.armor_modifier)
+    .bind(instance.modifiers.weight_modifier)
+    .bind(instance.modifiers.quality_modifier)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Item-Modifikatoren speichern: {e}"))?;
+
+    for (attribute, value) in &instance.modifiers.attribute_modifiers {
+        sqlx::query(
+            "INSERT INTO item_instance_attribute_modifiers (item_uuid, attribute, modifier) \
+             VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE modifier = VALUES(modifier)",
+        )
+        .bind(&instance.item_uuid)
+        .bind(attribute)
+        .bind(value)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Item-Attribut-Mod speichern: {e}"))?;
+    }
+    for (resistance, value) in &instance.modifiers.resistance_modifiers {
+        sqlx::query(
+            "INSERT INTO item_instance_resistance_modifiers (item_uuid, resistance, modifier) \
+             VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE modifier = VALUES(modifier)",
+        )
+        .bind(&instance.item_uuid)
+        .bind(resistance)
+        .bind(value)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Item-Resistenz-Mod speichern: {e}"))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Item-Instanz commit: {e}"))?;
+    Ok(())
+}

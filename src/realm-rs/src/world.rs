@@ -105,6 +105,11 @@ pub struct World {
     pub players: HashMap<String, Player>,
     /// NPC-/Monster-Registry (Combat V2): key = npc_id().
     pub npcs: HashMap<String, crate::npc::Npc>,
+    /// Statische Item-Definitionen (Item System V1, Content-Schicht).
+    /// Wird beim Start aus item_definitions geladen; Konsum durch
+    /// Inventory/Crafting/Loot folgt in späteren Systemen.
+    #[allow(dead_code)]
+    pub item_definitions: HashMap<String, crate::item::ItemDefinition>,
     /// Verbindung (interne Conn-ID) → Spieler-ID.
     pub by_conn: HashMap<u64, String>,
     /// Schließ-Signale je Verbindung (Socket-Closes laufen über net.rs).
@@ -118,6 +123,7 @@ impl World {
         Self {
             players: HashMap::new(),
             npcs: HashMap::new(),
+            item_definitions: HashMap::new(),
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             tick: TickStat::default(),
