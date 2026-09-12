@@ -499,6 +499,8 @@ Große freie Bereiche bleiben erhalten, damit die Größe und Schönheit dieser 
 
 Housing wird dadurch Bestandteil der Landschaft und nicht deren alleiniger Zweck.
 
+Die verbindlichen Housing-Regeln (Grundstücke als reale begrenzte Bauflächen, Housing-Flächen auf den sicheren Ebenen, Baustil je Ebene, getrenntes Grundstück/Haus) stehen in `docs/Housing.md`.
+
 Für manche Spieler kann die Erschließung einer neuen sicheren Ebene deshalb bereits ein eigenes Ziel darstellen.
 
 ---

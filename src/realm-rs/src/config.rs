@@ -176,6 +176,31 @@ pub struct NpcCfg {
     pub persist_interval_ms: u64,
 }
 
+/// Vorläufige Loot-V1-Mechanikwerte (docs/Lootsystem.md). Alle Werte sind
+/// per config.env übersteuerbar — keine Architekturwerte.
+#[derive(Debug, Clone)]
+pub struct LootCfg {
+    /// Despawn von Item-/Gold-Drops (ms), sofern ungelesen.
+    pub despawn_ms: u64,
+    /// Truhe: Zeit in ms, in der sie dem ursprünglichen Claim exklusiv bleibt.
+    pub chest_claim_ms: u64,
+    /// Truhe: Gesamtlebensdauer in ms (inkl. öffentlicher Phase).
+    pub chest_despawn_ms: u64,
+    /// Max. Entfernung zum Aufnehmen eines Drops (m).
+    pub pickup_radius: f64,
+}
+
+impl Default for LootCfg {
+    fn default() -> Self {
+        LootCfg {
+            despawn_ms: 60_000,
+            chest_claim_ms: 60_000,
+            chest_despawn_ms: 180_000,
+            pickup_radius: 5.0,
+        }
+    }
+}
+
 /// Vorläufige Combat-V1-Balancingwerte (docs/Kampfsystem.md §§4–7, 17).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -267,6 +292,15 @@ pub fn group_config(env: &HashMap<String, String>) -> GroupCfg {
     }
 }
 
+pub fn loot_config(env: &HashMap<String, String>) -> LootCfg {
+    LootCfg {
+        despawn_ms: num1(env, "LOOT_DESPAWN_MS", 60_000),
+        chest_claim_ms: num1(env, "LOOT_CHEST_CLAIM_MS", 60_000),
+        chest_despawn_ms: num1(env, "LOOT_CHEST_DESPAWN_MS", 180_000),
+        pickup_radius: numf(env, "LOOT_PICKUP_RADIUS", 5.0),
+    }
+}
+
 pub fn inventory_config(env: &HashMap<String, String>) -> InventoryCfg {
     let base = num1(env, "INVENTORY_BASE_SLOTS", 8) as u16;
     let max_bags = env
@@ -317,6 +351,8 @@ pub struct Config {
     pub group: GroupCfg,
     /// Inventory System V1 (docs/inventory_system.md).
     pub inventory: InventoryCfg,
+    /// Loot System V1 (docs/Lootsystem.md).
+    pub loot: LootCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -433,6 +469,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         npc: npc_config(&env),
         group: group_config(&env),
         inventory: inventory_config(&env),
+        loot: loot_config(&env),
     })
 }
 

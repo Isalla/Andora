@@ -16,6 +16,7 @@ mod handlers;
 mod health;
 mod inventory;
 mod item;
+mod loot;
 mod migrations;
 mod net;
 mod npc;
@@ -92,6 +93,7 @@ async fn async_main() -> Result<(), String> {
     let aofb = cfg.aofb_radius;
     let combat_cfg = cfg.combat.clone();
     let npc_cfg = cfg.npc.clone();
+    let loot_cfg = cfg.loot.clone();
     let mut combat_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
 
     // NPC-/Monster-Instanzen aus Content + persistentem Zustand laden
@@ -123,6 +125,15 @@ async fn async_main() -> Result<(), String> {
         w.item_definitions = item_definitions;
     }
 
+    // Loot-Tabellen (Loot System V1, Migration 017): Content-Schicht des
+    // Lootsystems. Ein Ladefehler bremst den Start (kein halber Realm).
+    let loot_tables = db::load_loot_tables(&pool).await?;
+    log::info!("{} Loot-Tabellen geladen", loot_tables.len());
+    {
+        let mut w = tick_shared.lock().await;
+        w.loot_tables = loot_tables;
+    }
+
     let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);
     let persist_pool = pool.clone();
     // Ability-Registry (Content, Migration 010) für den Tick.
@@ -145,6 +156,7 @@ async fn async_main() -> Result<(), String> {
             combat::combat_tick(
                 &mut world,
                 &combat_cfg,
+                &loot_cfg,
                 &groups_guard,
                 &mut combat_rng,
                 now,
@@ -169,6 +181,8 @@ async fn async_main() -> Result<(), String> {
                 tick_ms,
                 aofb,
             );
+            // Loot System V1: abgelaufene Drops entfernen.
+            loot::loot_tick(&mut world, &loot_cfg, now);
             // Gruppensystem §5: Reconnect-Frist ablaufen lassen.
             for pid in groups_guard.tick(now) {
                 log::info!("Reconnect-Frist für Gruppenmitglied {pid} abgelaufen");
@@ -180,6 +194,16 @@ async fn async_main() -> Result<(), String> {
                     if n.claimed_by.as_deref() == Some(group_claim.as_str()) {
                         // Kein Mitglied übrig → Claim entfällt ersatzlos.
                         n.claimed_by = if last_pid.is_empty() { None } else { Some(last_pid.clone()) };
+                    }
+                }
+                // Loot System V1: Boden-Loot-Ansprüche gleichermaßen übergeben.
+                for l in world.loot_drops.values_mut() {
+                    if l.claimed_by.as_deref() == Some(group_claim.as_str()) {
+                        l.claimed_by = if last_pid.is_empty() {
+                            None
+                        } else {
+                            Some(last_pid.clone())
+                        };
                     }
                 }
             }

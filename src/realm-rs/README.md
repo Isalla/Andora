@@ -24,7 +24,8 @@ dessen Alt-Architektur-Annahmen.
 Erhalten: fail-closed Einstieg (`handoff_token` + `session_id`,
 Account-Gleichheit), Elternkontrolle (Status/PIN/Extension,
 10-s-Poll, Force-Logout), Chat-Gating (240 Zeichen, AOFB-Broadcast),
-Protokoll-IDs (`shared/protocol.js`), Health/Status (`/health`,
+Protokoll-IDs (`src/protocol.rs`, clientseitig gespiegelt in
+`shared/protocol.gd` — dieselben numerischen IDs), Health/Status (`/health`,
 `/status`, `/players`), Speed-Cap (210 m/s), Migrationen mit
 `db_version` + Destruktiv-Sperre.
 

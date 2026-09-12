@@ -181,7 +181,8 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
 ## Offene Punkte / Architekturprobleme
 
 1. **Ping**: Client sendet aktuell noch kein `ping_ms`; das Feld wird nur
-   ausgelesen, wenn es im HEARTBEAT kommt. In `shared/protocol` ggf. künftig
+   ausgelesen, wenn es im HEARTBEAT kommt. Im Protokoll
+   (`src/realm-rs/src/protocol.rs` / `shared/protocol.gd`) ggf. künftig
    als Option aufnehmen; Server- und Godot-seitig noch ergänzen.
 2. **Zonen**: `zone_id` kommt aus `characters.tabelle`; das Schema hat die
    Spalte, der Code liest sie noch nicht aus (heißt deshalb überall 0).

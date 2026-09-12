@@ -173,6 +173,7 @@ mod tests {
             faction_transition: false,
             level,
             exp: 0,
+            gold: 0,
             armor: 0,
             weapon_skill: 1,
             combat: None,

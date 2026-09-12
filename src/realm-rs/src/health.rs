@@ -182,6 +182,7 @@ mod tests {
             npc: crate::config::npc_config(&Default::default()),
             group: crate::group::GroupCfg::default(),
             inventory: Default::default(),
+            loot: Default::default(),
         }
     }
 

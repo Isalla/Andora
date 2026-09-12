@@ -10,6 +10,23 @@ Konkrete Dropchancen, Mengen, Timer und andere Balancingwerte werden erst bei de
 
 ---
 
+## Implementierungsstand V1 (realm-rs)
+
+Umgesetzt (Server-autoritativ, `src/realm-rs/src/loot.rs`, Migration `017_loot_v1.sql`):
+
+* **Loot-Tabellen** `loot_tables`/`loot_entries` (item | gold | chest), Monster via `monster_definitions.loot_table_id`; Einträge mit eigenen Mengen- und Chance-Werten.
+* **Unabhängige Würfe** je Kill und Eintrag — kein Pity/Luck-Ausgleich (siehe oben).
+* **Claim**: erster gültiger Schaden am Monster (Gruppe als `"g:<id>"`, Einzelspieler als Player-ID). Berechtigte dürfen Loot aufnehmen — **Gruppen-Lootsystem V1 ist ausschließlich FFA**.
+* **Bodenloot**: Items/Gold als Welt-Drop (`s2c::LOOT`), Despawn nach `LOOT_DESPAWN_MS`.
+* **Truhen**: Inhalt wird beim **Spawn** einmalig gerollt und serverseitig gehalten; nach `LOOT_CHEST_CLAIM_MS` wird die Truhe **öffentlich**, nach `LOOT_CHEST_DESPAWN_MS` verschwindet sie. Öffnen erzeugt normalen Bodenloot. Eine Truhe ohne gerollten Inhalt erscheint nie.
+* **Pickup**: `PICKUP {loot_id}` (`c2s::PICKUP = 4`), Reichweite `LOOT_PICKUP_RADIUS`. Item-Aufnahme nutzt das Inventory V1 (erst Stacks, dann freie Slots; Restmenge bleibt am Boden). Gold wird an die aktiven Gruppenmitglieder aufgeteilt (Rest stabil an erste Empfänger).
+* **Gruppenauflösung**: Claim `g:<gid>` geht auf das letzte Mitglied über (wie NPC-Claims, §8).
+* **Nicht V1**: Need/Greed, Würfeln, Gruppenleiter-Verteilung, Master Loot, Quest-Rewards, Item-Qualitätsformeln, Crafting.
+
+Config-Keys: `LOOT_DESPAWN_MS`, `LOOT_CHEST_CLAIM_MS`, `LOOT_CHEST_DESPAWN_MS`, `LOOT_PICKUP_RADIUS`.
+
+---
+
 ## Lootberechtigung und Claim
 
 Der Claim eines Gegners bestimmt zunächst, welcher Spieler bzw. welche Gruppe auf dessen Loot zugreifen darf.

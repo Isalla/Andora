@@ -1,17 +1,17 @@
 // protocol — Nachrichten-IDs des Realm-Protokolls.
-// Quelle der Wahrheit: shared/protocol.js (Client-Referenz, Godot in
-// shared/protocol.gd gespiegelt). IDs müssen dort IDENTISCH bleiben;
-// bei Änderungen hier UND dort anpassen.
+// Hier ist die Quelle der Wahrheit der Serverseite. Der Godot-Client
+// (shared/protocol.gd) MUSS dieselben numerischen IDs verwenden; keine
+// JavaScript-Protokollquelle mehr. Bei Änderungen hier UND dort anpassen.
 
 /// Client → Server. Vollständige ID-Liste (auch künftige Typen):
-/// IDs müssen shared/protocol.js entsprechen, kein Eintrag entfernen.
+/// IDs müssen shared/protocol.gd (Godot-Client) entsprechen, kein Eintrag entfernen.
 ///
 #[allow(dead_code)]
 pub mod c2s {
     pub const HELLO: i64 = 1; // {session_id?, handoff_token?, char_id, lang}
     pub const MOVE: i64 = 2; // {dir:[x,y], seq} oder {x, y}
     pub const ATTACK: i64 = 3; // {target_id} start / {stop: true} beenden (Combat V1)
-    pub const PICKUP: i64 = 4; // {item_id} (künftig)
+    pub const PICKUP: i64 = 4; // {loot_id} (Loot System V1)
     pub const CHAT: i64 = 5; // {channel, text}
     pub const NPC_TALK: i64 = 6; // {npc_id, text} (künftig)
     pub const AUCTION_LIST: i64 = 7; // (künftig)
@@ -30,7 +30,7 @@ pub mod c2s {
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
-/// IDs müssen shared/protocol.js entsprechen, kein Eintrag entfernen.
+/// IDs müssen shared/protocol.gd (Godot-Client) entsprechen, kein Eintrag entfernen.
 ///
 #[allow(dead_code)]
 pub mod s2c {
@@ -40,7 +40,7 @@ pub mod s2c {
     pub const STATE: i64 = 4; // {id, x, y, face}; Spieler + {hp, max_hp}; NPC zusätzlich {kind, status, aggro, claimed}
     pub const DAMAGE: i64 = 5; // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
     pub const KILL: i64 = 6; // {id, killer_id}
-    pub const LOOT: i64 = 7; // (künftig)
+    pub const LOOT: i64 = 7; // {id, kind, x, y, claimed[, item_id, count | gold]} (Loot System V1)
     pub const NPC_TEXT: i64 = 8; // (künftig)
     pub const CHAT: i64 = 9; // {from, channel, text}
     pub const LEVELUP: i64 = 10; // (künftig)
@@ -85,7 +85,7 @@ impl Frame {
 mod tests {
     use super::*;
 
-    // IDs müssen shared/protocol.js entsprechen (Quelle der Wahrheit).
+    // IDs müssen shared/protocol.gd (Godot-Client) entsprechen.
     #[test]
     fn ids_match_shared_protocol() {
         assert_eq!(c2s::HELLO, 1);

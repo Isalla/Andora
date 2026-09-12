@@ -95,6 +95,8 @@ pub struct Npc {
     /// Normale EXP des Monsters (docs/Gruppensystem.md §7): 100 % werden
     /// beim Tod an die aktiven Gruppenmitglieder verteilt.
     pub exp_reward: i64,
+    /// Loot-Tabelle (Loot System V1, Migration 017). None = kein Loot.
+    pub loot_table_id: Option<i64>,
     pub pack_id: Option<String>,
     pub home_x: f64,
     pub home_y: f64,
@@ -254,6 +256,7 @@ pub fn build_npcs(
             respawn_ms,
             faction: def.faction.clone(),
             exp_reward: def.exp_reward,
+            loot_table_id: def.loot_table_id,
             pack_id: spawn.pack_id.clone(),
             home_x: spawn.home_x,
             home_y: spawn.home_y,
@@ -739,6 +742,7 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                gold: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -781,6 +785,7 @@ mod tests {
             respawn_ms: 300_000,
             faction: None,
             exp_reward: 100,
+            loot_table_id: None,
             pack_id: None,
             home_x: x,
             home_y: y,
@@ -834,6 +839,9 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
@@ -917,6 +925,9 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
@@ -936,6 +947,9 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(20),

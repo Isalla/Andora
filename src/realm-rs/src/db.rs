@@ -20,6 +20,7 @@ pub struct Character {
     pub y: f64,
     pub level: u32,
     pub exp: i64,
+    pub gold: i64,
     pub hp: i32,
     pub char_class: String,
     /// Typsichere Klassenbasis (docs/Klassensystem.md); aus
@@ -87,6 +88,7 @@ struct CharacterRow {
     name: String,
     level: i32,
     exp: i64,
+    gold: i64,
     hp: i32,
     char_class: String,
     faction_transition: i8,
@@ -113,6 +115,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
             name: row.try_get("name")?,
             level: row.try_get("level")?,
             exp: row.try_get("exp")?,
+            gold: row.try_get("gold")?,
             hp: row.try_get("hp")?,
             char_class: row.try_get("char_class")?,
             faction_transition: row.try_get("faction_transition")?,
@@ -138,7 +141,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
-        "SELECT id, name, level, exp, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
+        "SELECT id, name, level, exp, gold, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
          endurance FROM characters WHERE id = ?",
     )
@@ -155,6 +158,7 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             y: row.y,
             level: row.level.max(0) as u32,
             exp: row.exp.max(0),
+            gold: row.gold.max(0),
             hp: row.hp,
             char_class: row.char_class,
             class,
@@ -188,6 +192,7 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         y: 0.0,
         level: 1,
         exp: 0,
+        gold: 0,
         hp: 100,
         char_class: class.canonical_db_name().to_string(),
         class,
@@ -244,6 +249,18 @@ pub async fn save_exp(pool: &Pool<MySql>, char_id: &str, exp: i64) {
     }
 }
 
+/// Speichert den Goldstand (Fehler nur loggen — kein Crash).
+pub async fn save_gold(pool: &Pool<MySql>, char_id: &str, gold: i64) {
+    if let Err(e) = sqlx::query("UPDATE characters SET gold = ? WHERE id = ?")
+        .bind(gold)
+        .bind(char_id)
+        .execute(pool)
+        .await
+    {
+        log::error!("saveGold {char_id}: {e}");
+    }
+}
+
 /// Content-Definition eines Monsters (monster_definitions, Migration 009).
 #[derive(Debug, Clone)]
 pub struct NpcDefRow {
@@ -264,6 +281,55 @@ pub struct NpcDefRow {
     pub faction: Option<String>,
     #[allow(dead_code)]
     pub exp_reward: i64,
+    pub loot_table_id: Option<i64>,
+}
+
+/// DB-Zeile für `load_npc_definitions` (17 Spalten; sqlx-Tupel-Limit ist 16,
+/// daher strukturbasierte Zeile wie `CharacterRow`).
+#[derive(Debug, Clone)]
+struct NpcDefSqlRow {
+    id: String,
+    name: String,
+    kind: String,
+    attackable: bool,
+    aggressive: bool,
+    aggro_range: f64,
+    attack_range: f64,
+    attack_duration_ms: i64,
+    weapon_damage: i32,
+    weapon_skill: i64,
+    armor: i32,
+    max_hp: i32,
+    move_speed: f64,
+    respawn_ms: Option<i64>,
+    faction: Option<String>,
+    exp_reward: i64,
+    loot_table_id: Option<i64>,
+}
+
+impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for NpcDefSqlRow {
+    fn from_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(NpcDefSqlRow {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            kind: row.try_get("kind")?,
+            attackable: row.try_get("attackable")?,
+            aggressive: row.try_get("aggressive")?,
+            aggro_range: row.try_get("aggro_range")?,
+            attack_range: row.try_get("attack_range")?,
+            attack_duration_ms: row.try_get("attack_duration_ms")?,
+            weapon_damage: row.try_get("weapon_damage")?,
+            weapon_skill: row.try_get("weapon_skill")?,
+            armor: row.try_get("armor")?,
+            max_hp: row.try_get("max_hp")?,
+            move_speed: row.try_get("move_speed")?,
+            respawn_ms: row.try_get("respawn_ms")?,
+            faction: row.try_get("faction")?,
+            exp_reward: row.try_get("exp_reward")?,
+            loot_table_id: row.try_get("loot_table_id")?,
+        })
+    }
 }
 
 /// Spawn-Platzierung (monster_spawns: Home-Zone, Leash, Pack, Overrides).
@@ -287,30 +353,10 @@ pub struct NpcSpawnRow {
 /// Lädt alle Monster-Definitionen (Content-Schicht).
 pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, String> {
     let mut conn = pool.acquire().await.map_err(|e| format!("pool: {e}"))?;
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            String,
-            bool,
-            bool,
-            f64,
-            f64,
-            i64,
-            i32,
-            i64,
-            i32,
-            i32,
-            f64,
-            Option<i64>,
-            Option<String>,
-            i64,
-        ),
-    >(
+    let rows = sqlx::query_as::<_, NpcDefSqlRow>(
         "SELECT id, name, kind, attackable, aggressive, aggro_range, attack_range, \
          attack_duration_ms, weapon_damage, weapon_skill, armor, max_hp, move_speed, \
-         respawn_ms, faction, exp_reward FROM monster_definitions",
+         respawn_ms, faction, exp_reward, loot_table_id FROM monster_definitions",
     )
     .persistent(false)
     .fetch_all(&mut *conn)
@@ -318,45 +364,25 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
     .map_err(|e| format!("Definitions laden: {e}"))?;
     Ok(rows
         .into_iter()
-        .map(
-            |(
-                id,
-                name,
-                kind,
-                attackable,
-                aggressive,
-                aggro_range,
-                attack_range,
-                attack_duration_ms,
-                weapon_damage,
-                weapon_skill,
-                armor,
-                max_hp,
-                move_speed,
-                respawn_ms,
-                faction,
-                exp_reward,
-            )| {
-                NpcDefRow {
-                    id,
-                    name,
-                    kind,
-                    attackable,
-                    aggressive,
-                    aggro_range,
-                    attack_range,
-                    attack_duration_ms,
-                    weapon_damage,
-                    weapon_skill,
-                    armor,
-                    max_hp,
-                    move_speed,
-                    respawn_ms,
-                    faction,
-                    exp_reward,
-                }
-            },
-        )
+        .map(|r| NpcDefRow {
+            id: r.id,
+            name: r.name,
+            kind: r.kind,
+            attackable: r.attackable,
+            aggressive: r.aggressive,
+            aggro_range: r.aggro_range,
+            attack_range: r.attack_range,
+            attack_duration_ms: r.attack_duration_ms,
+            weapon_damage: r.weapon_damage,
+            weapon_skill: r.weapon_skill,
+            armor: r.armor,
+            max_hp: r.max_hp,
+            move_speed: r.move_speed,
+            respawn_ms: r.respawn_ms,
+            faction: r.faction,
+            exp_reward: r.exp_reward,
+            loot_table_id: r.loot_table_id,
+        })
         .collect())
 }
 
@@ -699,6 +725,69 @@ pub async fn load_item_definitions(pool: &Pool<MySql>) -> Result<Vec<crate::item
         defs.push(def);
     }
     Ok(defs)
+}
+
+/// Lädt die Loot-Tabellen inkl. aller Einträge (item | gold | chest,
+/// Migration 017). Tabellen ohne Einträge erscheinen als leere Tabellen.
+pub async fn load_loot_tables(
+    pool: &Pool<MySql>,
+) -> Result<std::collections::HashMap<i64, crate::loot::LootTable>, String> {
+    let tables = sqlx::query_as::<_, (i64, String)>("SELECT id, name FROM loot_tables")
+        .persistent(false)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Loot-Tabellen laden: {e}"))?;
+
+    let entries =
+        sqlx::query_as::<_, (i64, i64, String, Option<String>, i64, i64, f64, Option<i64>)>(
+            "SELECT id, loot_table_id, kind, item_id, min_quantity, max_quantity, chance, \
+             content_table_id FROM loot_entries",
+        )
+        .persistent(false)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Loot-Einträge laden: {e}"))?;
+
+    let mut out: std::collections::HashMap<i64, crate::loot::LootTable> = tables
+        .into_iter()
+        .map(|(id, name)| {
+            (
+                id,
+                crate::loot::LootTable {
+                    id,
+                    name,
+                    entries: Vec::new(),
+                },
+            )
+        })
+        .collect();
+
+    for (id, table_id, kind, item_id, min_quantity, max_quantity, chance, content_table_id) in
+        entries
+    {
+        let Some(t) = out.get_mut(&table_id) else {
+            log::error!("Loot-Eintrag {id}: Tabelle {table_id} existiert nicht; übersprungen");
+            continue;
+        };
+        let Some(kind) = crate::loot::LootKind::from_db(&kind) else {
+            log::error!("Loot-Eintrag {id}: unbekannter kind '{kind}'; übersprungen");
+            continue;
+        };
+        // Mengen-Korrektur: bei max < min setzen wir beide auf max.
+        let (mut min, max) = (min_quantity, max_quantity);
+        if max < min {
+            min = max;
+        }
+        t.entries.push(crate::loot::LootEntry {
+            kind,
+            item_id,
+            min_quantity: min,
+            max_quantity: max,
+            chance: chance.clamp(0.0, 1.0),
+            content_table_id,
+        });
+    }
+    Ok(out)
 }
 
 /// Lädt eine individuelle Item-Instanz inkl. Modifikatoren.

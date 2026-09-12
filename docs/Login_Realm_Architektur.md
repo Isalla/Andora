@@ -240,7 +240,7 @@ Datenbank gespeichert.)
 
 Der Realm-Server und der Spielclient halten ihre Verbindung über den
 Spiel-Heartbeat aufrecht (`HEARTBEAT` → `SYNC`; siehe Protokoll in
-`shared/protocol.js`). Bleiben die Lebenszeichen eines Spielers aus,
+`shared/protocol.gd` bzw. `src/realm-rs/src/protocol.rs`). Bleiben die Lebenszeichen eines Spielers aus,
 gilt er als getrennt (Position speichern, DESPAWN, Registry putzen).
 
 Der Realm-Server meldet zusätzlich seinen Betriebszustand über

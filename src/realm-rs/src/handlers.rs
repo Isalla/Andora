@@ -159,6 +159,7 @@ pub async fn handle_hello(
         level: c.level,
         armor: c.armor,
         exp: c.exp,
+        gold: c.gold,
         weapon_skill,
         combat: None,
         effects: Vec::new(),
@@ -793,6 +794,28 @@ pub async fn handle_group_transfer(ctx: &Ctx, conn_id: u64, data: &serde_json::V
     broadcast_group_info(&world, &groups, gid);
 }
 
+/// PICKUP {loot_id} (Loot System V1): Boden-Loot-Drop aufnehmen.
+/// Lock-Reihenfolge wie im Tick-Loop: erst World (shared), dann Groups.
+pub async fn handle_pickup(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+    let loot_id = get_str(data, "loot_id");
+    if loot_id.is_empty() {
+        return;
+    }
+    let mut world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let groups = ctx.groups.lock().await;
+    let _ = crate::loot::attempt_pickup(
+        &mut world,
+        &pid,
+        &groups,
+        &loot_id,
+        Instant::now(),
+        &ctx.cfg.loot,
+    );
+}
+
 /// HEARTBEAT → SYNC-ACK (plus Ping-/Aktivitäts-Update).
 pub async fn handle_heartbeat(
     shared: &Shared,
@@ -1051,6 +1074,7 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    gold: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1094,6 +1118,7 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    gold: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1197,6 +1222,7 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    gold: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1240,6 +1266,7 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    gold: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,

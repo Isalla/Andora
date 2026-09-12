@@ -147,11 +147,13 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         let pid = world.by_conn.get(&conn_id).cloned();
         if let Some(ref pid) = pid {
             if let Some(me) = world.players.get(pid) {
-                let (id, x, y, exp) = (me.id.clone(), me.x, me.y, me.exp);
+                let (id, x, y, exp, gold) = (me.id.clone(), me.x, me.y, me.exp, me.gold);
                 let mut inventory = me.inventory.clone();
                 drop(world);
                 db::save_position(&ctx.db, &id, x, y).await;
                 db::save_exp(&ctx.db, &id, exp).await;
+                // Loot System V1: Goldstand persistieren (Fehler nur loggen).
+                db::save_gold(&ctx.db, &id, gold).await;
                 // Inventory V1: Grundinventar/Rucksäcke/Equipment persistieren.
                 // Der Sicherheits-Puffer (temporär) verfällt beim Logout
                 // (docs/inventory_system.md §11); er wird nie persistiert,
@@ -218,6 +220,7 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
         c2s::GROUP_LEAVE => handlers::handle_group_leave(ctx, conn_id, &data).await,
         c2s::GROUP_KICK => handlers::handle_group_kick(ctx, conn_id, &data).await,
         c2s::GROUP_TRANSFER => handlers::handle_group_transfer(ctx, conn_id, &data).await,
+        c2s::PICKUP => handlers::handle_pickup(ctx, conn_id, &data).await,
         c2s::PARENTAL => {
             let pid: Option<String> = {
                 let world = ctx.shared.lock().await;
@@ -229,7 +232,7 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
                 parental::handle_message(&ctx.parental, tx, &pid, frame.seq, action, pin).await;
             }
         }
-        // PICKUP / NPC_TALK / AUCTION_*: künftig (wie Übergangsstand).
+        // NPC_TALK / AUCTION_*: künftig (wie Übergangsstand).
         other => log::info!("unknown type {other}"),
     }
 }

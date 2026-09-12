@@ -51,6 +51,8 @@ pub struct Player {
     pub level: u32,
     /// Gesammelte Erfahrungspunkte (Gruppensystem V1, §7).
     pub exp: i64,
+    /// Geldstand (Loot System V1); wird bei Disconnect persistiert.
+    pub gold: i64,
     /// Aktueller Rüstungswert (relevante physische Rüstung).
     pub armor: i32,
     /// Level des relevanten Waffen-/Kampfskills (startet bei 1).
@@ -114,6 +116,12 @@ pub struct World {
     /// Inventory/Crafting/Loot folgt in späteren Systemen.
     #[allow(dead_code)]
     pub item_definitions: HashMap<String, crate::item::ItemDefinition>,
+    /// Loot-Tabellen (Loot System V1, Content-Schicht, Migration 017).
+    pub loot_tables: HashMap<i64, crate::loot::LootTable>,
+    /// Aktiver Boden-Loot (Loot System V1): id = "loot_<n>".
+    pub loot_drops: HashMap<String, crate::loot::WorldLoot>,
+    /// Monoton steigender Zähler für Loot-IDs.
+    pub loot_next_id: i64,
     /// Verbindung (interne Conn-ID) → Spieler-ID.
     pub by_conn: HashMap<u64, String>,
     /// Schließ-Signale je Verbindung (Socket-Closes laufen über net.rs).
@@ -128,6 +136,9 @@ impl World {
             players: HashMap::new(),
             npcs: HashMap::new(),
             item_definitions: HashMap::new(),
+            loot_tables: HashMap::new(),
+            loot_drops: HashMap::new(),
+            loot_next_id: 1,
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             tick: TickStat::default(),
@@ -207,6 +218,9 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
         }
         snap.push((n.id.clone(), "npc".into(), n.x, n.y, 0.0, n.hp, n.max_hp));
     }
+    for l in world.loot_drops.values() {
+        snap.push((l.id.clone(), "loot".into(), l.x, l.y, 0.0, 0, 0));
+    }
     for (qid, _, qx, qy, _, _, _) in &snap {
         if !world.players.contains_key(qid) {
             continue; // nur Spieler empfangen Frames
@@ -244,6 +258,19 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
                         "hp": hp, "max_hp": max_hp
                     }),
                 ));
+            } else if kind == "loot" {
+                // Loot: LOOT-Frame bei jedem sichtbaren Spieler
+                // (beim ersten Sichten einmalig; danach je Tick Mirror
+                // von STATE; DESPAWN läuft über stale/entities).
+                let Some(l) = world.loot_drops.get(pid.as_str()) else {
+                    continue;
+                };
+                let payload = crate::loot::loot_json(l);
+                if !q.entities.contains(pid) {
+                    q.send(&Frame::new(0, s2c::LOOT, payload.clone()));
+                    q.entities.insert(pid.clone());
+                }
+                q.send(&Frame::new(0, s2c::LOOT, payload));
             } else {
                 let (status, aggro, claimed, name) = {
                     let n = world.npcs.get(pid.as_str());
@@ -375,6 +402,7 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                gold: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,

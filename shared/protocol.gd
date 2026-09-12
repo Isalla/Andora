@@ -1,5 +1,6 @@
 class_name Protocol
-# Spiegelt shared/protocol.js (Message-IDs). Beides MUSS identisch bleiben. (Godot 3.x)
+# Message-IDs des Realm-Protokolls (Godot-3.x-Seite). MUSS dieselben
+# numerischen IDs wie src/realm-rs/src/protocol.rs verwenden.
 
 const C2S = {
 	"HELLO": 1, "MOVE": 2, "ATTACK": 3, "PICKUP": 4, "CHAT": 5,

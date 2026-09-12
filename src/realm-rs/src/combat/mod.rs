@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::config::CombatCfg;
+use crate::config::{CombatCfg, LootCfg};
 use crate::group::GroupManager;
 use crate::protocol::{s2c, Frame};
 use crate::world::World;
@@ -199,11 +199,13 @@ fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 ///   Gruppenmitglied → "g:<id>" (Gruppensystem.md §8, Gruppe als Einheit).
 /// - NPC-Tod: Status Dead, Respawn-Timer startet (respawn_after, §21),
 ///   Claim wird gelöscht; EXP (§7) wird an die aktiven Gruppenmitglieder
-///   bzw. den Claim-Spieler verteilt.
+///   bzw. den Claim-Spieler verteilt. Loot-Tabelle wird am Sterbeort
+///   als Boden-Loot gespawnt (Loot System V1; keine Tabelle → kein Loot).
 /// - Sender: DAMAGE (+ hp via world_tick-STATE) und KILL an alle Sichtbaren.
 pub fn combat_tick(
     world: &mut World,
     cfg: &CombatCfg,
+    loot_cfg: &LootCfg,
     groups: &GroupManager,
     rng: &mut dyn CombatRng,
     now: Instant,
@@ -318,6 +320,8 @@ pub fn combat_tick(
     //    Broadcasts werden erst nach den Mutations gesammelt und versendet.
     let mut kills: Vec<(String, String)> = Vec::new();
     let mut broadcasts: Vec<(String, f64, f64, Frame)> = Vec::new();
+    // Loot am Sterbeort (Loot System V1): (loot_table_id, claim, x, y).
+    let mut npc_loot: Option<(Option<i64>, Option<String>, f64, f64)> = None;
     for (aid, tid, ax, ay, result, dmg, target_kind) in &outcomes {
         if let Some(a) = world.players.get_mut(aid) {
             if let Some(c) = a.combat.as_mut() {
@@ -356,6 +360,8 @@ pub fn combat_tick(
                             // EXP (§7): Claim vor dem Löschen festhalten.
                             let exp_reward = n.exp_reward;
                             let claim = n.claimed_by.clone();
+                            // Loot am Sterbeort (Loot System V1).
+                            npc_loot = Some((n.loot_table_id, claim.clone(), n.x, n.y));
                             n.status = crate::npc::NpcStatus::Dead;
                             n.target_id = None;
                             n.no_link_since = None;
@@ -378,6 +384,9 @@ pub fn combat_tick(
                 }
             }
         };
+        if let Some((loot_table_id, claim, lx, ly)) = npc_loot.take() {
+            crate::loot::spawn_npc_loot(world, loot_table_id, &claim, lx, ly, loot_cfg, now, rng);
+        }
         let hit = result.key();
         broadcasts.push((
             aid.clone(),
@@ -557,6 +566,7 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                gold: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -696,6 +706,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1,
@@ -712,6 +725,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t2,
@@ -729,6 +745,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t3,
@@ -754,6 +773,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -779,6 +801,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -800,6 +825,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -829,6 +857,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -878,6 +909,9 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
+
+            &crate::config::LootCfg::default(),
+
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
