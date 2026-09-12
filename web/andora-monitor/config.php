@@ -49,7 +49,7 @@ if (!file_exists($serverConfigPath)) {
     // Schreiben geschieht via validateChanges + writeChanges prüfen wir erst bei POST.
 }
 
-// Hilfreich: URL-Host klammern für IPv6-Literale (kompatibel zu src/login/urlutil.go / src/realm/src/bind.ts)
+// Hilfreich: URL-Host klammern für IPv6-Literale (kompatibel zu src/login/urlutil.go)
 // Erkennt einen unbracketen IPv6-Literal im Host-Teil von URLs (host:port -> [host]:port)
 function bracket_url_host(string $raw): string {
     $schemeEnd = strpos($raw, '://');

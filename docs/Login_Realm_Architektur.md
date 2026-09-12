@@ -296,8 +296,8 @@ Realm-Versionen können parallel existieren, beispielsweise als `Live`, `Classic
 ## Realm-Server
 
 Der Realm-Server ist dagegen der Dienst, welcher einen Realm ausführt
-(Zielimplementierung in Rust, `src/realm-rs`; der Node.js/TypeScript-Code
-unter `src/realm/` ist der Übergangsstand).
+(Rust, `src/realm-rs`; der frühere Node.js/TypeScript-Code unter `src/realm/`
+wurde aus dem Repository entfernt).
 
 Ein Realm kann später bei Bedarf von mehreren technischen Realm-Prozessen getragen werden.
 

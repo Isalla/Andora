@@ -9,8 +9,8 @@ Sie gilt für alle Andora-Komponenten:
 ```text
 API/Auth-Service (Go, src/api)
 Login-Service (Go, src/login — implementiert)
-Realm-Server (Rust, src/realm-rs — implementiert; Node.js/TS-Übergangsstand
-  src/realm bleibt aktiv, bis die Ablösung abgeschlossen ist)
+Realm-Server (Rust, src/realm-rs — implementiert; der frühere Node.js/TS-
+  Realm src/realm ist entfernt)
 Coordinator (Go, src/coordinator — implementiert; Realm-Anbindung offen)
 Voice-Service (späterer Release)
 Andora-Agent

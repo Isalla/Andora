@@ -23,9 +23,10 @@ Lokalisierungs-/Terminologieglossar vor.
 ## Regeln
 
 - **Keine hart codierten Clienttexte.** Alle vom Spieler sichtbaren Texte
-  laufen über `t("key", args)`/`localizedMessage(...)` (Godot-Autoload
-  `I18n` bzw. `src/realm/i18n.js`). Client UND Server laden dieselben
-  `i18n/*.json`-Dateien.
+  laufen über `t("key", args)`/`localizedMessage(...)` (Godot-Autoload `I18n`).
+  Der frühere serverseitige Lader (`src/realm/i18n.js`) wurde mit dem
+  Legacy-Node-Realm entfernt; die `i18n/*.json`-Dateien bleiben die gemeinsame
+  Quelle.
 - **zh-Hans und zh-Hant sind getrennte Lokalisierungen**, keine automatische
   Schriftkonvertierung. Beide werden eigenständig gepflegt.
 - **Eigennamen und Andora-Fantasybegriffe** werden nicht eigenmächtig

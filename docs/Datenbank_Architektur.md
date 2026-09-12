@@ -219,11 +219,7 @@ Konkrete Item-Instanz dieses Schwertes gehört Charakter 4711.
 
 ## 5. realm_state
 
-Datei für das Grundschema:
-
-```text
-src/realm/db/realm_state/realm_state.sql
-```
+Die Tabellen entstehen heute vollständig über die inkrementellen Migrationen des Rust-Realm (`src/realm-rs/migrations/`); es existiert keine separate Grundschema-Datei mehr (früher: `src/realm/db/realm_state/realm_state.sql`, mit dem Legacy-Realm entfernt).
 
 Jeder unabhängige öffentliche Realm besitzt eine eigene persistente Realm-Datenbank.
 
@@ -753,38 +749,22 @@ src/api/
         ├── auth.sql
         └── migrations/
 
-src/realm/
-└── db/
-    ├── realm_state/
-    │   ├── realm_state.sql
-    │   ├── migrations/
-    │   └── seed/              (statische Realm-Definitionen / Inhaltsversion)
+src/realm-rs/
+└── migrations/      (realm_state_<realm>; eine DB, keine character-/world_data-Bereiche)
 ```
 
-Der bisherige Bereich:
+Der frühere (mit dem Legacy-Node-Realm `src/realm/` entfernte) Bereich:
 
 ```text
 src/realm/db/character/
 ```
 
-entfällt.
+entfiel bereits; ein eigener `world_data`-Bereich existierte ebenfalls nicht (Rust-Realm: eine einzige `realm_state_<realm>`-DB).
 
-Der bisherige Bereich:
-
-```text
-src/realm/db/world_data/
-```
-
-entfällt ebenfalls; dessen Inhalte gehören künftig als statische Definitionen zu:
+Charakter-, Inhalts- und Zustandsmigrationen liegen heute in:
 
 ```text
-src/realm/db/realm_state/
-```
-
-Charaktertabellen und deren Migrationen gehören künftig nach:
-
-```text
-src/realm/db/realm_state/
+src/realm-rs/migrations/
 ```
 
 Beispiele:
@@ -795,19 +775,26 @@ src/api/db/auth/migrations/
 ├── 002_sessions.sql
 └── 003_realms.sql
 
-src/realm/db/realm_state/migrations/
+src/realm-rs/migrations/
 ├── 001_characters.sql
 ├── 002_inventory.sql
 ├── 003_skills.sql
-├── 004_guilds.sql
-├── 005_world_state.sql
-├── 006_npc_state.sql
-├── 007_item_definitions.sql
-├── 008_npc_definitions.sql
-├── 009_monster_definitions.sql
-├── 010_crafting_jobs.sql
-└── 011_mail.sql
+├── 004_quests.sql
+├── 005_mail.sql
+├── 006_guilds.sql
+├── 007_auctions.sql
+├── 008_combat_v1.sql
+├── 009_combat_v2.sql
+├── 010_combat_v3.sql
+├── 011_attributes.sql
+├── 012_class_progression.sql
+├── 013_group_system.sql
+├── 014_item_definitions.sql
+├── 015_item_instances.sql
+└── 016_inventory_v1.sql
 ```
+
+(Die Nummerierung richtet sich am tatsächlich vorhandenen Migrationsstand; der obere Block zeigt den Standschnitt des Rust-Realm.)
 
 Die tatsächliche Nummerierung richtet sich nach dem vorhandenen Migrationsstand.
 
@@ -986,19 +973,19 @@ Schlägt eine notwendige Migration fehl, wird der Start des betroffenen Dienstes
 
 ### Tatsächliche Umsetzung (Realm-Server)
 
-Der Realm-Server (`src/realm`, `src/db/migrations.ts`) wendet beim Start automatisch die Migrationen aller eigenen Datenbanken an — `character`, `world_data` und `realm_state_<realm>`, je mit eigenem Verzeichnis (`src/realm/db/<bereich>/migrations/`) und eigener `db_version`-Tabelle in der jeweiligen Datenbank. Das ist derselbe Mechanismus wie beim Auth-Service (gleiches Dateiformat `NNN_name.sql`, gleiche `db_version`-Struktur, gleiche Reihenfolge- und Abbruchregeln), kein paralleles System. Es gibt keine zentrale globale Migrationssteuerung: Jeder Realm-Prozess migriert ausschließlich seine konfigurierten Datenbanken.
+Der Realm-Server (`src/realm-rs`, `src/migrations.rs`) wendet beim Start automatisch die Migrationen seiner einzigen Realm-Datenbank `realm_state_<realm>` aus `src/realm-rs/migrations/` (ein Verzeichnis, eine `db_version`-Tabelle) an. Das ist derselbe Mechanismus wie beim Auth-Service (gleiches Dateiformat `NNN_name.sql`, gleiche `db_version`-Struktur, gleiche Reihenfolge- und Abbruchregeln), kein paralleles System. Es gibt keine zentrale globale Migrationssteuerung: Jeder Realm-Prozess migriert ausschließlich seine konfigurierten Datenbank.
 
 ```text
 Realm-Server startet
       ↓
-Pools verbinden (character, world_data, realm_state_<realm>)
+Pool verbindet (realm_state_<realm>)
       ↓
-je DB: db_version prüfen/erzeugen, angewendete Versionen laden
+db_version prüfen/erzeugen, angewendete Versionen laden
       ↓
-je DB: Dateien prüfen (gültige Namen, eindeutige Nummern, lückenlose
+Dateien prüfen (gültige Namen, eindeutige Nummern, lückenlose
 Folge ab 1, jede eingetragene Version hat eine passende Datei)
       ↓
-je DB: fehlende Migrationen numerisch aufsteigend anwenden, je Migration
+fehlende Migrationen numerisch aufsteigend anwenden, je Migration
 in einer Transaktion (Statements + db_version-Eintrag)
       ↓
 erst danach: Health/WebSocket starten (Spieler zulassen)
@@ -1012,8 +999,8 @@ Details:
 * `USE`-Anweisungen in Migrationsdateien werden ignoriert: Die Verbindung liegt bereits auf der konfigurierten Datenbank (z. B. `realm_state_de1`), während Dateien den kanonischen Namen tragen (z. B. `USE realm_state;`).
 * Transaktionen gelten, soweit MariaDB dies zulässt: DDL (CREATE/ALTER/DROP) führt einen impliziten Commit aus und ist nicht rückrollbar; die Dateien verwenden deshalb `IF NOT EXISTS`/`IF EXISTS`, damit ein abgebrochener Lauf beim nächsten Start sauber fortgesetzt wird. Der `db_version`-Eintrag wird erst nach allen Statements geschrieben — eine nur teilweise angewendete Migration wird nie als angewendet verbucht.
 * Dateien mit einer Kopfzeile `-- destructive: <Grund>` laufen nur mit `ALLOW_DESTRUCTIVE_MIGRATIONS=1` in `config.env`. Die Freigabe darf ausschließlich im Realm-Update-Ablauf nach erfolgtem Backup gesetzt werden (siehe `Deployment_Betriebsarchitektur.md`, Realm-Updates).
-* Verzeichnis-Overrides: `CHARACTER_MIGRATIONS_DIR`, `WORLD_DATA_MIGRATIONS_DIR`, `REALM_STATE_MIGRATIONS_DIR` (analog zu `AUTHAPI_MIGRATIONS_DIR` beim Auth-Service).
-* Übergangsstand: `character` und `world_data` werden derzeit noch als eigene Datenbanken mit eigenen `db_version`-Tabellen migriert. Bei der dokumentierten Zusammenführung in `realm_state_<realm>` wandern deren Migrationsdateien in `src/realm/db/realm_state/migrations/`; der Runner selbst bleibt unverändert.
+* Verzeichnis-Override: `REALM_STATE_MIGRATIONS_DIR` (analog zu `AUTHAPI_MIGRATIONS_DIR` beim Auth-Service).
+* Der frühere Übergangsstand mit eigenen `character`- und `world_data`-Datenbanken (Node-Realm `src/realm/`) entfällt mit dem Rust-Realm: es existiert ausschließlich die `realm_state_<realm>`-DB.
 
 ### Zuständigkeit für auth
 

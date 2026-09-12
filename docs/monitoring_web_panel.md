@@ -4,7 +4,7 @@
 
 **Übergangs-/Legacy-Status:** Das unten beschriebene lokale Panel auf dem Gameserver-Host ist der **derzeit umgesetzte Stand** und wird von der neuen Betriebsarchitektur abgelöst.
 
-Zusätzlich gibt es eine PHP-Implementierung des lokalen Panels unter `web/andora-monitor/` (derzeit fertiggestellt, siehe Dokumentation unten). Beide Varianten dienen als Übergang zur Zielarchitektur.
+Das aktuelle lokale Panel ist die PHP-Implementierung unter `web/andora-monitor/` (siehe Dokumentation unten). Die frühere Node-Implementierung (`monitor/`) wurde entfernt und bestand nur aus dem nachstehend beschriebenen Legacy-Referenzbestand.
 
 **Zielarchitektur:** Das Admin- und Deployment-Panel wird zentralisiert. Auf jedem verwalteten Andora-Server läuft ein eigener **Andora-Agent**. Die Kommunikation zwischen Panel und Agenten erfolgt über einen dedizierten Port mit **mTLS**, ohne generische Remote-Shell. Alle Andora-Komponenten laufen unter dem dedizierten Nicht-Root-Benutzer `andora`. Updates übernimmt der **`andora-updater`** (signierte Manifeste, Prüfsummen, Healthchecks, Rollback) für alle Dienste inklusive des Agenten selbst. Realm-Updates laufen automatisiert im Wartungsmodus ab.
 
@@ -20,7 +20,7 @@ Der folgende Abschnitt beschreibt den bisherigen lokalen Panel-Stand (Übergang)
 
 ## Lokales Panel (derzeit umgesetzt, Übergangsstand)
 
-Es gibt zwei lokale Panel-Implementierungen:
+Das lokale Panel ist die PHP-Implementierung:
 
 1. **PHP-Panel** (`web/andora-monitor`): Eine PHP-basierte Web-Oberfläche auf demselben Host wie der Gameserver, ausschließlich für den Admin (Spieler haben KEINEN Zugriff). Sie dient der Überwachung und Steuerung des Servers. Der PHP-Built-In-Server oder Apache/Nginx wird als Router genutzt. Sicherheit:
    - optional Token (`ANDORA_MONITOR_TOKEN`): bei gesetztem Token muss jeder Request davon betroffen sein (Header `x-api-token` oder `?token=`)
@@ -31,11 +31,9 @@ Es gibt zwei lokale Panel-Implementierungen:
    - History-Speicherung in `data/history.json` mit 5-Sekunden-Drosselung und echten Serverstatus-Werten
    - Control: fehlgeschlagene systemctl-Aktionen melden `ok=false` mit generischer Fehlermeldung, interne Fehler werden nur intern protokolliert
 
-2. **Node-Panel** (`monitor/`): Legacy-Referenz (Node-Prozess). In Produktion
-   wird es nicht mehr eingesetzt; der Betrieb läuft über das PHP-Panel.
-
-Das PHP-Panel ist die aktuell umgesetzte und produktive Variante; das
-Node-Panel bleibt als Legacy-Referenz erhalten (siehe `deploy/README.md`).
+Das **Node-Panel** (`monitor/`) wurde entfernt; es war eine Legacy-Referenz
+(Node-Prozess) und wird nicht mehr eingesetzt. Der Betrieb läuft allein über
+das PHP-Panel.
 
 ## Ports & Endpunkte
 
@@ -109,7 +107,7 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
     (online, players, cpu_percent, heap_mb, tick-Werte, loop_lag_ms). Es werden
     keine pauschalen `online=true`, `players=0` und alle Messwerte auf 0 gesetzt.
 - **Config**: `GET /api/config` + `POST /api/config` — nur Whitelist-Keys von
-  `src/realm/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`,
+  `src/realm-rs/config.env` sind editierbar (`PORT_WS`, `PORT_HTTP`,
   `WS_BIND_HOST`, `HEALTH_BIND_HOST`, `TICK_MS`,
   `AOFB_RADIUS`, `RENDER_CAP_DEFAULT`, alle `OLLAMA_*` außer
   Secrets); `DB_*` und Passwörter sind **nicht** sichtbar und nicht
@@ -124,16 +122,6 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
 ## Geänderte / neue Dateien
 
 ### Neu
-- `monitor/` — eigener Node-Prozess (nur stdlib, keine Dependencies, kein Build):
-  - `package.json`, `config.js`
-  - `server.js` (HTTP-API + Verlauf)
-  - `lib/history.js` (In-Memory Ring-Buffer)
-  - `lib/systemctl.js` (start/stop/restart via `sudo -n`, is-active ohne sudo)
-  - `lib/envconfig.js` (lesen/validieren/schreiben von `config.env`)
-  - `public/index.html` (Dashboard)
-- `src/realm/src/metrics.ts` — Tick-Statistik + CPU/Heap/RSS
-- `src/realm/src/events.ts` — Event-Loop-Lag-Messung
-
 - `web/andora-monitor/` — PHP-Implementierung des lokalen Monitoring-Admin-Panels:
   - `public/index.php` — Front-Controller, Routing, API-Endpunkte
   - `lib/config.php` — Laden der Panel-Konfiguration
@@ -154,8 +142,10 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   - `config_test.go`, `controller_test.go`, `handler_test.go` — go test/vet
   - `config.env.example`, `README.md`
 - `deploy/` — Vorlagen (NUR Vorlagen, nicht installiert):
-  - `deploy/systemd/andora-server.service`, `andora-monitor-fpm.service`,
-    `andora-monitor-apache.service` (Produktionsbetrieb: Apache + PHP-FPM)
+  - `deploy/systemd/andora-realm.service` (Rust-Realm-Unit),
+    `andora-monitor-fpm.service`, `andora-monitor-apache.service`
+    (Produktionsbetrieb: Apache + PHP-FPM); die frühere Unit
+    `andora-server.service` (Node-Realm) wurde entfernt
   - `deploy/systemd/andora-agent.service` (Agent als systemd-Unit; ohne
     `NoNewPrivileges`, da `sudo -n` erforderlich)
   - `deploy/conf/monitor.conf` (EnvironmentFile des Panels)
@@ -168,18 +158,15 @@ ungeklammert als `host:port` enthalten (wird zu `[host]:port` normalisiert).
   - `deploy/README.md` (Installation, Rechte, systemd-Befehle, Verifikation, Rollback)
 
 ### Geändert
-- `src/realm/src/health.ts` — `/health` + `/status` + `/players`
-- `src/realm/src/world.ts` — Tick-Dauer-Messung (`recordTick`)
-- `src/realm/src/types.ts` — `Player.pingMs`, `Player.zoneId`
-- `src/realm/src/handlers/hello.ts` — neue Felder initialisieren
-- `src/realm/src/handlers/heartbeat.ts` — liest optionales `ping_ms`
+- `src/realm/src/health.ts` etc. — `/health` + `/status` + `/players` (Legacy-Node-Realm, aus dem Repository entfernt)
 - `readme.md` — Abschnitt „Monitoring & Admin-Panel"
 - `.gitignore` — `.tmp/`
 
 ## Start (lokale Entwicklung, ohne systemd)
 
 ```bash
-cd src/realm && npm run dev      # Gameserver (3001 WS, 3002 Health/Status)
+source .tmp/rust/env.sh
+cargo run --manifest-path src/realm-rs/Cargo.toml -- config.env   # Gameserver (3001 WS, 3002 Health/Status)
 cd web/andora-monitor
 php -S 127.0.0.1:3003 -t public public/index.php   # Panel auf 127.0.0.1:3003
 ```

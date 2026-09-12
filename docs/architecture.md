@@ -18,13 +18,12 @@
 ## Verzeichnisse
 - `shared/`   – Protokoll + Definitionsdaten (Client UND Server lesen); engineunabhängig zu pflegen, nicht unnötig an Godot-spezifische Darstellungsdetails koppeln – Realm liefert Spielzustand/Informationen, Client entscheidet über deren Darstellung (`Mehrere_Offizielle_Clients.md`)
 - `i18n/`     – Sprache-JSONs (de, en, zh-Hans, zh-Hant, ...), beide Seiten teilen
-- `src/realm-rs/`   – Realm-Server in Rust (Zielimplementierung; Autorität: Combat, Loot, AH, NPC-AI via Coordinator/KI-Provider (lokal: Ollama)). Genau eine DB (`realm_state_<realm>`), Einstieg per Handoff. Bauen/Testen mit der vorhandenen Toolchain (`~/.cargo`).
-- `src/realm/`      – Realm-Server (Node.js/TypeScript) als ÜBERGANGSSTAND: lauffähig, wird schrittweise nach `src/realm-rs/` migriert ( Alt-Annahmen: character-/world_data-Pools, Session statt Handoff). Nicht ausbauen.
+- `src/realm-rs/`   – Realm-Server in Rust (aktuelle Implementierung; Autorität: Combat, Loot, AH, NPC-AI via Coordinator/KI-Provider (lokal: Ollama)). Genau eine DB (`realm_state_<realm>`), Einstieg per Handoff. Bauen/Testen mit der vorhandenen Toolchain (`~/.cargo`).
 - `src/api/`        – Go-API-/Auth-Service (einziger Service mit Auth-DB-Zugriff; Zielplattformen arm64 + amd64)
 - `src/login/`      – separater Login-Service (Go, implementiert): Client-Login, Realm-Liste, Handoff-Ausstellung gegen die Auth-API; keine DB-Rechte
 - `src/coordinator/`– Coordinator-Service (Go, implementiert): zentrale KI-Queue/Provider-Schnittstelle (providerunabhängig; angeschlossener lokaler Provider: Ollama), dateibasierte Queue ohne DB-Zugriff; Details `src/coordinator/README.md`, `docs/Coordinator.md`
 - `src/voice/`      – Voice-Service (noch nicht angelegt, geplant)
-- `monitor`         – lokales Monitoring-/Admin-Panel (Übergangs-/Legacy-Status, siehe `monitoring_web_panel.md`)
+- `web/andora-monitor/` – lokales Monitoring-/Admin-Panel (PHP, aktueller Stand, siehe `monitoring_web_panel.md`)
 - `deploy`          – Deployment-Vorlagen (Legacy-Status; Zielarchitektur in `Deployment_Betriebsarchitektur.md`)
 - `docs`
 

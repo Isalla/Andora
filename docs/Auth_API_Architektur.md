@@ -280,8 +280,8 @@ Dateiformat: `NNN_name.sql` in `src/api/db/auth/migrations/`. Der Name wird
 am **ersten** Unterstrich getrennt (Version + Tag); der Tag darf weitere
 Unterstriche enthalten (z. B. `004_world_servers.sql` → Version 4, Tag
 `world_servers`). Dieselbe Konvention gilt für die Realm-Migrationen
-(`src/realm/db/<bereich>/migrations/`, Runner in `src/realm/src/db/`
-mit eigener `db_version`-Tabelle je Realm-Datenbank).
+(`src/realm-rs/migrations/<NNN>_<tag>.sql`, Runner in `src/realm-rs/src/`
+mit eigener `db_version`-Tabelle in der Realm-Datenbank `realm_state_<realm>`).
 
 Loginserver, Realmserver und Webseite führen keine Migrationen auf
 `auth` aus.

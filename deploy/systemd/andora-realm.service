@@ -5,9 +5,8 @@
 # liegt neben dem Binary und läuft VOR Health/WebSocket (Fehler -> Exit 1,
 # keine Spieler).
 #
-# Die Node-Unit andora-server.service ist Übergangsstand (legacy, wird in
-# einem Folgeauftrag entfernt) — diese Unit ist der produktive
-# Realm-Service (WS 3001, Health/Status-HTTP 3002).
+# Diese Unit ist der produktive Realm-Service (WS 3001, Health/Status-HTTP 3002).
+# Die frühere Node-Unit andora-server.service (legacy) wurde entfernt.
 
 [Unit]
 Description=Andora Realm-Gameserver (Rust, src/realm-rs)

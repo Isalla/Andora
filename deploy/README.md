@@ -41,7 +41,6 @@ IPv4-mapped-IPv6-Sockets vertraut (plattformabhängig).
 | `deploy/systemd/andora-realm.service` | `/etc/systemd/system/andora-realm.service` |
 | `deploy/systemd/andora-monitor-fpm.service` | `/etc/systemd/system/andora-monitor-fpm.service` |
 | `deploy/systemd/andora-monitor-apache.service` | `/etc/systemd/system/andora-monitor-apache.service` |
-| `deploy/systemd/andora-server.service` (Legacy Node-Realm, Übergangsstand — wird im Folgeauftrag entfernt) | `/etc/systemd/system/andora-server.service` (nur bis dahin) |
 | `deploy/systemd/andora-agent.service` | `/etc/systemd/system/andora-agent.service` |
 | `deploy/conf/monitor.conf` | `/opt/andora/monitor/monitor.conf` |
 | `deploy/conf/monitor-fpm.conf` | `/opt/andora/monitor/monitor-fpm.conf` |
@@ -101,8 +100,8 @@ sudo chmod 755 /opt/andora/agent
 sudo chmod 600 /opt/andora/agent/config.env   # enthält AGENT_TOKEN
 
 # systemd-Units: root-eigenn, standard Rechte
-sudo chown root:root /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
-sudo chmod 644 /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-server.service /etc/systemd/system/andora-agent.service
+sudo chown root:root /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-agent.service
+sudo chmod 644 /etc/systemd/system/andora-realm.service /etc/systemd/system/andora-monitor-*.service /etc/systemd/system/andora-agent.service
 
 # sudoers-Dateien: root-eigenn, genau 0440 (wichtig!)
 sudo chown root:root /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
@@ -131,9 +130,6 @@ sudo systemctl start andora-realm
 sudo systemctl start andora-monitor-fpm
 sudo systemctl start andora-monitor-apache
 sudo systemctl start andora-agent
-# Übergangsstand: andora-server.service (Node-Realm) bleibt in der
-# Übergangsphase installiert und wird im Folgeauftrag entfernt; nach dem
-# Rollout auf andora-realm.service nicht mehr starten/aktivieren.
 ```
 
 **Agent nach dem Start prüfen:** `AGENT_TOKEN` in `/opt/andora/agent/config.env`
@@ -238,11 +234,8 @@ curl -s -g "http://[::1]:3003/api/status"
 ```bash
 sudo systemctl stop andora-monitor-apache andora-monitor-fpm andora-realm andora-agent
 sudo systemctl disable andora-monitor-apache andora-monitor-fpm andora-realm andora-agent
-# Legacy-Node-Realm (Übergangsstand) auch deaktivieren, falls noch aktiv:
-sudo systemctl disable andora-server.service
 sudo rm /etc/systemd/system/andora-monitor-apache.service /etc/systemd/system/andora-monitor-fpm.service
 sudo rm /etc/systemd/system/andora-realm.service
-sudo rm /etc/systemd/system/andora-server.service
 sudo rm /etc/systemd/system/andora-agent.service
 sudo rm /etc/sudoers.d/andora-monitor /etc/sudoers.d/andora-agent
 sudo rm -r /opt/andora/monitor /opt/andora/server /opt/andora/agent
