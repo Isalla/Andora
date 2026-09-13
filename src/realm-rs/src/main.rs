@@ -17,6 +17,7 @@ mod health;
 mod inventory;
 mod item;
 mod loot;
+mod lua;
 mod migrations;
 mod net;
 mod npc;

@@ -22,6 +22,10 @@ sha2 = "0.10"
 hex = "0.4"
 log = "0.4"
 env_logger = "0.11"
+# Lua-Content-Scripting (docs/Lua-Scripting-System.md): Lua 5.5 als
+# serverseitige Content-/Orchestrierungsschicht. bindend: Lua 5.5 + mlua 0.12.x
+# (Features lua55 + vendored; bewusst KEINE serde/send/module/async/macros).
+mlua = { version = "0.12", features = ["lua55", "vendored"] }
 
 [profile.release]
 opt-level = 2
