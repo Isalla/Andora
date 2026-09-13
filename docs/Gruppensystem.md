@@ -155,7 +155,9 @@ Dann erhalten diese drei Spieler jeweils ein Drittel der Monster-EXP. Das entfer
 
 Die Gesamtmenge wird dadurch nicht reduziert.
 
-Die konkrete EXP-Balance wird später im Spiel getestet. Falls Gruppen dadurch zu langsam oder zu schnell leveln, können die Werte oder ein Gruppenbonus angepasst werden, ohne die Grundarchitektur zu verändern.
+Die konkrete EXP-Balance wird später im Spiel getestet. Falls Gruppen dadurch zu langsam oder zu schnell leveln, können die Werte angepasst werden, ohne die Grundarchitektur zu verändern. Ein Gruppenbonus auf Charakter-EXP ist dabei nicht vorgesehen (siehe `Erfahrung_und_Progressionssystem.md`, Abschnitt 8).
+
+Die EXP-Berechnung selbst (EXP-Kurve, Levelunterschied-Anpassung, Level-Cap, Attributpunkte, Entdeckungs-/Quest-EXP und Rested EXP) ist in `Erfahrung_und_Progressionssystem.md` definiert. Bei Gruppenkills wird für die Levelunterschied-Anpassung das höchste Charakterlevel eines EXP-berechtigten Gruppenmitglieds verwendet (siehe `Erfahrung_und_Progressionssystem.md`, Abschnitt 8.1).
 
 ---
 

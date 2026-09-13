@@ -20,6 +20,12 @@ pub struct Character {
     pub y: f64,
     pub level: u32,
     pub exp: i64,
+    /// Freie Attributpunkte (docs/Erfahrung_und_Progressionssystem.md §5).
+    pub free_attr_points: u32,
+    /// Rested-EXP-Pool (docs/Erfahrung_und_Progressionssystem.md §12).
+    pub rested_pool: i64,
+    /// Epoch-Sekunden des letzten Ausloggens (None = kein Zeitstempel).
+    pub logout_at: Option<i64>,
     pub gold: i64,
     pub hp: i32,
     pub char_class: String,
@@ -88,6 +94,9 @@ struct CharacterRow {
     name: String,
     level: i32,
     exp: i64,
+    free_attr_points: i32,
+    rested_pool: i64,
+    logout_at: Option<i64>,
     gold: i64,
     hp: i32,
     char_class: String,
@@ -115,6 +124,9 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
             name: row.try_get("name")?,
             level: row.try_get("level")?,
             exp: row.try_get("exp")?,
+            free_attr_points: row.try_get("free_attr_points")?,
+            rested_pool: row.try_get("rested_pool")?,
+            logout_at: row.try_get("logout_at")?,
             gold: row.try_get("gold")?,
             hp: row.try_get("hp")?,
             char_class: row.try_get("char_class")?,
@@ -141,7 +153,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
-        "SELECT id, name, level, exp, gold, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
+        "SELECT id, name, level, exp, free_attr_points, rested_pool, logout_at, gold, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
          endurance FROM characters WHERE id = ?",
     )
@@ -158,6 +170,9 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             y: row.y,
             level: row.level.max(0) as u32,
             exp: row.exp.max(0),
+            free_attr_points: row.free_attr_points.max(0) as u32,
+            rested_pool: row.rested_pool.max(0),
+            logout_at: row.logout_at,
             gold: row.gold.max(0),
             hp: row.hp,
             char_class: row.char_class,
@@ -192,6 +207,9 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         y: 0.0,
         level: 1,
         exp: 0,
+        free_attr_points: 0,
+        rested_pool: 0,
+        logout_at: None,
         gold: 0,
         hp: 100,
         char_class: class.canonical_db_name().to_string(),
@@ -237,15 +255,35 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
     }
 }
 
-/// Speichert EXP-Punktestand (Fehler nur loggen — kein Crash).
-pub async fn save_exp(pool: &Pool<MySql>, char_id: &str, exp: i64) {
-    if let Err(e) = sqlx::query("UPDATE characters SET exp = ? WHERE id = ?")
-        .bind(exp)
-        .bind(char_id)
-        .execute(pool)
-        .await
-    {
-        log::error!("saveExp {char_id}: {e}");
+/// Speichert den kompletten Progressionsstand (docs/Erfahrung_und_
+/// Progressionssystem.md §§4/7/12): Level, EXP, freie Attributpunkte,
+/// Rested-Pool und optional den Logout-Zeitpunkt (Epoch-Sekunden).
+/// `logout_at=None` setzt die Spalte auf NULL (nach der Rested-Berechnung
+/// beim Login). Fehler nur loggen — kein Crash/Kick (wie save_position).
+#[allow(clippy::too_many_arguments)]
+pub async fn save_progression(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    level: u32,
+    exp: i64,
+    free_attr_points: u32,
+    rested_pool: i64,
+    logout_at: Option<i64>,
+) {
+    let result = sqlx::query(
+        "UPDATE characters SET level = ?, exp = ?, free_attr_points = ?, rested_pool = ?, \
+         logout_at = ? WHERE id = ?",
+    )
+    .bind(level as i32)
+    .bind(exp)
+    .bind(free_attr_points as i32)
+    .bind(rested_pool)
+    .bind(logout_at)
+    .bind(char_id)
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        log::error!("saveProgression {char_id}: {e}");
     }
 }
 
@@ -281,6 +319,9 @@ pub struct NpcDefRow {
     pub faction: Option<String>,
     #[allow(dead_code)]
     pub exp_reward: i64,
+    /// Gegnerlevel der Definition (docs/Erfahrung_und_Progressionssystem.md
+    /// §7: Leveldifferenz-Multiplikator beim Kill).
+    pub level: u32,
     pub loot_table_id: Option<i64>,
 }
 
@@ -304,6 +345,7 @@ struct NpcDefSqlRow {
     respawn_ms: Option<i64>,
     faction: Option<String>,
     exp_reward: i64,
+    level: i32,
     loot_table_id: Option<i64>,
 }
 
@@ -327,6 +369,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for NpcDefSqlRow {
             respawn_ms: row.try_get("respawn_ms")?,
             faction: row.try_get("faction")?,
             exp_reward: row.try_get("exp_reward")?,
+            level: row.try_get("level")?,
             loot_table_id: row.try_get("loot_table_id")?,
         })
     }
@@ -356,7 +399,7 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
     let rows = sqlx::query_as::<_, NpcDefSqlRow>(
         "SELECT id, name, kind, attackable, aggressive, aggro_range, attack_range, \
          attack_duration_ms, weapon_damage, weapon_skill, armor, max_hp, move_speed, \
-         respawn_ms, faction, exp_reward, loot_table_id FROM monster_definitions",
+         respawn_ms, faction, exp_reward, level, loot_table_id FROM monster_definitions",
     )
     .persistent(false)
     .fetch_all(&mut *conn)
@@ -381,6 +424,7 @@ pub async fn load_npc_definitions(pool: &Pool<MySql>) -> Result<Vec<NpcDefRow>, 
             respawn_ms: r.respawn_ms,
             faction: r.faction,
             exp_reward: r.exp_reward,
+            level: r.level.max(0) as u32,
             loot_table_id: r.loot_table_id,
         })
         .collect())

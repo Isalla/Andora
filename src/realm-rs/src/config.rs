@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use crate::group::GroupCfg;
 use crate::inventory::InventoryCfg;
+use crate::progression::{LevelDiffCfg, ProgressionCfg};
 
 #[derive(Debug, Clone)]
 pub struct DbConfig {
@@ -292,6 +293,27 @@ pub fn group_config(env: &HashMap<String, String>) -> GroupCfg {
     }
 }
 
+/// Progressionssystem V1 (docs/Erfahrung_und_Progressionssystem.md):
+/// EXP-Kurve (§3), Level-Cap (§4) und Leveldifferenz-Balancing (§7).
+/// Kurven- und Differenzwerte sind vorläufige Balancingwerte („wird erst
+/// durch Tests festgelegt“) — per config.env übersteuerbar.
+pub fn progression_config(env: &HashMap<String, String>) -> ProgressionCfg {
+    ProgressionCfg {
+        exp_base: num1(env, "PROG_EXP_BASE", 100),
+        exp_factor: num1(env, "PROG_EXP_FACTOR", 10),
+        level_cap: num1(env, "PROG_LEVEL_CAP", 40) as u32,
+        level_diff: LevelDiffCfg {
+            plus_5_permille: num1(env, "PROG_EXP_DIFF_PLUS5_PERMILLE", 1250) as u32,
+            plus_2_to_4_permille: num1(env, "PROG_EXP_DIFF_PLUS2TO4_PERMILLE", 1100) as u32,
+            same_zone_permille: num1(env, "PROG_EXP_DIFF_SAME_ZONE_PERMILLE", 1000) as u32,
+            minus_2_to_3_permille: num1(env, "PROG_EXP_DIFF_MINUS2TO3_PERMILLE", 750) as u32,
+            minus_4_to_5_permille: num1(env, "PROG_EXP_DIFF_MINUS4TO5_PERMILLE", 500) as u32,
+            minus_6_to_9_permille: num1(env, "PROG_EXP_DIFF_MINUS6TO9_PERMILLE", 250) as u32,
+            minus_10_permille: num1(env, "PROG_EXP_DIFF_MINUS10_PERMILLE", 0) as u32,
+        },
+    }
+}
+
 pub fn loot_config(env: &HashMap<String, String>) -> LootCfg {
     LootCfg {
         despawn_ms: num1(env, "LOOT_DESPAWN_MS", 60_000),
@@ -353,6 +375,8 @@ pub struct Config {
     pub inventory: InventoryCfg,
     /// Loot System V1 (docs/Lootsystem.md).
     pub loot: LootCfg,
+    /// Progressionssystem V1 (docs/Erfahrung_und_Progressionssystem.md).
+    pub progression: ProgressionCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -470,6 +494,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         group: group_config(&env),
         inventory: inventory_config(&env),
         loot: loot_config(&env),
+        progression: progression_config(&env),
     })
 }
 

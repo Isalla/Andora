@@ -13,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::config::{CombatCfg, LootCfg};
 use crate::group::GroupManager;
+use crate::progression::ProgressionCfg;
 use crate::protocol::{s2c, Frame};
 use crate::world::World;
 
@@ -206,6 +207,7 @@ pub fn combat_tick(
     world: &mut World,
     cfg: &CombatCfg,
     loot_cfg: &LootCfg,
+    prog: &ProgressionCfg,
     groups: &GroupManager,
     rng: &mut dyn CombatRng,
     now: Instant,
@@ -357,8 +359,9 @@ pub fn combat_tick(
                         }
                         n.hp = (n.hp - dmg).max(0);
                         if n.hp == 0 {
-                            // EXP (§7): Claim vor dem Löschen festhalten.
+                            // EXP (§7): Claim + Level vor dem Löschen festhalten.
                             let exp_reward = n.exp_reward;
+                            let monster_level = n.level;
                             let claim = n.claimed_by.clone();
                             // Loot am Sterbeort (Loot System V1).
                             npc_loot = Some((n.loot_table_id, claim.clone(), n.x, n.y));
@@ -371,7 +374,7 @@ pub fn combat_tick(
                             n.respawn_after = Some(wall_now + Duration::from_millis(respawn_ms));
                             // Monster-Tod: Claim ungültig.
                             n.claimed_by = None;
-                            award_monster_exp(world, groups, exp_reward, &claim, aid);
+                            award_monster_exp(world, groups, exp_reward, monster_level, &claim, aid, prog);
                             true
                         } else {
                             false
@@ -439,19 +442,27 @@ pub fn combat_tick(
     }
 }
 
-/// Gruppensystem V1 §7: Monster-EXP (100 %) an die Empfänger:
+/// Gruppensystem V1 §7 + Progressionssystem V1 (§7 Leveldifferenz, §12
+/// Rested-EXP): Monster-EXP an die Empfänger —
 /// - Claim der Gruppe → aktive Mitglieder (online + in Reichweite) teilen;
 /// - Claim eines Spielers → dieser erhält 100 %;
 /// - Kein Claim → Killer erhält 100 % (Fallback).
 ///
-/// Empfänger, die nicht (mehr) online sind, erhalten nichts.
+/// Gesamt-EXP = exp_reward × Leveldifferenz-Multiplikator, wobei als
+/// Berechnungslevel das höchste Level der berechtigten Empfänger zählt.
+/// Anschließend gleichmäßige Teilung (deterministischer Rest,
+/// split_exp_equally). Der persönliche Anteil erhält danach den Rested-Bonus
+/// (max. +50 %, Poolverzehr). Empfänger, die nicht (mehr) online sind,
+/// erhalten nichts. An einer Kappe wird nichts gewährt (kein Toast).
 #[allow(clippy::too_many_arguments)]
 fn award_monster_exp(
     world: &mut World,
     groups: &GroupManager,
     exp_reward: i64,
+    monster_level: u32,
     claim: &Option<String>,
     fallback_killer: &str,
+    prog: &ProgressionCfg,
 ) {
     let exp_reward = exp_reward.max(0);
     if exp_reward == 0 {
@@ -476,15 +487,43 @@ fn award_monster_exp(
     if recipients.is_empty() {
         return;
     }
-    let amounts = crate::group::split_exp_equally(exp_reward, recipients.len());
+    // Berechnungslevel (§7): höchstes Level der berechtigten Empfänger.
+    let highest = recipients
+        .iter()
+        .filter_map(|pid| world.players.get(pid).map(|p| p.level))
+        .max()
+        .unwrap_or(1);
+    let permille = crate::progression::level_diff_permille(prog, monster_level, highest);
+    let total_leveled = exp_reward * i64::from(permille) / 1000;
+    if total_leveled <= 0 {
+        return; // 0 %-Zone bzw. Rundung auf 0: keine EXP-Gutschrift.
+    }
+    let amounts = crate::group::split_exp_equally(total_leveled, recipients.len());
     for (pid, amt) in recipients.iter().zip(&amounts) {
         if let Some(p) = world.players.get_mut(pid) {
-            p.exp += amt;
+            let mut progress = p.progression_state();
+            let out = progress.grant_kill_exp(prog, *amt);
+            let free_attr_points = progress.free_attr_points;
+            p.apply_progression(progress);
+            if out.plain_exp <= 0 && out.rested_bonus <= 0 && out.levels_gained == 0 {
+                continue; // an der Kappe: nichts gewährt (kein Toast).
+            }
+            let total = out.plain_exp + out.rested_bonus;
             p.send(&Frame::new(
                 0,
                 s2c::GROUP_TOAST,
-                serde_json::json!({"text": format!("+{amt} EXP"), "kind": "exp"}),
+                serde_json::json!({"text": format!("+{total} EXP"), "kind": "exp"}),
             ));
+            if out.levels_gained > 0 {
+                p.send(&Frame::new(
+                    0,
+                    s2c::LEVELUP,
+                    serde_json::json!({
+                        "level": out.final_level,
+                        "free_attr_points": free_attr_points
+                    }),
+                ));
+            }
         }
     }
 }
@@ -566,6 +605,8 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
                 gold: 0,
                 armor: 0,
                 weapon_skill: 1,
@@ -709,6 +750,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1,
@@ -728,6 +770,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t2,
@@ -748,6 +791,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t3,
@@ -776,6 +820,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -804,6 +849,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -828,6 +874,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -860,6 +907,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -912,6 +960,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
@@ -950,8 +999,10 @@ mod tests {
             &mut w,
             &gm,
             100,
+            1,
             &Some(crate::group::encode_group_claim(gid)),
             "x",
+            &crate::progression::ProgressionCfg::default(),
         );
         assert_eq!(w.players["a"].exp, 50);
         assert_eq!(w.players["b"].exp, 50);
@@ -964,12 +1015,49 @@ mod tests {
         let (a, _) = player("a", 1, "Warrior");
         w.players.insert("a".into(), a);
 
-        // Solo-Claim → 100 % an den Claim-Spieler.
-        super::award_monster_exp(&mut w, &gm, 40, &Some("a".into()), "x");
+        // Solo-Claim → 100 % an den Claim-Spieler (Monster-Level = Char-Level).
+        super::award_monster_exp(
+            &mut w,
+            &gm,
+            40,
+            1,
+            &Some("a".into()),
+            "x",
+            &crate::progression::ProgressionCfg::default(),
+        );
         assert_eq!(w.players["a"].exp, 40);
 
         // Kein Claim → Fallback auf den Killer (100 %).
-        super::award_monster_exp(&mut w, &gm, 10, &None, "a");
+        super::award_monster_exp(
+            &mut w,
+            &gm,
+            10,
+            1,
+            &None,
+            "a",
+            &crate::progression::ProgressionCfg::default(),
+        );
         assert_eq!(w.players["a"].exp, 50);
+    }
+
+    /// Leveldifferenz (§7): höheres Monster → Multiplikator am Kill.
+    #[test]
+    fn exp_level_diff_applies_to_award() {
+        let mut w = World::new();
+        let gm = groups();
+        let (a, _) = player("a", 1, "Warrior");
+        w.players.insert("a".into(), a);
+        w.players.get_mut("a").unwrap().level = 8;
+        // Monster 5 Level höher (8+5=13, diff +5 → 125 %), ad hoc 125 EXP.
+        super::award_monster_exp(
+            &mut w,
+            &gm,
+            100,
+            13,
+            &None,
+            "a",
+            &crate::progression::ProgressionCfg::default(),
+        );
+        assert_eq!(w.players.get("a").unwrap().exp, 125);
     }
 }

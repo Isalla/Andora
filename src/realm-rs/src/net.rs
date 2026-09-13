@@ -147,11 +147,35 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         let pid = world.by_conn.get(&conn_id).cloned();
         if let Some(ref pid) = pid {
             if let Some(me) = world.players.get(pid) {
-                let (id, x, y, exp, gold) = (me.id.clone(), me.x, me.y, me.exp, me.gold);
+                let (id, x, y, level, exp, free_attr_points, rested_pool, gold) = (
+                    me.id.clone(),
+                    me.x,
+                    me.y,
+                    me.level,
+                    me.exp,
+                    me.free_attr_points,
+                    me.rested_pool,
+                    me.gold,
+                );
                 let mut inventory = me.inventory.clone();
                 drop(world);
+                // Rested-EXP §12: Logout-Zeitpunkt (Epoch-Sekunden) für die
+                // einmalige Rested-Berechnung beim nächsten Login festhalten.
+                let logout_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
                 db::save_position(&ctx.db, &id, x, y).await;
-                db::save_exp(&ctx.db, &id, exp).await;
+                db::save_progression(
+                    &ctx.db,
+                    &id,
+                    level,
+                    exp,
+                    free_attr_points,
+                    rested_pool,
+                    Some(logout_at),
+                )
+                .await;
                 // Loot System V1: Goldstand persistieren (Fehler nur loggen).
                 db::save_gold(&ctx.db, &id, gold).await;
                 // Inventory V1: Grundinventar/Rucksäcke/Equipment persistieren.

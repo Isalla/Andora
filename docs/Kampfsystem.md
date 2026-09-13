@@ -266,19 +266,21 @@ Respawnpunkte werden entsprechend über die Gebiete verteilt und sind Teil der j
 
 ---
 
-## 15. Todesmalus
+## 15. Tod und Charakter-EXP
 
-Sterben soll eine Konsequenz besitzen, ohne den Spieler übermäßig zu bestrafen.
+Sterben soll eine Konsequenz besitzen, ohne die Charakterprogression übermäßig zu bestrafen.
 
-Jeder Tod erhöht deshalb einen XP-Malus.
+Der Tod verursacht keinerlei Malus auf Charakter-EXP:
 
-Der kumulierte XP-Malus kann maximal **10 %** erreichen.
+- Bereits erworbene Charakter-EXP werden durch den Tod nicht reduziert.
+- Es gibt keine EXP-Schuld.
+- Es gehen keine Level oder Teile des aktuellen Level-Fortschritts verloren.
+- Nach einem Tod wird der zukünftige Charakter-EXP-Verdienst nicht reduziert.
+- Es gibt insbesondere keinen temporären EXP-Verdienstmalus nach einem Tod.
 
-Die genaue Berechnung und der spätere Abbau des XP-Malus werden separat festgelegt.
+Die verbindlichen Regeln zu Tod und Charakter-EXP stehen in `Erfahrung_und_Progressionssystem.md` (Abschnitt 11).
 
-Bereits erreichte Charakterstufen werden durch den Tod nicht direkt verändert.
-
-Tod, Wiederbelebung und Todesmalus in diesem Abschnitt beschreiben das reguläre (`normal`-)Ruleset. Andere Rulesets (z. B. ein späterer Hardcore-Realm) können abweichende Todesregeln definieren; diese sind noch nicht festgelegt (siehe Realm-Rulesets in `Login_Realm_Architektur.md`). Für das Encounter-Design gilt dabei das dort festgelegte Hardcore-Fairnessprinzip: gleiche lesbare Grundregeln auf allen Rulesets, Schwierigkeit über Konsequenz.
+Tod, Wiederbelebung und Todesregeln in diesem Abschnitt beschreiben das reguläre (`normal`-)Ruleset. Andere Rulesets (z. B. ein späterer Hardcore-Realm) können abweichende Todesregeln definieren; diese sind noch nicht festgelegt (siehe Realm-Rulesets in `Login_Realm_Architektur.md`). Für das Encounter-Design gilt dabei das dort festgelegte Hardcore-Fairnessprinzip: gleiche lesbare Grundregeln auf allen Rulesets, Schwierigkeit über Konsequenz.
 
 ---
 

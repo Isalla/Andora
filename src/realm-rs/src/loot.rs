@@ -601,6 +601,8 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
                 gold: 0,
                 armor: 0,
                 weapon_skill: 1,

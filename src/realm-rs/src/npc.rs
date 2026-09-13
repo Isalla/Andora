@@ -95,6 +95,9 @@ pub struct Npc {
     /// Normale EXP des Monsters (docs/Gruppensystem.md §7): 100 % werden
     /// beim Tod an die aktiven Gruppenmitglieder verteilt.
     pub exp_reward: i64,
+    /// Gegnerlevel (docs/Erfahrung_und_Progressionssystem.md §7): Basis der
+    /// Leveldifferenz für den EXP-Multiplikator beim Kill.
+    pub level: u32,
     /// Loot-Tabelle (Loot System V1, Migration 017). None = kein Loot.
     pub loot_table_id: Option<i64>,
     pub pack_id: Option<String>,
@@ -256,6 +259,7 @@ pub fn build_npcs(
             respawn_ms,
             faction: def.faction.clone(),
             exp_reward: def.exp_reward,
+            level: def.level,
             loot_table_id: def.loot_table_id,
             pack_id: spawn.pack_id.clone(),
             home_x: spawn.home_x,
@@ -742,6 +746,8 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
                 gold: 0,
                 armor: 0,
                 weapon_skill: 1,
@@ -785,6 +791,7 @@ mod tests {
             respawn_ms: 300_000,
             faction: None,
             exp_reward: 100,
+            level: 1,
             loot_table_id: None,
             pack_id: None,
             home_x: x,
@@ -842,6 +849,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
@@ -928,6 +936,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
@@ -950,6 +959,7 @@ mod tests {
 
             &crate::config::LootCfg::default(),
 
+            &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(20),

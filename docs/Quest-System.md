@@ -703,6 +703,8 @@ Mögliche Belohnungen können sein:
 
 Alle Belohnungen werden serverseitig validiert und vergeben.
 
+Die Höhe der Quest-EXP-Belohnung wird von der jeweiligen Quest selbst festgelegt (keine globale EXP-Formel); die Grundprinzipien der Charakter-EXP stehen in `Erfahrung_und_Progressionssystem.md` (Abschnitt 10).
+
 Lua darf beschreiben, welche Belohnung vorgesehen ist.
 
 Der Realm-Server (Rust) führt die tatsächliche Vergabe aus.

@@ -20,6 +20,7 @@ mod loot;
 mod migrations;
 mod net;
 mod npc;
+mod progression;
 mod regen;
 mod parental;
 mod protocol;
@@ -94,6 +95,7 @@ async fn async_main() -> Result<(), String> {
     let combat_cfg = cfg.combat.clone();
     let npc_cfg = cfg.npc.clone();
     let loot_cfg = cfg.loot.clone();
+    let prog_cfg = cfg.progression.clone();
     let mut combat_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
 
     // NPC-/Monster-Instanzen aus Content + persistentem Zustand laden
@@ -157,6 +159,7 @@ async fn async_main() -> Result<(), String> {
                 &mut world,
                 &combat_cfg,
                 &loot_cfg,
+                &prog_cfg,
                 &groups_guard,
                 &mut combat_rng,
                 now,

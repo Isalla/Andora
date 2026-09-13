@@ -548,7 +548,9 @@ Grundprinzip:
 
 Die konkreten Levelgrenzen einzelner Tiers werden nicht als unveränderliche Architekturregel festgelegt.
 
-Der aktuelle Charakter-Maximallevel von Andora beträgt **40**.
+Der aktuelle Charakter-Maximallevel von Andora beträgt im Grundspiel **40**; mit Expansion 1 wird er auf **50** angehoben.
+
+Das Level-Cap und sein Verhalten (EXP-Verwurf am Cap, kein EXP-Vorsparen, erweiterbares Cap) sind in `Erfahrung_und_Progressionssystem.md` (Abschnitte 1 und 4) definiert.
 
 Spätere Erweiterungen können das Maximallevel erhöhen und neue Tiers hinzufügen.
 

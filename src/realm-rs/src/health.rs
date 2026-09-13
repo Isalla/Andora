@@ -183,6 +183,7 @@ mod tests {
             group: crate::group::GroupCfg::default(),
             inventory: Default::default(),
             loot: Default::default(),
+            progression: crate::progression::ProgressionCfg::default(),
         }
     }
 

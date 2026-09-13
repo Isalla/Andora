@@ -135,6 +135,31 @@ pub async fn handle_hello(
         let world = ctx.shared.lock().await;
         inventory.remove_broken_equipment(&world.item_definitions)
     };
+    // Rested-EXP (docs/Erfahrung_und_Progressionssystem.md §12): einmalige
+    // Berechnung beim Login aus dem letzten Logout-Zeitpunkt; danach wird
+    // der Zeitstempel persistierend zurückgesetzt (keine Doppel-Berechnung
+    // nach einem Crash). Fehler nur loggen — kein Login-Abbruch.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let rested_pool = crate::progression::apply_offline_rested(
+        &ctx.cfg.progression,
+        c.level,
+        c.rested_pool,
+        c.logout_at,
+        now_secs,
+    );
+    db::save_progression(
+        &ctx.db,
+        &c.id,
+        c.level,
+        c.exp,
+        c.free_attr_points,
+        rested_pool,
+        None,
+    )
+    .await;
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -159,6 +184,8 @@ pub async fn handle_hello(
         level: c.level,
         armor: c.armor,
         exp: c.exp,
+        free_attr_points: c.free_attr_points,
+        rested_pool: rested_pool,
         gold: c.gold,
         weapon_skill,
         combat: None,
@@ -1074,6 +1101,8 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
                     gold: 0,
                     armor: 0,
                     weapon_skill: 1,
@@ -1118,6 +1147,8 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
                     gold: 0,
                     armor: 0,
                     weapon_skill: 1,
@@ -1222,6 +1253,8 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
                     gold: 0,
                     armor: 0,
                     weapon_skill: 1,
@@ -1266,6 +1299,8 @@ mod tests {
                     faction_transition: false,
                     level: 1,
                     exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
                     gold: 0,
                     armor: 0,
                     weapon_skill: 1,

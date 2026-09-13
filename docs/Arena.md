@@ -111,7 +111,6 @@ Dabei wird insbesondere nicht ausgelöst:
 * normaler Welt-Tod
 * Leiche
 * normaler Respawn
-* Todesmalus
 * Lootverlust
 
 Der Spieler bleibt Bestandteil des Arena-Matches, kann aber nicht weiterkämpfen.

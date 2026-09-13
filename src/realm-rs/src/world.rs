@@ -51,6 +51,13 @@ pub struct Player {
     pub level: u32,
     /// Gesammelte Erfahrungspunkte (Gruppensystem V1, §7).
     pub exp: i64,
+    /// Freie Attributpunkte (docs/Erfahrung_und_Progressionssystem.md §5):
+    /// bei Levelaufstieg gutgeschrieben, per Attributs-UI verbrauchbar.
+    pub free_attr_points: u32,
+    /// Rested-EXP-Pool (docs/Erfahrung_und_Progressionssystem.md §12):
+    /// offline bis zu 50 % der aktuellen Level-Anforderung; wird nur durch
+    /// Kill-EXP abgerufen (Kill EXP System V1).
+    pub rested_pool: i64,
     /// Geldstand (Loot System V1); wird bei Disconnect persistiert.
     pub gold: i64,
     /// Aktueller Rüstungswert (relevante physische Rüstung).
@@ -97,6 +104,27 @@ pub struct Player {
 impl Player {
     pub fn send(&self, frame: &Frame) {
         let _ = self.tx.send(frame.encode());
+    }
+
+    /// Reiner Progressions-Zustand (docs/Erfahrung_und_Progressionssystem.md)
+    /// für die zentrale Berechnungslogik (src/progression.rs).
+    pub fn progression_state(&self) -> crate::progression::Progression {
+        crate::progression::Progression {
+            level: self.level,
+            exp: self.exp,
+            free_attr_points: self.free_attr_points,
+            rested_pool: self.rested_pool,
+            class: self.class,
+            faction_transition: self.faction_transition,
+        }
+    }
+
+    /// Schreibt das Ergebnis einer Progressions-Berechnung zurück.
+    pub fn apply_progression(&mut self, prog: crate::progression::Progression) {
+        self.level = prog.level;
+        self.exp = prog.exp;
+        self.free_attr_points = prog.free_attr_points;
+        self.rested_pool = prog.rested_pool;
     }
 }
 
@@ -402,6 +430,8 @@ mod tests {
                 faction_transition: false,
                 level: 1,
                 exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
                 gold: 0,
                 armor: 0,
                 weapon_skill: 1,
