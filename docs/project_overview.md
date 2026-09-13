@@ -528,6 +528,8 @@ Godot (Referenzclient)
 
 Diese Trennung soll ermöglichen, Inhalte später zu erweitern, ohne zentrale Servermechaniken ständig verändern zu müssen.
 
+Die serverseitige Lua-Content-Scripting-Schicht (Script-Domänen, Sicherheitsgrenzen, Eventmodell) ist in `Lua-Scripting-System.md` spezifiziert.
+
 Fähigkeiten, Qualitätswerte und Meisterschaftsvarianten werden Lua- bzw. datengetrieben definiert; der Realm bleibt autoritativ (siehe `Ability-System.md` Abschnitt 14).
 
 Weitere offizielle Clients (Browser, möglicher Unreal-PC-Client, weitere) folgen derselben Trennung; Details in `Mehrere_Offizielle_Clients.md`.

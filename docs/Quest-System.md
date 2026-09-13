@@ -22,6 +22,8 @@ Das Quest-System wird klar zwischen statischem Inhalt, Ausführung, Speicherung 
 
 Lua beschreibt, **was eine Quest ist**.
 
+Die übergreifende Architektur der serverseitigen Lua-Content-Schicht (Sicherheitsgrenzen, Eventmodell, Script-Domänen, Quest-Ablaufmodelle) steht in `Lua-Scripting-System.md`.
+
 Dazu gehören beispielsweise:
 
 * Quest-ID

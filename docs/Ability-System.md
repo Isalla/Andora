@@ -310,6 +310,8 @@ Exakte Preise und Bedingungen sind noch nicht festgelegt.
 
 Konkrete Fähigkeiten, Qualitätswerte, Meisterschaftsvarianten und ihre Contentregeln sollen später Lua- bzw. datengetrieben definiert werden.
 
+Die übergreifende Architektur der serverseitigen Lua-Content-Schicht steht in `Lua-Scripting-System.md`.
+
 Der Realm bleibt autoritativ.
 
 * **Lua** beschreibt Regeln, Werte und gewünschte Effekte.

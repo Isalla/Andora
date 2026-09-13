@@ -126,6 +126,8 @@ Definiert:
 * AI-Prompt-Fragmente
 * Content-spezifische Regeln
 
+Die übergreifende Architektur der serverseitigen Lua-Content-Schicht steht in `Lua-Scripting-System.md`.
+
 ## Runtime-KI (lokal: Ollama)
 
 Kann ausdrücklich freigegebene Dialogteile improvisieren und personalisieren.
