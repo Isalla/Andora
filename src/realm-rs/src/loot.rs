@@ -622,6 +622,7 @@ mod tests {
                 hp_regen_carry: 0.0,
                 mana_regen_carry: 0.0,
                 inventory: crate::inventory::InventoryState::new(2),
+                quests: Default::default(),
             },
             rx,
         )

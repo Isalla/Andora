@@ -28,6 +28,10 @@ pub struct Ctx {
     pub parental: SharedParental,
     pub registry: AbilityRegistry,
     pub groups: SharedGroups,
+    /// Quest V1 (docs/Quest-System.md §27): zentrale serverseitige
+    /// Quest-Komponente. Registerspieldefinitionen (internes V1.1-Format);
+    /// Spielerzustand wird aus der Tabelle `quests` geladen/persistiert.
+    pub quest: crate::quest::QuestService,
 }
 
 fn get_str(data: &serde_json::Value, key: &str) -> String {
@@ -160,6 +164,21 @@ pub async fn handle_hello(
         None,
     )
     .await;
+    // Quest V1 (§13): persistierte Spieler-Questzustände (ACTIVE/COMPLETED/
+    // FAILED) laden. Fehler am Laden => leerer Questzustand (Fallback wie
+    // save_position, kein Login-Abbruch). HIDDEN/AVAILABLE sind abgeleitet
+    // (§27.5) und liegen nie in der Tabelle `quests`.
+    let quests: std::collections::BTreeMap<String, crate::quest::CharacterQuestState> = ctx
+        .quest
+        .load_for_character(&ctx.db, &c.id)
+        .await
+        .unwrap_or_else(|e| {
+            log::error!("HELLO load quests: {e}");
+            Vec::new()
+        })
+        .into_iter()
+        .map(|s| (s.quest_id.clone(), s))
+        .collect();
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -210,6 +229,7 @@ pub async fn handle_hello(
         hp_regen_carry: 0.0,
         mana_regen_carry: 0.0,
         inventory,
+        quests,
     };
     let mut me = me;
     attributes::recompute_max_resources(&mut me);
@@ -1122,6 +1142,7 @@ mod tests {
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
+                    quests: Default::default(),
                 },
             );
             w.players.insert(
@@ -1168,6 +1189,7 @@ mod tests {
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
+                    quests: Default::default(),
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1274,6 +1296,7 @@ mod tests {
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
+                    quests: Default::default(),
                 },
             );
             w.players.insert(
@@ -1320,6 +1343,7 @@ mod tests {
                     hp_regen_carry: 0.0,
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
+                    quests: Default::default(),
                 },
             );
             w.by_conn.insert(7, "a".into());

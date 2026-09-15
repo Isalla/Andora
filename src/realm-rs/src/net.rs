@@ -46,6 +46,7 @@ pub async fn serve(
         parental,
         registry,
         groups,
+        quest: crate::quest::QuestService::new(),
     });
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {

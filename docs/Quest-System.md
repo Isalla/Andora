@@ -1118,15 +1118,11 @@ Diese Dinge werden dadurch nicht verworfen.
 
 ---
 
-## 27.12 Gruppen-Kill-Credit bleibt offen
+## 27.12 Gruppen-Kill-Credit – geregelt
 
-Es ist **NICHT festgelegt**, dass bei `kill` automatisch nur der Claim-Spieler Questfortschritt erhält.
+Die zuvor offene Frage, ob bei `kill` automatisch nur der Claim-Spieler Questfortschritt erhält, ist **verbindlich entschieden** (Abschnitt 27.16). Einzelspieler, Gruppen, Gruppen-Claim, Entfernung zum Kill sowie lebend/tot innerhalb der Gruppe sind dort positionbasiert geregelt.
 
-Die genaue Regel für Einzelspieler, Gruppen, Gruppen-Claim, Entfernung zum Kill, lebend/tot und Beteiligung ist noch nicht abschließend entschieden.
-
-Deshalb markiert die V1-Dokumentation diese Entscheidung ausdrücklich als offenen Punkt für die `kill`-Implementierung.
-
-Die Coding-KI darf diese Regel später **NICHT selbst erfinden**.
+Ausdrücklich **keine** weiteren Beteiligungs-/Damage-Regeln: Die Coding-KI darf über die Positionsregel in Abschnitt 27.16 hinaus **keine zusätzlichen** Schadensanteil-, Assist- oder Ownership-Regeln selbst erfinden.
 
 ---
 
@@ -1180,16 +1176,431 @@ Falls die dokumentierten Abhängigkeiten eine andere, kleinere Aufteilung sinnvo
 
 ## 27.15 Offene Punkte nach dieser Festlegung
 
+Der Gruppen-Kill-Credit ist inzwischen verbindlich geregelt (Abschnitt 27.16).
+
 Mindestens offen bleiben:
 
-* Gruppen-Kill-Credit
 * endgültiges Quest-Lua-Dateiformat/-API
 * konkrete Quest-Protokoll-IDs und Feldschemas
 * endgültige Clientdarstellung des Questdialogs/Questlogs
 * FAILED-Trigger späterer Quests
+* FAILED → ACTIVE (Wiederannahme einer fehlgeschlagenen Quest)
+* Abbruch → erneute Annahme einer abgebrochenen Quest
 * Zeitquest-Semantik (Logout, Neustart, Spielzeit, Wiederholbarkeit)
+* konkrete technische Reward-Umsetzung (Rust-API für Inventory Locks, Lock-/Reservierungs-Datenstruktur, MariaDB-Transaktionsimplementierung, RewardService-Struktur); die Ablauf- und Sicherheitsregel des Questabschlusses selbst ist verbindlich in Abschnitt 27.26 geregelt (siehe auch Abschnitt 27.13)
+* endgültige Repeatable-Regeln (sofort wiederholbar, täglich, wöchentlich, Cooldown, Fraktionsbedingungen, Verhalten nach FAILED und nach Abbruch, Resetzeitpunkt, Fortschrittsreset)
 * Area-/Discover-Modell
 * spätere Questzieltypen
+* endgültige Questitem-Verkaufspreise
+* automatische Wiederherstellung zerstörter/verlorener Questitems
 * konkrete erste Beispielquest/Content
 
 Weitere echte Blocker, die erst bei der Implementierung entdeckt werden, werden in der jeweiligen Implementierungsphase dokumentiert.
+
+---
+
+## 27.16 Gruppen-Kill-Credit (verbindlich)
+
+Die Regel für EXP- und Questfortschritt bei relevanten Gruppen-Kills ist verbindlich wie folgt geregelt:
+
+Eine Gruppe besitzt einen **Gruppenbereich** mit einem Radius von **100 Metern** um den **Gruppenleader**.
+
+Für EXP und Questfortschritt bei relevanten Gruppen-Kills gilt:
+
+* Ein Gruppenmitglied erhält Credit nur, wenn es sich **innerhalb dieses 100-Meter-Gruppenbereichs** befindet.
+* Ein **gestorbener Spieler**, dessen Charakter/Körper noch innerhalb dieses Bereichs liegt, erhält weiterhin EXP und Questfortschritt für entsprechende Gruppen-Kills.
+* Hat sich der Spieler zu einem Spawn-/Respawnpunkt teleportiert (siehe `Kampfsystem.md`, Abschnitte 13–14) und befindet sich dadurch **außerhalb** des Gruppenbereichs, erhält er für entsprechende Kills **keinen** Credit.
+
+Keine darüber hinausgehenden Beteiligungs-/Damage-Regeln: Es werden keine zusätzlichen Schadensanteil-, Assist- oder ähnliche Beteiligungsregeln erfunden (Abschnitt 27.12). Die Regel beschreibt ausschließlich den positionsbezogenen Credit.
+
+---
+
+## 27.17 Normale Items vs. Quest-Sammelitems (verbindlich)
+
+Die Questformulierung bestimmt, welche Art von Ziel vorliegt.
+
+**NORMALE ITEMS**
+
+Beispiel:
+
+```text
+"Bringe mir 20 Kupfererz."
+```
+
+Hier darf **vorhandenes normales Kupfererz** aus dem Inventar berücksichtigt werden. Der Spieler muss es nicht zwingend erst nach Questannahme sammeln.
+
+**SPEZIELLE QUESTITEMS**
+
+Davon zu unterscheiden sind spezielle Questitems für Sammelziele:
+
+* Spezielle Questitems für Sammelziele droppen **nur, solange die zugehörige Quest ACTIVE ist**.
+* Der Spieler muss diese Questitems während der aktiven Quest **tatsächlich erlangen/farmen**.
+
+Diese Unterscheidung ist verbindlich.
+
+---
+
+## 27.18 Deliver mit vorhandenen normalen Items (verbindlich)
+
+Bei einem `deliver`-Ziel mit normalen Gegenständen dürfen Gegenstände verwendet werden, die **bereits vor der Questannahme** im Inventar vorhanden waren.
+
+Beispiel:
+
+```text
+"Bringe Borin 20 Kupfererz."
+```
+
+Besitzt der Spieler bereits 20 geeignetes Kupfererz, darf dieses bei der autoritativen Übergabe (Abschnitte 27.2/27.4) berücksichtigt werden.
+
+Spezielle Questitems können davon abweichende Erwerbsregeln besitzen (Abschnitt 27.17).
+
+---
+
+## 27.19 Handel mit Questitems (verbindlich)
+
+Solange die Quest **ACTIVE** ist:
+
+* Questitems können **nicht** an andere Spieler gehandelt werden.
+* Questitems können **nicht** regulär verkauft werden.
+* Questitems dürfen **nicht** im Auktionshaus angeboten werden.
+
+Der Spieler darf Questitems jedoch **bewusst zerstören/wegwerfen**.
+
+Es wird **keine automatische Wiederherstellung** verlorener oder zerstörter Questitems erfunden.
+
+---
+
+## 27.20 Questabbruch (verbindlich)
+
+Spieler dürfen eine ACTIVE Quest **manuell abbrechen**.
+
+Beim Abbruch werden Questitems nach Herkunft unterschieden:
+
+**A) Questitems, die dem Spieler beim Start/Beginn der Quest direkt gegeben wurden:**
+
+Diese werden beim Questabbruch **zerstört/entfernt**.
+
+**B) Sammel-Questitems, die der Spieler während der Quest durch Drops erhalten/erfarmt hat:**
+
+Diese bleiben nach dem Questabbruch **im Inventar**.
+
+Nach dem Abbruch dürfen solche verbliebenen Sammel-Questitems an dafür geeignete **NPC-Händler verkauft** werden.
+
+Sie dürfen weiterhin **NICHT**:
+
+* zwischen Spielern gehandelt werden
+* im Auktionshaus angeboten werden
+
+Ziel dieser Regel ist ausdrücklich, dass Questitems **nicht das Auktionshaus mit Questmaterial überschwemmen**.
+
+Es werden **keine konkreten Verkaufspreise** festgelegt. Es wird **keine allgemeine NPC-Händlerlogik** implementiert.
+
+---
+
+## 27.21 Wiederholbare Quests (grundsätzliche Unterstützung, Semantik offen)
+
+Das Quest-System muss wiederholbare Quests **grundsätzlich unterstützen**. Sie werden später insbesondere für **Fraktionen** wichtig.
+
+Die genaue Wiederholungssemantik ist **NOCH NICHT festgelegt**.
+
+Bewusst noch nicht bestimmt:
+
+* sofort wiederholbar
+* täglich
+* wöchentlich
+* Cooldown
+* Fraktionsbedingungen
+* Verhalten nach FAILED
+* Verhalten nach Abbruch
+* Resetzeitpunkt
+* Fortschrittsreset
+
+Die Architektur darf Repeatable daher **nicht ausschließen**.
+
+Die konkrete Regel wird später **separat entschieden**.
+
+---
+
+## 27.22 Questgeber und Abgabe-NPC (verbindlich)
+
+Questgeber und Quest-Abgabe-NPC **müssen nicht identisch** sein.
+
+Beispiel:
+
+```text
+Borin kann eine Quest vergeben, deren Abschluss bei Isalla erfolgt.
+```
+
+Definitionen müssen daher **logisch** zwischen Questgeber und vorgesehenem Abgabe-/Empfänger-NPC unterscheiden können.
+
+Es werden **keine konkreten Datenstrukturen oder Lua-APIs** dafür festgelegt.
+
+---
+
+## 27.23 Verbindliche Quest-Designregel: Parallelität vor künstlicher Sequenzierung
+
+Diese Regel ist **verbindlich**:
+
+> **„Parallelität vor künstlicher Sequenzierung."**
+
+Questziele werden **parallel aktiviert**, wenn ihre gleichzeitige Bearbeitung inhaltlich und spielerisch sinnvoll ist.
+
+**Sequenzielle Questphasen** werden nur eingesetzt, wenn:
+
+* Handlung,
+* Entdeckung,
+* oder eine echte logische Abhängigkeit
+
+eine Reihenfolge erfordern.
+
+Questphasen dürfen **NICHT ausschließlich** dazu dienen:
+
+* Laufwege künstlich zu verlängern
+* bereits erledigte Tätigkeiten wiederholen zu lassen
+* Spielzeit künstlich zu strecken
+
+**Beispiel parallel:**
+
+```text
+"Töte 10 Wölfe und sammle 5 Wolfsfelle."
+```
+
+Kill und Sammeln laufen gleichzeitig. Der Spieler soll nicht erst 10 Wölfe töten und anschließend noch einmal dieselben Gegner farmen müssen, nur weil die Objectives künstlich hintereinandergeschaltet wurden.
+
+**Beispiel sequenziell:**
+
+```text
+"Sprich mit Borin."
+```
+
+Erst durch das Gespräch erfährt der Spieler von einem versteckten Lager. Danach:
+
+```text
+"Finde das versteckte Lager."
+```
+
+Hier ist die Reihenfolge durch die Handlung logisch begründet.
+
+---
+
+## 27.24 Quest-Stages (Gameplay-/Designregel)
+
+Die langfristige Questarchitektur muss sowohl:
+
+* mehrere gleichzeitig aktive Objectives
+* als auch logisch aufeinanderfolgende Questphasen/Stages
+
+ermöglichen.
+
+Innerhalb einer Stage können mehrere Objectives **parallel** aktiv sein.
+
+Eine folgende Stage wird nur verwendet, wenn die Questlogik tatsächlich eine Reihenfolge benötigt (Abschnitt 27.23).
+
+**WICHTIG:**
+
+* Kein endgültiges Lua-Stage-Format wird festgelegt.
+* Keine Protokollstruktur wird festgelegt.
+* Keine konkrete Persistenzstruktur wird festgelegt.
+
+Es wird **nur die Gameplay-/Designregel** dokumentiert.
+
+---
+
+## 27.25 Quest-KI / Quest-Editor-Regel (verbindlich)
+
+Die Quest-KI bzw. der Quest-Editor darf **nicht automatisch** aus mehreren Objectives eine künstliche lineare Kette erzeugen.
+
+Bei KI-unterstütztem Questdesign gilt ebenfalls die verbindliche Parallelitätsregel (Abschnitt 27.23):
+
+* **Parallelität bevorzugen**, wenn die Aufgaben logisch gleichzeitig erledigt werden können.
+* **Sequenz nur** bei narrativer oder logischer Abhängigkeit.
+
+Diese Regel gilt gleichermaßen für menschliche und KI-unterstützte Questerstellung und wird auch im Andora Studio verbindlich gehalten (siehe `Andora-Studio.md`, Abschnitt 7, Quest Editor).
+
+Keine Studio-Implementierung.
+
+---
+
+## 27.26 Questabschluss und Reward-Transaktion (verbindliche Ablauf- und Sicherheitsregel)
+
+Diese Regel ist **verbindlich**. Sie ergänzt die ausdrückliche Abgabe aus Abschnitt 27.4 sowie die Anforderungen an die zukünftige Inventory-Remove-API aus Abschnitt 27.13 um die Abschluss- und Belohnungsreihenfolge sowie die Reservierungs- und Fehlerabsicherung des Questabschlusses.
+
+Sie legt ausschließlich Ablauf- und Sicherheitsregeln fest. Es werden **keine** neuen Gameplayregeln erfunden, **keine** neue technische API festgelegt und **kein** Code implementiert.
+
+### Grundregel
+
+Der Questabschluss folgt logisch der Reihenfolge:
+
+```text
+PRÜFEN → RESERVIEREN/LOCKEN → ABSCHLIESSEND VALIDIEREN
+→ AUTORITATIV AUSFÜHREN → COMPLETED → CLIENT BESTÄTIGEN
+```
+
+`COMPLETED` steht dabei logisch **am Ende** der Abschlussoperation und wird nur erreicht, wenn alle vorherigen Schritte erfolgreich abgeschlossen sind.
+
+### Vollständige Vorprüfung
+
+Vor Beginn der Abschlussoperation prüft der Realm serverseitig und autoritativ:
+
+* die Quest existiert
+* der Questzustand ist `ACTIVE`
+* alle erforderlichen Objectives sind erfüllt
+* es ist der richtige Abgabe-/Empfänger-NPC
+* benötigte Deliver-/Questitems sind vorhanden (richtige Item-IDs, ausreichende Mengen)
+* die Belohnungen sind grundsätzlich vergabefähig
+* die freie Inventarkapazität reicht für die vollständige Itembelohnung
+* die Quest ist nicht bereits abgeschlossen
+
+Schlägt die Vorprüfung fehl, bleibt die Quest `ACTIVE`. Es werden **keine** Items entfernt, **keine** Belohnung vergeben und **kein** `COMPLETED` gesetzt.
+
+### Volles Inventar – keine Ausweichlösung
+
+Die **vollständige** Itembelohnung muss in das Inventar passen. Reicht die Inventarkapazität nicht, findet **kein** Abschluss statt: Die Quest bleibt `ACTIVE`, und der Spieler muss Platz schaffen und den Abschluss später erneut versuchen.
+
+Für Quest V1 gibt es ausdrücklich **keine** Ausweichlösung:
+
+* kein Post-/Mail-Versand der Belohnung
+* kein Fallenlassen/Platzieren am Boden
+* keine Teilbelohnung
+* kein automatisches Zwischenlager
+
+### Item- und Mengen-Lock (Reservierung)
+
+Nach erfolgreicher Vorprüfung werden die für den Abschluss benötigten Gegenstände reserviert.
+
+Reservierte Bestandteile dürfen für die Dauer der Reservierung **nicht**:
+
+* verschoben werden
+* verkauft werden
+* gehandelt werden
+* im Auktionshaus angeboten werden
+* weggeworfen/zerstört werden
+* verbraucht werden
+* anderweitig entfernt werden
+
+Der Lock schützt ausschließlich den geprüften Zustand während der kurzen Abschlussoperation. Er ist **keine** dauerhafte Einschränkung des Inventars und keine neue, über die Reservierung hinausgehende Gameplayregel.
+
+### Stacks – nur die benötigte Menge
+
+Bei stapelbaren normalen Items wird **nur die tatsächlich benötigte Menge** reserviert.
+
+Beispiel:
+
+```text
+Spieler besitzt 50 Kupfererz. Das deliver-Ziel verlangt 20.
+→ Es werden 20 Kupfererz reserviert. Die übrigen 30 bleiben normal nutzbar.
+```
+
+Sofern eine sichere Mengenreservierung möglich ist, wird **nicht** unnötigerweise der vollständige Stack gesperrt.
+
+### Inventarkapazität reservieren
+
+Während der Abschlussoperation muss zudem sichergestellt sein, dass ausreichend freie Slots für die vollständige Itembelohnung vorhanden bleiben. Parallele Loot- oder andere Inventarveränderungen dürfen diese Kapazität während der Operation nicht belegen.
+
+Es wird **nur diese Semantik** verbindlich festgelegt. Die konkrete technische Umsetzung (z. B. eine Slot-Reservierung) wird hier **nicht** festgelegt.
+
+### Dauer des Locks
+
+Der Lock beginnt erst beim tatsächlichen Abschlussauslöser:
+
+```text
+[Quest abschließen]
+```
+
+Er beginnt **nicht** bereits beim Öffnen des Abschluss-/Questdialogs. Ein geöffnetes Questfenster darf das Inventar nicht blockieren. Der Lock gilt ausschließlich für die kurze serverseitige Abschlussoperation.
+
+### Autoritative Abschlussoperation
+
+Die Abschlussoperation läuft serverseitig autoritativ in dieser logischen Reihenfolge:
+
+```text
+1. den finalen, geschützten Zustand abschließend validieren
+2. die benötigten Deliver-/Questitems entfernen
+3. die vollständigen Itembelohnungen ins Inventar übernehmen
+4. weitere vorgesehene Belohnungen (EXP/Geld) vergeben
+5. die Quest persistent auf COMPLETED setzen
+6. die Reservierungen/Locks freigeben
+7. den Erfolg an den Client bestätigen
+```
+
+Der Client darf **keinen** dieser Schritte selbst ausführen oder festlegen.
+
+### Fehler während des Abschlusses
+
+Es darf **keinen** teilweisen Abschluss geben:
+
+* keine Items, die ohne versprochene Belohnung verloren gehen
+* keine Belohnung ohne erfolgreich validierte Übergabe
+* keine Teilbelohnung
+* keine Doppelbelohnung
+* kein `COMPLETED`, wenn die Übergabe fehlgeschlagen ist
+
+Deshalb ist eine geeignete **atomare/transaktionale Sicherheitsgrenze** erforderlich, die Itementfernung, Belohnungsvergabe und Persistenz gemeinsam absichert. Die konkrete technische Transaktionsgrenze wird bei der späteren Implementierung des Abschlussablaufs festgelegt; diese Dokumentation legt **keine neue technische API** fest.
+
+### Fehlerfall / Rollback
+
+Schlägt die Abschlussoperation fehl:
+
+* es wird **kein** Abschluss bestätigt
+* die Quest bleibt `ACTIVE`
+* es gibt **keine** Teilbelohnung, die als Erfolg gewertet wird
+* alle Reservierungen/Locks werden freigegeben
+
+Es entsteht insbesondere **kein Itemverlust** und **keine Doppelbelohnung**.
+
+### Client-Autorität
+
+Der Client löst den Abschlussversuch nur aus. Er bestimmt **nicht**:
+
+* ob die Objectives erfüllt sind
+* ob die benötigten Items vorhanden sind
+* ob Inventarplatz vorhanden ist
+* welche Items entfernt werden
+* welche Belohnungen vergeben werden
+* ob `COMPLETED` erreicht wird
+
+All dies entscheidet ausschließlich der Realm (Abschnitt 27.8).
+
+### Reward-Arten
+
+Es werden **keine neuen Belohnungsarten** erfunden. Vorgesehen sind für Questabschlüsse:
+
+* Itembelohnungen
+* EXP/Geld, sofern vom jeweiligen System unterstützt
+
+Es werden **keine** Fraktionsruf-, Titel-, Skill- oder Achievement-Belohnungen als Reward-Semantik eines Questabschlusses festgelegt.
+
+### Doppelabschluss-Schutz
+
+Die bestehende Regel bleibt verbindlich: Ein Abschluss derselben (nicht wiederholbaren) Quest kann nicht doppelt erfolgen, und eine wiederholte Abschlussanfrage kann keine zweite Belohnung erzeugen (Abschnitt 27.4; serverseitig im Quest-Kern abgesichert).
+
+Die hier beschriebene Reservierungs-/Transaktionsregel unterstützt diesen Schutz, es wird jedoch **keine** konkrete Netzwerk-Idempotency-API festgelegt.
+
+### Ausdrücklich nicht implementieren
+
+Mit dieser Festlegung wird **kein** Code erstellt:
+
+* kein Inventory-Lock-Code
+* keine Slot-Reservierung
+* kein RewardService
+* keine DB-Transaktion
+* kein Questabschluss-Code
+* keine Netzwerkframes
+* kein Lua-Code
+* kein Godot-Code
+* keine Datenbankmigrationen
+
+### Noch offen (technische Entscheidungen)
+
+Bewusst weiterhin **nicht** festgelegt:
+
+* konkrete Rust-API für Inventory Locks
+* Lock-/Reservierungs-Datenstruktur
+* konkrete MariaDB-Transaktionsimplementierung
+* Struktur eines späteren RewardService
+* endgültige Repeatable-Semantik (Abschnitt 27.21)
+* FAILED → ACTIVE (Wiederannahme, Abschnitt 27.10)
+* Abbruch → erneute Annahme (Abschnitt 27.20)
+* Zeitquest-Semantik (Abschnitt 27.10)
+* Quest-Lua-Format/-API (Abschnitt 27.9)
+* Quest-Protokoll-IDs

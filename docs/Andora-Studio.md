@@ -258,6 +258,17 @@ Sie darf **nicht automatisch**:
 * NPC-Aussehen verändern
 * neue Itemregeln erfinden
 
+### Verbindliche Quest-Designregel für den Quest Editor
+
+Die Quest-KI bzw. der Quest-Editor darf **nicht automatisch** aus mehreren Objectives eine künstliche lineare Kette erzeugen (keine automatische Ketten-/Sequenzbildung).
+
+Bei KI-unterstütztem Questdesign gilt die verbindliche Parallelitätsregel des Quest-Systems (`Quest-System.md`, Abschnitt 27.23):
+
+* **Parallelität bevorzugen**, wenn die Aufgaben logisch gleichzeitig erledigt werden können.
+* **Sequenz nur** bei narrativer oder logischer Abhängigkeit.
+
+Diese Regel gilt gleichermaßen für menschliche und KI-unterstützte Questerstellung.
+
 ### ITEM EDITOR
 
 KI darf beispielsweise:

@@ -190,6 +190,7 @@ mod tests {
             hp_regen_carry: 0.0,
             mana_regen_carry: 0.0,
             inventory: Default::default(),
+            quests: Default::default(),
             effects: Vec::new(),
             cooldowns: Default::default(),
             active_cast: None,

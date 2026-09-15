@@ -22,6 +22,7 @@ mod migrations;
 mod net;
 mod npc;
 mod progression;
+mod quest;
 mod regen;
 mod parental;
 mod protocol;

@@ -1270,3 +1270,63 @@ pub async fn wipe_logout_buffer(
         .map_err(|e| format!("Puffer-Transaktion commit: {e}"))?;
     Ok(())
 }
+
+/// Quest-Zeile aus der Tabelle `quests` (docs/Quest-System.md §27/Quest V1,
+/// Migration 004_quests.sql). Die rohe TINYINT-Spalte `state` wird erst im
+/// QuestService auf den Questzustand abgebildet (ACTIVE=1, COMPLETED=2,
+/// FAILED=3). HIDDEN/AVAILABLE sind abgeleitet und werden nie persistiert.
+#[derive(Debug, Clone)]
+pub struct QuestRow {
+    pub quest_id: String,
+    pub state: i8,
+    pub data: Option<String>,
+}
+
+/// Lädt die persistierten Quest-Zeilen eines Charakters (§27.13). Kehrt
+/// nie mit einem Teilzustand zurück, der die Persistenz als Wahrheit
+/// verfälscht; defekte/unbekannte Zahlen werden vom QuestService verworfen.
+pub async fn load_quest_rows(pool: &Pool<MySql>, char_id: &str) -> Result<Vec<QuestRow>, String> {
+    let rows = sqlx::query_as::<_, (String, i8, Option<String>)>(
+        "SELECT quest_id, state, data FROM quests WHERE char_id = ? ORDER BY quest_id",
+    )
+    .bind(char_id)
+    .persistent(false)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Questzustände laden (char {char_id}): {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(quest_id, state, data)| QuestRow {
+            quest_id,
+            state,
+            data,
+        })
+        .collect())
+}
+
+/// Schreibt einen Spieler-Questzustand als Upsert in die Tabelle `quests`
+/// (Spalten state + data, §27.12). Der Aufrufer stellt sicher, dass nur
+/// persistierbare Zustände (ACTIVE/COMPLETED/FAILED) geschrieben werden.
+/// Aufgerufen über `quest::QuestService::persist_state`; in V1.1 noch ohne
+/// Gameplay-Aufrufer (Questdialog folgt in V1.2).
+#[allow(dead_code)]
+pub async fn save_quest_state(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    quest_id: &str,
+    state: i8,
+    data: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO quests (char_id, quest_id, state, data) VALUES (?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE state = VALUES(state), data = VALUES(data)",
+    )
+    .bind(char_id)
+    .bind(quest_id)
+    .bind(state)
+    .bind(data)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Questzustand speichern (char {char_id}, quest {quest_id}): {e}"))?;
+    Ok(())
+}

@@ -99,6 +99,11 @@ pub struct Player {
     /// Rucksäcke, Equipment, temporärer Sicherheits-Puffer. Wird bei HELLO
     /// aus realm_state geladen, bei Änderung/Disconnect persistiert.
     pub inventory: crate::inventory::InventoryState,
+    /// Quest V1-Spielerzustand (docs/Quest-System.md §27): persistierte
+    /// ACTIVE/COMPLETED/FAILED-Zustände je Quest, geladen bei HELLO aus
+    /// der Tabelle `quests` (realm_state). HIDDEN/AVAILABLE sind abgeleitet
+    /// (§27.5) und liegen nie hier.
+    pub quests: BTreeMap<String, crate::quest::CharacterQuestState>,
 }
 
 impl Player {
@@ -451,6 +456,7 @@ mod tests {
                 hp_regen_carry: 0.0,
                 mana_regen_carry: 0.0,
                 inventory: Default::default(),
+                quests: Default::default(),
             },
             rx,
         )
