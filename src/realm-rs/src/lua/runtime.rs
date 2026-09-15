@@ -66,6 +66,15 @@ impl ScriptManager {
         })
     }
 
+    /// Erzeugt eine frische Script-Runtime mit neuer Lua-VM.
+    ///
+    /// Wird beim Reset eines Dedicated Workers benötigt (§11): alter
+    /// VM-/Script-Zustand wird vollständig verworfen, kein Kontext
+    /// überlebt die Wiederverwendung.
+    pub fn fresh_vm() -> Result<Self, LuaError> {
+        Self::new()
+    }
+
     /// Anzahl der geladenen Scripts.
     pub fn script_count(&self) -> usize {
         self.scripts.len()

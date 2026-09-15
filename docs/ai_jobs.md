@@ -4,6 +4,8 @@ Der Root des aktuell geöffneten Andora-Repositories ist der **Projektroot**. Er
 
 Alle Arbeitsregeln und Pfadangaben beziehen sich relativ auf diesen Projektroot.
 
+Bei jedem Job/Auftrag MUSS die Coding-KI `references/README.md` mit berücksichtigen und relevante Inhalte daraus in die Arbeit einbeziehen.
+
 Die Coding-KI arbeitet ausschließlich innerhalb des Projektroots, sofern ein Arbeitsauftrag nicht ausdrücklich etwas anderes erlaubt.
 
 Grundstruktur (relativ zum Projektroot):

@@ -29,10 +29,14 @@
 
 pub mod context;
 pub mod convert;
+pub mod dispatcher;
 pub mod domain;
 pub mod error;
 pub mod event;
 pub mod host;
+pub mod lifecycle;
+pub mod queue;
 pub mod runtime;
 pub mod sandbox;
 pub mod script;
+pub mod worker;
