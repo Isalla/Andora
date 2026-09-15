@@ -126,6 +126,8 @@ event
 
 Dadurch kann der Server Questfortschritt zuverlässig prüfen.
 
+> **Hinweis:** Die vollständige Zieltypen-Liste des langfristigen Quest-Systems steht in `Quest-System.md` (Abschnitt 5). Der verbindliche Quest-V1-Umfang (`kill`, `talk`, `collect`, `deliver`) ist in `Quest-System.md`, Abschnitt 27, festgelegt. Die hier genannten Grundtypen beschreiben das langfristige Gesamtsystem.
+
 ---
 
 # 5. Kill
@@ -602,6 +604,8 @@ FAILED
 ```
 
 Bei komplexeren Questketten können zusätzliche Zustände später ergänzt werden.
+
+> **Hinweis:** `Quest-System.md` ist der Architektur-Anker und definiert **fünf** Zustände (HIDDEN, AVAILABLE, ACTIVE, COMPLETED, FAILED). Die hier vereinfachte Liste ist ein Teil davon. Die verbindlichen Quest-V1-Regeln zu Ableitung und Persistenz der Zustände stehen in `Quest-System.md`, Abschnitt 27.5.
 
 ---
 

@@ -859,7 +859,7 @@ npc_definitions
 → realm_state_<realm>
 
 character_quests
-→ realm_state_<realm>
+→ realm_state_<realm> (Schema-Name: `quests`, Migration `004_quests.sql`; frühere Bezeichnung `character_quests` — vereinheitlicht auf den implementierten Namen, siehe `Quest-System.md`, Abschnitt 27.6)
 
 craft_jobs
 → realm_state_<realm>
