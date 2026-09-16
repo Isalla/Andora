@@ -16,6 +16,10 @@ Das ausführliche aktuelle System wird in der Dokumentation zum:
 
 beschrieben.
 
+Die Darstellungsregeln für normale Dialoge (Portraits, Expressions, CG) als VN-/Nah-Ansicht
+derselben Welt sind in `Visual_Novel_Dialog_und_Szenendarstellung.md` beschrieben und
+erweitern diesen Architekturrahmen ohne ein zweites System.
+
 ---
 
 # 1. Grundprinzip

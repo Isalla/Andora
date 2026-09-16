@@ -877,6 +877,10 @@ Der Client entscheidet nicht, ob eine Quest verfügbar ist.
 
 Die genaue visuelle Gestaltung des Dialogfensters ist noch kein Bestandteil von Quest V1.
 
+Die Präsentationsregeln für Dialog-/VN-Darstellung (Portraits, Expressions, Antworten) als
+Erweiterung desselben Dialogflusses stehen in `Visual_Novel_Dialog_und_Szenendarstellung.md`;
+sie ändern nichts an Quest-Autorität und -Persistenz.
+
 ---
 
 ## 27.4 Questabgabe

@@ -98,7 +98,10 @@ NPC-Scripts steuern:
 * Reaktionen auf Queststatus
 * NPC-spezifisches Verhalten
 
-NPC-Zustand, Position, Wissen und Weltzugehörigkeit bleiben autoritativ in Rust bzw. den dafür zuständigen Systemen (siehe `Ki-NPC.md`).
+NPC-Zustand, Position, Wissen und Weltzugehörigkeit bleiben autoritativ in Rust bzw. den dafür
+zuständigen Systemen (siehe `Ki-NPC.md`). Die Präsentationsregeln für Dialoge/Portraits als
+VN-/Nah-Ansicht sind in `Visual_Novel_Dialog_und_Szenendarstellung.md` beschrieben (Lua
+beschreibt den Inhalt, nicht die Darstellung).
 
 ### 3.3 Item Scripts
 

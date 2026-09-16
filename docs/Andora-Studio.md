@@ -146,6 +146,11 @@ Vorgesehene spezialisierte Arbeitsbereiche sind langfristig beispielsweise:
 * Spawn Editor
 * Asset Library / Asset Composer
 
+> **Hinweis VN-Dialogdarstellung:** Der geplante `Dialogue Editor` ist als gemeinsames
+> Content-Werkzeug für Dialog, Sprecher, Expressions und Szenenaktionen eingerichtet
+> (verbindliche Regeln in `Visual_Novel_Dialog_und_Szenendarstellung.md`). Es wird kein
+> separater VN-Editor gebaut.
+
 Diese Liste ist eine geplante **Studio-Struktur** und kann später erweitert werden.
 
 Nicht alle Module müssen in Version 1 implementiert werden.

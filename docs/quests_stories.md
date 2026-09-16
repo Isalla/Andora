@@ -187,6 +187,10 @@ Der Server prüft:
 
 Ein Gespräch allein bedeutet nicht automatisch, dass ein Questziel abgeschlossen wird.
 
+Die Präsentation von Gesprächen/Portraits (VN-Darstellung, Expressions, Antwortmöglichkeiten)
+ist in `Visual_Novel_Dialog_und_Szenendarstellung.md` beschrieben; sie ändert nichts an den
+hier geltenden Questregeln.
+
 ---
 
 # 8. Visit und Discover

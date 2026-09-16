@@ -354,6 +354,7 @@ Diese Punkte werden entschieden, wenn das System tatsächlich entwickelt wird.
 | Quest-System | `Quest-System.md`, `quests_stories.md`, `Bericht_Questsystem.md` | Quest-Erstellung im Arbeitsbereich „Quests"; verfügbare Quest-Inhalte und -Zieltypen |
 | NPC / Runtime-KI | `Ki-NPC.md`, `Coordinator.md`, `ai_system.md` | NPC-/KI-Inhalte; Abgrenzung Content-KI vs. Runtime-NPC-KI |
 | Cutscenes / Scenes | `cutscene_system.md`, `ai_cutscene_system.md` | Cutscene-Orchestrierung als Content im Arbeitsbereich „Cutscenes" |
+| VN-Dialogdarstellung | `Visual_Novel_Dialog_und_Szenendarstellung.md` | Dialoge, Sprecher, Expressions, Szenenaktionen, CG als Content im Arbeitsbereich „Dialoge"/„Cutscenes" |
 | Items / Inventory | `item_properties.md`, `inventory_system.md` | Item-Definitionen als Kataloginhalte; keine Spieler-Instanzen |
 | Klassen / Fähigkeiten | `Klassensystem.md`, `Ability-System.md`, `Kampfsystem.md` | Klassen-/Ability-Content; Fähigkeiten-Hierarchie; Combat-Regeln bleiben Realm-Aufgabe |
 | Architektur | `architecture.md`, `project_overview.md` | Content-/Scripting-Schicht innerhalb der lokalen, versionierbaren Content-Organisation; keine produktive MariaDB als Arbeitsoberfläche |
