@@ -255,6 +255,37 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
     }
 }
 
+/// Interne Transaktionshilfe: Progressionsstand in eine laufende sqlx-/
+/// MariaDB-Transaktion schreiben (docs/Erfahrung_und_Progressionssystem.md
+/// §§4/7/12). Wird vom bisherigen Einzel-Save (`save_progression`) und vom
+/// atomaren Questabschluss genutzt (Quest V1.2a.2, docs/Quest-System.md
+/// §27.26 „atomare/transaktionale Sicherheitsgrenze").
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_progression(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    level: u32,
+    exp: i64,
+    free_attr_points: u32,
+    rested_pool: i64,
+    logout_at: Option<i64>,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE characters SET level = ?, exp = ?, free_attr_points = ?, rested_pool = ?, \
+         logout_at = ? WHERE id = ?",
+    )
+    .bind(level as i32)
+    .bind(exp)
+    .bind(free_attr_points as i32)
+    .bind(rested_pool)
+    .bind(logout_at)
+    .bind(char_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("saveProgression {char_id}: {e}"))?;
+    Ok(())
+}
+
 /// Speichert den kompletten Progressionsstand (docs/Erfahrung_und_
 /// Progressionssystem.md §§4/7/12): Level, EXP, freie Attributpunkte,
 /// Rested-Pool und optional den Logout-Zeitpunkt (Epoch-Sekunden).
@@ -270,31 +301,63 @@ pub async fn save_progression(
     rested_pool: i64,
     logout_at: Option<i64>,
 ) {
-    let result = sqlx::query(
-        "UPDATE characters SET level = ?, exp = ?, free_attr_points = ?, rested_pool = ?, \
-         logout_at = ? WHERE id = ?",
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            log::error!("saveProgression {char_id}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = write_progression(
+        &mut tx,
+        char_id,
+        level,
+        exp,
+        free_attr_points,
+        rested_pool,
+        logout_at,
     )
-    .bind(level as i32)
-    .bind(exp)
-    .bind(free_attr_points as i32)
-    .bind(rested_pool)
-    .bind(logout_at)
-    .bind(char_id)
-    .execute(pool)
-    .await;
-    if let Err(e) = result {
+    .await
+    {
+        log::error!("saveProgression {char_id}: {e}");
+        return;
+    }
+    if let Err(e) = tx.commit().await {
         log::error!("saveProgression {char_id}: {e}");
     }
 }
 
-/// Speichert den Goldstand (Fehler nur loggen — kein Crash).
-pub async fn save_gold(pool: &Pool<MySql>, char_id: &str, gold: i64) {
-    if let Err(e) = sqlx::query("UPDATE characters SET gold = ? WHERE id = ?")
+/// Interne Transaktionshilfe: Goldstand in eine laufende Transaktion
+/// schreiben. Wird vom bisherigen Einzel-Save (`save_gold`) und vom
+/// atomaren Questabschluss genutzt (Quest V1.2a.2).
+pub(crate) async fn write_gold(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    gold: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET gold = ? WHERE id = ?")
         .bind(gold)
         .bind(char_id)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
-    {
+        .map_err(|e| format!("saveGold {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Speichert den Goldstand (Fehler nur loggen — kein Crash).
+pub async fn save_gold(pool: &Pool<MySql>, char_id: &str, gold: i64) {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            log::error!("saveGold {char_id}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = write_gold(&mut tx, char_id, gold).await {
+        log::error!("saveGold {char_id}: {e}");
+        return;
+    }
+    if let Err(e) = tx.commit().await {
         log::error!("saveGold {char_id}: {e}");
     }
 }
@@ -1124,21 +1187,18 @@ pub async fn load_inventory(
     Ok(state)
 }
 
-/// Volles Transaktions-Schreiben (Vollwrite) des Inventar-Zustands:
-/// Alle aktuell vorhandenen item_instances werden upsertet, danach alle
-/// Platzierungs-Tabellen (Inventar, Rucksäcke, Equipment) komplett neu
-/// befüllt. Der Sicherheits-Puffer wird NICHT persistiert (temporär,
-///docs/inventory_system.md §11).
-pub async fn save_inventory(
-    pool: &Pool<MySql>,
+/// Interne Transaktionshilfe: voller Inventar-Vollwrite in eine laufende
+/// Transaktion (docs/inventory_system.md §11). Alle aktuell vorhandenen
+/// item_instances werden upsertet, danach alle Platzierungs-Tabellen
+/// (Inventar, Rucksäcke, Equipment) komplett neu befüllt. Der Sicherheits-
+/// Puffer wird NICHT persistiert (temporär, §11). Wird von `save_inventory`
+/// und vom atomaren Questabschluss genutzt (Quest V1.2a.2, docs/Quest-System.
+/// md §27.26).
+pub(crate) async fn write_inventory(
+    tx: &mut sqlx::Transaction<'_, MySql>,
     char_id: &str,
     state: &crate::inventory::InventoryState,
 ) -> Result<(), String> {
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Inventar-Transaktion beginnen: {e}"))?;
-
     // --- 1. Alle betroffenen item_instances upserten ---
     let mut seen = std::collections::HashSet::new();
     let instances: Vec<&crate::item::ItemInstance> = state
@@ -1150,29 +1210,29 @@ pub async fn save_inventory(
         .collect();
     for inst in &instances {
         if seen.insert(inst.item_uuid.as_str()) {
-            write_item_instance(&mut tx, inst).await?;
+            write_item_instance(&mut *tx, inst).await?;
         }
     }
 
     // --- 2. Platzierungen komplett neu schreiben (Transaktions-Vollwrite) ---
     sqlx::query("DELETE FROM character_inventory WHERE char_id = ?")
         .bind(char_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Altes Inventar löschen: {e}"))?;
     sqlx::query("DELETE FROM bag_slots WHERE char_id = ?")
         .bind(char_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Alte Bag-Slots löschen: {e}"))?;
     sqlx::query("DELETE FROM character_bags WHERE char_id = ?")
         .bind(char_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Alte Rucksäcke löschen: {e}"))?;
     sqlx::query("DELETE FROM character_equipment WHERE char_id = ?")
         .bind(char_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Altes Equipment löschen: {e}"))?;
 
@@ -1185,7 +1245,7 @@ pub async fn save_inventory(
             .bind(char_id)
             .bind(i as i64)
             .bind(&inst.item_uuid)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await
             .map_err(|e| format!("Inventar-Slot speichern: {e}"))?;
         }
@@ -1199,7 +1259,7 @@ pub async fn save_inventory(
         .bind(b.bag_id as i64)
         .bind(&b.name)
         .bind(b.slots.len() as i64)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Rucksack speichern: {e}"))?;
         for (i, slot) in b.slots.iter().enumerate() {
@@ -1211,7 +1271,7 @@ pub async fn save_inventory(
                 .bind(b.bag_id as i64)
                 .bind(i as i64)
                 .bind(&inst.item_uuid)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .map_err(|e| format!("Bag-Slot speichern: {e}"))?;
             }
@@ -1225,13 +1285,30 @@ pub async fn save_inventory(
         .bind(char_id)
         .bind(slot.as_db())
         .bind(&inst.item_uuid)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|e| format!("Equipment speichern: {e}"))?;
     }
     // Puffer: in V1 nicht persistiert (temporär; §11). Zeilen werden
     // beim Logout gelöscht (wipe_logout_buffer) und niemals geschrieben.
+    Ok(())
+}
 
+/// Volle Inventar-Persistenz als eigener Transaktions-Vollwrite (bisheriger
+/// Einzel-Save, docs/inventory_system.md §11): alle item_instances upserten,
+/// danach alle Platzierungs-Tabellen komplett neu befüllen. Der Sicherheits-
+/// Puffer wird NICHT persistiert (temporär, §11). Delegiert an
+/// `write_inventory` innerhalb einer eigenen Transaktion.
+pub async fn save_inventory(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    state: &crate::inventory::InventoryState,
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Inventar-Transaktion beginnen: {e}"))?;
+    write_inventory(&mut tx, char_id, state).await?;
     tx.commit()
         .await
         .map_err(|e| format!("Inventar-Transaktion commit: {e}"))?;
@@ -1304,14 +1381,13 @@ pub async fn load_quest_rows(pool: &Pool<MySql>, char_id: &str) -> Result<Vec<Qu
         .collect())
 }
 
-/// Schreibt einen Spieler-Questzustand als Upsert in die Tabelle `quests`
-/// (Spalten state + data, §27.12). Der Aufrufer stellt sicher, dass nur
-/// persistierbare Zustände (ACTIVE/COMPLETED/FAILED) geschrieben werden.
-/// Aufgerufen über `quest::QuestService::persist_state`; in V1.1 noch ohne
-/// Gameplay-Aufrufer (Questdialog folgt in V1.2).
-#[allow(dead_code)]
-pub async fn save_quest_state(
-    pool: &Pool<MySql>,
+/// Interne Transaktionshilfe: Spieler-Questzustand als Upsert in eine
+/// laufende Transaktion schreiben (Tabelle `quests`, Spalten state + data,
+/// §27.12). Der Aufrufer stellt sicher, dass nur persistierbare Zustände
+/// (ACTIVE/COMPLETED/FAILED) geschrieben werden. Wird vom bisherigen
+/// Einzel-Save (`save_quest_state`) und vom atomaren Questabschluss genutzt.
+pub(crate) async fn write_quest_state(
+    tx: &mut sqlx::Transaction<'_, MySql>,
     char_id: &str,
     quest_id: &str,
     state: i8,
@@ -1325,8 +1401,67 @@ pub async fn save_quest_state(
     .bind(quest_id)
     .bind(state)
     .bind(data)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map_err(|e| format!("Questzustand speichern (char {char_id}, quest {quest_id}): {e}"))?;
     Ok(())
+}
+
+/// Schreibt einen Spieler-Questzustand als Upsert in die Tabelle `quests`
+/// (Spalten state + data, §27.12). Der Aufrufer stellt sicher, dass nur
+/// persistierbare Zustände (ACTIVE/COMPLETED/FAILED) geschrieben werden.
+/// Aufgerufen über `quest::QuestService::persist_state`; in V1.1 noch ohne
+/// Gameplay-Aufrufer (Questdialog folgt in V1.2).
+#[allow(dead_code)]
+pub async fn save_quest_state(
+    pool: &Pool<MySql>,
+    char_id: &str,
+    quest_id: &str,
+    state: i8,
+    data: &str,
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| {
+        format!(
+            "Questzustand (char {char_id}, quest {quest_id}) — Transaktion beginnen: {e}"
+        )
+    })?;
+    write_quest_state(&mut tx, char_id, quest_id, state, data).await?;
+    tx.commit().await.map_err(|e| {
+        format!(
+            "Questzustand (char {char_id}, quest {quest_id}) — Transaktion commit: {e}"
+        )
+    })?;
+    Ok(())
+}
+
+/// DB-seitiger Guard für den persistenten ACTIVE→COMPLETED-Übergang des
+/// atomaren Questabschlusses (Quest V1.2a.2, docs/Quest-System.md §27.26
+/// „Doppelabschluss-Schutz" + Auditergebnis V1.2a.1): Aktualisiert die
+/// `quests`-Zeile NUR dann, wenn sie noch ACTIVE (state 1, Spalte TINYINT)
+/// ist. Die Zählwerte entsprechen den Werten von `QuestState::db_value`
+/// (quest.rs; den Guard-Kontrakt sichert der zugehörige quest.rs-Test).
+///
+/// Erwartet wird genau 1 betroffene Zeile. 0 Zeilen bedeutet, die Quest ist
+/// zwischen Vorprüfung und Aufschlag nicht mehr als ACTIVE vorhanden
+/// (bereits COMPLETED durch diesen oder einen konkurrierenden Realm-Prozess,
+/// Doppelklick, Doppelabschluss). Der Aufrufer darf die Transaktion dann
+/// NICHT committen — sie muss verworfen (rollback) werden. Liefert
+/// `Ok(true)` nur bei exakt 1 betroffenen Zeile.
+pub(crate) async fn guarded_complete_quest(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    quest_id: &str,
+    data: &str,
+) -> Result<bool, String> {
+    let result = sqlx::query(
+        "UPDATE quests SET state = 2, data = ? \
+         WHERE char_id = ? AND quest_id = ? AND state = 1",
+    )
+    .bind(data)
+    .bind(char_id)
+    .bind(quest_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Questabschluss-Guard (char {char_id}, quest {quest_id}): {e}"))?;
+    Ok(result.rows_affected() == 1)
 }

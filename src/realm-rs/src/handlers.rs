@@ -168,14 +168,21 @@ pub async fn handle_hello(
     // FAILED) laden. Fehler am Laden => leerer Questzustand (Fallback wie
     // save_position, kein Login-Abbruch). HIDDEN/AVAILABLE sind abgeleitet
     // (§27.5) und liegen nie in der Tabelle `quests`.
+    //
+    // Sicherheitsaudit (V1.2a, §27.26-Doppelabschluss-Schutz): Ein nicht
+    // zuverlässig geladener Questzustand darf NICHT als "Spieler hat keine
+    // Quests" behandelt werden (der Spieler könnte eine bereits COMPLETED
+    // Quest erneut annehmen oder eine zweite Belohnung erwirken). Deshalb
+    // FAIL-CLOSED: Wie bei load_character wird der Einstieg abgelehnt,
+    // statt mit leerem Questzustand weiterzuspielen.
     let quests: std::collections::BTreeMap<String, crate::quest::CharacterQuestState> = ctx
         .quest
         .load_for_character(&ctx.db, &c.id)
         .await
-        .unwrap_or_else(|e| {
+        .map_err(|e| {
             log::error!("HELLO load quests: {e}");
-            Vec::new()
-        })
+            "quest state unavailable"
+        })?
         .into_iter()
         .map(|s| (s.quest_id.clone(), s))
         .collect();

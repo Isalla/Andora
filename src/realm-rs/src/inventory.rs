@@ -161,7 +161,7 @@ pub const EQUIP_SLOTS: [EquipSlot; 21] = [
 ];
 
 /// Ein Rucksack / eine Tasche als eigener, benannter Inventarbereich.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Bag {
     /// Lokaler Bag-Index des Charakters (>= 1; PK-Teil char_id+bag_id).
     pub bag_id: u64,
@@ -195,7 +195,7 @@ pub struct AddOutcome {
 
 /// Zustand eines Spieler-Inventars (docs/inventory_system.md):
 /// Grundinventar, Rucksäcke, Equipment und temporärer Sicherheits-Puffer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct InventoryState {
     /// Basis-Slots des Grundinventars (len = Anzahl, Config).
     pub base_slots: Vec<Option<ItemInstance>>,
@@ -211,6 +211,10 @@ pub struct InventoryState {
 pub enum InventoryError {
     /// Kein freier Slot / kein passender Stack.
     NoSpace,
+    /// Menge <= 0 (Qt. darf nie negativ oder null sein).
+    InvalidQuantity,
+    /// Nicht genügend vorhandene Menge einer item_id (keine Teilentfernung).
+    NotEnoughItems,
     /// Item ist nicht im normalen Inventar (Base/Bag) — equip/unequip.
     NotInInventory,
     /// Equipment-Slot ist bereits belegt.
@@ -258,6 +262,26 @@ fn plain_copy(inst: &ItemInstance) -> bool {
 /// Ist `existing` so ergänzbar, dass `incoming` (ganz) hineinstapeln kann?
 pub fn mergeable_into(existing: &ItemInstance, incoming: &ItemInstance) -> bool {
     existing.item_id == incoming.item_id && plain_copy(existing) && plain_copy(incoming)
+}
+
+/// Entfernt aus einem einzelnen Stack-Slot bis zu `remaining` Stück einer
+/// item_id (deterministische Entfernungsreihenfolge von try_remove).
+/// Ein auf 0 reduzierter Stack wird aufgelöst (Slot = None). Liefert die
+/// noch zu entfernende Restmenge.
+fn remove_from_slot(slot: &mut Option<ItemInstance>, item_id: &str, mut remaining: i64) -> i64 {
+    let Some(it) = slot.as_mut() else {
+        return remaining;
+    };
+    if it.item_id != item_id {
+        return remaining;
+    }
+    let take = it.count.min(remaining);
+    it.count -= take;
+    remaining -= take;
+    if it.count == 0 {
+        *slot = None;
+    }
+    remaining
 }
 
 static UUID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -507,6 +531,41 @@ impl InventoryState {
             ItemLoc::Equipped(_) | ItemLoc::Buffer(_) => return false,
         }
         true
+    }
+
+    /// Serverseitige, exakt validierte Entfernung einer Item-Menge aus dem
+    /// normalen Inventar (docs/Quest-System.md §27.13, §27.26 „Stacks – nur
+    /// die benötigte Menge"): Eine item_id wird über die Item-ID referenziert,
+    /// nicht über einzelne Instanzen/UUIDs. Es wird nur die benötigte Menge
+    /// entfernt; der Rest eines Stacks bleibt normal nutzbar. Bei unzureichen-
+    /// der Gesamtmenge wird NICHTS entfernt (keine Teilentfernung). Entfernt
+    /// wird deterministisch (Basis-Slots von vorn, dann Rucksäcke in Anzeige-
+    /// Reihenfolge), ohne Auswahl einzelner Instanzen. Liefert die tatsächlich
+    /// entfernte Menge (== qty).
+    pub fn try_remove(&mut self, item_id: &str, qty: i64) -> Result<i64, InventoryError> {
+        if qty <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        // Keine Teilentfernung: erst vollständige Vorprüfung, dann Mutieren.
+        if self.count_of(item_id) < qty {
+            return Err(InventoryError::NotEnoughItems);
+        }
+        let mut remaining = qty;
+        for slot in self.base_slots.iter_mut() {
+            remaining = remove_from_slot(slot, item_id, remaining);
+            if remaining == 0 {
+                return Ok(qty);
+            }
+        }
+        for b in &mut self.bags {
+            for slot in b.slots.iter_mut() {
+                remaining = remove_from_slot(slot, item_id, remaining);
+                if remaining == 0 {
+                    return Ok(qty);
+                }
+            }
+        }
+        unreachable!("validierte Menge konnte nicht vollständig entfernt werden")
     }
 
     /// Anzahl freier Plätze für eine item_id unter Berücksichtigung der
@@ -1098,6 +1157,120 @@ mod tests {
         // Nicht-stackbar: nur der freie Slot.
         let sw = sword();
         assert_eq!(sim.capacity_for(&sw), 1);
+    }
+
+    // ── try_remove (Quest V1.2a, docs/Quest-System.md §27.13/§27.26) ──────
+
+    #[test]
+    fn remove_stacks_only_required_quantity_rest_stays() {
+        let mut inv = InventoryState::new(4);
+        let def = potion();
+        inv.try_add(&def, 50); // 1 Stack à 20 + 1 Stack à 20 + 1 Stack à 10
+        let removed = inv.try_remove("hp_potion", 45).unwrap();
+        assert_eq!(removed, 45);
+        assert_eq!(inv.count_of("hp_potion"), 5);
+        let stacks: Vec<i64> = inv
+            .base_slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .filter(|it| it.item_id == "hp_potion")
+            .map(|it| it.count)
+            .collect();
+        // Rest bleibt als nutzbarer Stack (5).
+        assert_eq!(stacks, vec![5]);
+    }
+
+    #[test]
+    fn remove_rejects_nonpositive_quantities() {
+        let mut inv = InventoryState::new(4);
+        let def = potion();
+        inv.try_add(&def, 10);
+        assert_eq!(
+            inv.try_remove("hp_potion", 0),
+            Err(InventoryError::InvalidQuantity)
+        );
+        assert_eq!(
+            inv.try_remove("hp_potion", -5),
+            Err(InventoryError::InvalidQuantity)
+        );
+        // Keine Mutation durch abgelehnte Anfragen.
+        assert_eq!(inv.count_of("hp_potion"), 10);
+    }
+
+    #[test]
+    fn remove_insufficient_quantity_removes_nothing() {
+        let mut inv = InventoryState::new(4);
+        let def = potion();
+        inv.try_add(&def, 10);
+        assert_eq!(
+            inv.try_remove("hp_potion", 11),
+            Err(InventoryError::NotEnoughItems)
+        );
+        // Keine Teilentfernung: Zustand bleibt unverändert.
+        assert_eq!(inv.count_of("hp_potion"), 10);
+        assert_eq!(inv.base_slots.iter().filter(|s| s.is_some()).count(), 1);
+        // Unbekannte Item-ID → nichts zu entfernen.
+        assert_eq!(
+            inv.try_remove("einhornhorn", 1),
+            Err(InventoryError::NotEnoughItems)
+        );
+    }
+
+    #[test]
+    fn remove_handles_exact_quantity_and_multiple_stacks() {
+        let mut inv = InventoryState::new(4);
+        let def = potion();
+        inv.try_add(&def, 50); // 3 Stacks: 20 + 20 + 10
+        assert_eq!(inv.try_remove("hp_potion", 40).unwrap(), 40);
+        assert_eq!(inv.count_of("hp_potion"), 10);
+        // Stack 3 (10) bleibt unangetastet — nur die benötigte Menge.
+        let stacks: Vec<i64> = inv
+            .base_slots
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .filter(|it| it.item_id == "hp_potion")
+            .map(|it| it.count)
+            .collect();
+        assert_eq!(stacks, vec![10]);
+    }
+
+    #[test]
+    fn remove_spans_base_and_bag_slots_deterministically() {
+        let c = cfg(1);
+        let mut inv = InventoryState::new(1);
+        let def = potion();
+        inv.try_add(&def, 20); // Basis: voller Stack
+        let bag_id = inv.create_bag(&c, "Tränke", 2).unwrap();
+        inv.try_add(&def, 10); // Bag: 1 Stack à 10
+        // Basis zuerst (20), dann Bag (10) → 30 insgesamt entfernbar.
+        assert_eq!(inv.try_remove("hp_potion", 25).unwrap(), 25);
+        // Basis leer, Bag-Rest 5.
+        assert_eq!(inv.count_of("hp_potion"), 5);
+        assert!(inv.base_slots[0].is_none());
+        let b = inv.bags.iter().find(|b| b.bag_id == bag_id).unwrap();
+        assert_eq!(
+            b.slots
+                .iter()
+                .map(|s| s.as_ref().map(|it| it.count))
+                .collect::<Vec<_>>(),
+            vec![Some(5), None]
+        );
+    }
+
+    #[test]
+    fn remove_non_stackable_items_needs_exact_count() {
+        let mut inv = InventoryState::new(3);
+        let sw = sword();
+        // 1 Item = 1 Slot (max_stack 1): 3 Schwerter.
+        inv.try_add(&sw, 3);
+        assert_eq!(inv.try_remove("eisenschwert", 2).unwrap(), 2);
+        assert_eq!(inv.count_of("eisenschwert"), 1);
+        assert_eq!(
+            inv.try_remove("eisenschwert", 2),
+            Err(InventoryError::NotEnoughItems)
+        );
+        // Kein Teilentfernen auch über mehrere nicht-stapelbare Slots.
+        assert_eq!(inv.count_of("eisenschwert"), 1);
     }
 
     #[test]

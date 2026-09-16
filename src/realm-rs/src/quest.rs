@@ -211,6 +211,10 @@ pub enum QuestError {
     NotActive,
     /// Abschluss verweigert, weil nicht alle Ziele erfüllt sind.
     ObjectivesNotMet,
+    /// Abschluss verweigert, weil benötigte Deliver-/Questitems fehlen
+    /// (richtige Item-ID / ausreichende Menge, §27.26-Vorprüfung,
+    /// docs/quests_stories.md §10).
+    DeliverItemsMissing,
     /// Ungültiger serverseitig bestätigter Fortschritt (Delta 0).
     InvalidProgress,
     /// Ungültige Questdefinition.
@@ -228,8 +232,63 @@ impl std::fmt::Display for QuestError {
             QuestError::NotActive => write!(f, "Quest nicht aktiv"),
             QuestError::ObjectivesNotMet => write!(f, "Ziele nicht erfüllt"),
             QuestError::InvalidProgress => write!(f, "ungültiger Fortschritt"),
+            QuestError::DeliverItemsMissing => {
+                write!(f, "benötigte Deliver-Items nicht (vollständig) vorhanden")
+            }
             QuestError::InvalidDefinition(msg) => write!(f, "ungültige Questdefinition: {msg}"),
         }
+    }
+}
+
+/// Ein bei der autoritativen Übergabe zu entfernendes Deliver-Item
+/// (docs/Quest-System.md §27.13, §27.26 „benötigte Deliver-/Questitems").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemRemoval {
+    pub item_id: String,
+    pub qty: i64,
+}
+
+/// Serverseitig validierter Abschlussplan (V1.2a-Fundament, §27.26
+/// „Vollständige Vorprüfung"). Wird erzeugt, bevor irgendeine Mutation
+/// stattfindet; jede Prüfung schlägt fehl → Quest bleibt ACTIVE, und es
+/// wird nichts entfernt, vergeben oder persistiert.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionPlan {
+    pub quest_id: String,
+    /// Beim Abschluss zu entfernende Deliver-Items (nur benötigte Menge).
+    pub removals: Vec<ItemRemoval>,
+}
+
+/// Ergebnis einer erfolgreichen (abgeschlossen + persistent gesetzten)
+/// Abschlussoperation: der COMPLETED-Zustand und das neue Inventar nach
+/// Entfernung der Deliver-Items. Der Aufrufer übernimmt beide in die Welt —
+/// erst nach erfolgreichem COMMIT der atomaren Abschluss-Transaktion
+/// (`complete_for_character`, §27.26 Schritt 5; V1.2a.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletedQuest {
+    pub state: CharacterQuestState,
+    pub inventory: crate::inventory::InventoryState,
+}
+
+/// Fehlerkatalog der serverseitigen Abschlussoperation (V1.2a-Fundament):
+/// reine Quest-Ablehnungen (`Quest`), Inventarfehler (`Inventory`, z. B.
+/// fehlende Menge bei der finalen Entfernung) oder Persistenzfehler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestCompletionError {
+    Quest(QuestError),
+    Inventory(crate::inventory::InventoryError),
+    Persistence(String),
+}
+
+impl From<QuestError> for QuestCompletionError {
+    fn from(e: QuestError) -> Self {
+        QuestCompletionError::Quest(e)
+    }
+}
+
+impl From<crate::inventory::InventoryError> for QuestCompletionError {
+    fn from(e: crate::inventory::InventoryError) -> Self {
+        QuestCompletionError::Inventory(e)
     }
 }
 
@@ -501,6 +560,198 @@ impl QuestService {
         })
     }
 
+    /// V1.2a-Abschlussplan (§27.26 „Vollständige Vorprüfung") — PURE, ohne
+    /// jegliche Mutation. Geprüft werden serverseitig und autoritativ:
+    ///
+    ///   * Quest existiert,
+    ///   * Questzustand ist ACTIVE (nicht bereits COMPLETED → keine
+    ///     Doppelbelohnung),
+    ///   * alle erforderlichen Objectives sind erfüllt,
+    ///   * benötigte Deliver-/Questitems sind vorhanden (richtige Item-IDs,
+    ///     ausreichende Mengen) — abgeleitet aus den `deliver`-Zielen
+    ///     (docs/quests_stories.md §10: „Server entfernt Gegenstände").
+    ///
+    /// Belohnungs-Prüfungen (Vergabefähigkeit, freie Inventarkapazität für
+    /// die vollständige Itembelohnung, EXP/Geld) greifen an derselben
+    /// Stelle; die minimale interne V1.1-Definition trägt aktuell keine
+    /// Belohnungen, daher sind diese Punkte leer erfüllt (es wird keine
+    /// Content-/Reward-Entscheidung erfunden, §27.26 „Reward-Arten").
+    ///
+    /// `collect`-Ziele sind Besitznachweise (Items bleiben beim Spieler);
+    /// `kill`/`talk` haben keine Item-Komponente. Fehlt eine Deliver-Menge,
+    /// bleibt die Quest ACTIVE; es wird nichts entfernt oder vergeben.
+    pub fn plan_completion(
+        &self,
+        quest_id: &str,
+        state: &CharacterQuestState,
+        inventory: &crate::inventory::InventoryState,
+    ) -> Result<CompletionPlan, QuestError> {
+        let def = self
+            .find_definition(quest_id)
+            .ok_or(QuestError::UnknownQuest)?;
+        match state.state {
+            QuestState::Active => {}
+            QuestState::Completed => return Err(QuestError::AlreadyCompleted),
+            _ => return Err(QuestError::NotActive),
+        }
+        if !self.objectives_complete(quest_id, state) {
+            return Err(QuestError::ObjectivesNotMet);
+        }
+        let mut removals = Vec::new();
+        for o in &def.objectives {
+            if o.kind == ObjectiveType::Deliver {
+                if inventory.count_of(&o.target) < i64::from(o.required) {
+                    return Err(QuestError::DeliverItemsMissing);
+                }
+                removals.push(ItemRemoval {
+                    item_id: o.target.clone(),
+                    qty: i64::from(o.required),
+                });
+            }
+        }
+        Ok(CompletionPlan {
+            quest_id: quest_id.to_string(),
+            removals,
+        })
+    }
+
+    /// V1.2a-Abschluss („AUTORITATIV AUSFÜHREN", §27.26 Schritte 1–4) auf
+    /// einem bereits geprüften Plan. Diese reine Funktion:
+    ///
+    ///   1. validiert den finalen, geschützten Zustand erneut (abschließende
+    ///      Validierung direkt vor der Mutation),
+    ///   2. entfernt die benötigten Deliver-/Questitems (nur benötigte
+    ///      Menge, keine Teilentfernung; §§27.13/27.26),
+    ///   3./4. Belohnungen: In V1.2a keine definierten Belohnungen — es wird
+    ///      nichts vergeben (keine neuen Reward-Arten, §27.26).
+    ///
+    /// Der COMPLETED-Zustand wird hier in-memory erzeugt; die Persistenz
+    /// (§27.26 Schritt 5) kommt anschließend über `persist_state` bzw.
+    /// `complete_for_character`. Tritt irgendein Fehler auf, ist der Zustand
+    /// unverändert (keine Teilentfernung, kein Teilerfolg).
+    pub fn execute_completion(
+        &self,
+        plan: &CompletionPlan,
+        state: &CharacterQuestState,
+        inventory: &mut crate::inventory::InventoryState,
+    ) -> Result<CharacterQuestState, QuestCompletionError> {
+        // §27.26 Schritt 1: abschließende Validierung des geschützten Zustands.
+        if self.find_definition(&plan.quest_id).is_none() {
+            return Err(QuestError::UnknownQuest.into());
+        }
+        if state.state != QuestState::Active {
+            return Err(QuestError::NotActive.into());
+        }
+        if !self.objectives_complete(&plan.quest_id, state) {
+            return Err(QuestError::ObjectivesNotMet.into());
+        }
+        for r in &plan.removals {
+            if inventory.count_of(&r.item_id) < r.qty {
+                return Err(QuestError::DeliverItemsMissing.into());
+            }
+        }
+        // §27.26 Schritt 2: benötigte Deliver-/Questitems entfernen.
+        for r in &plan.removals {
+            inventory.try_remove(&r.item_id, r.qty)?;
+        }
+        // §27.26 Schritt 3/4: Belohnungen — in V1.2a keine definierten.
+        // §27.26 Schritt 5 (persistent COMPLETED) übernimmt der Aufrufer
+        // (complete_for_character, atomare Abschluss-Transaktion);
+        // Schritt 6/7 bleiben Aufgaben des Aufrufers (Locks freigeben,
+        // Client bestätigen).
+        Ok(self.complete(&plan.quest_id, state)?)
+    }
+
+    /// V1.2a.2 atomare Abschlussgrenze: plant, führt auf einem KLON aus und
+    /// persistiert alle beteiligten Zustände in EINER MariaDB-Transaktion
+    /// (docs/Quest-System.md §27.26 „atomare/transaktionale
+    /// Sicherheitsgrenze"; Auditergebnis V1.2a.1). Ablauf innerhalb der
+    /// Transaktion:
+    ///
+    ///   1. Inventar-Vollwrite des resultierenden Zustands (Deliver-Items
+    ///      persistent entfernt; spätere Rewarditems können mitgeschrieben
+    ///      werden — in V1.2a tragen die Definitionen keine Belohnungen),
+    ///   2. DB-seitiger Guard `guarded_complete_quest` (ACTIVE→COMPLETED
+    ///      nur, wenn die `quests`-Zeile noch ACTIVE ist; exakt 1 Zeile),
+    ///   3. COMMIT — der einzige autoritative persistente Übergang.
+    ///
+    /// Inventory-/Reward-Writes dürfen VOR dem Guard liegen, weil bei
+    /// fehlgeschlagenem Guard (0 Zeilen: Doppelabschluss/konkurrierender
+    /// Prozess) die gesamte Transaktion verworfen wird — kein COMMIT.
+    ///
+    /// Erst NACH erfolgreichem COMMIT wird der vorbereitete Zustand in den
+    /// autoritativen RAM (`inventory`) übernommen; bei jeder Abweichung
+    /// bleibt alles unverändert (Quest ACTIVE, keine Items entfernt, keine
+    /// Belohnung, kein COMPLETED — §27.26 „Fehlerfall/Rollback"). Die
+    /// RAM-Übernahme erfolgt aus dem bereits validierten Arbeitszustand
+    /// ohne neue Gameplayberechnung.
+    ///
+    /// Der Aufrufer hält währenddessen die vorhandene World-Serialisierung
+    /// (das zentrale `Shared`-Mutex) — dadurch kann zwischen Prüfung,
+    /// Entfernung und Persistenz keine konkurrierende Inventaroperation die
+    /// geprüfte Grenze aufbrechen. Der DB-seitige Guard schützt darüber
+    /// hinaus gegen konkurrierende Realm-Prozesse (der World-Mutex besitzt
+    /// keine prozessübergreifende Autorität). Erst nach Ok übernimmt der
+    /// Aufrufer `CompletedQuest` in die Spielerwelt.
+    #[allow(dead_code)]
+    pub async fn complete_for_character(
+        &self,
+        db: &Pool<MySql>,
+        char_id: &str,
+        quest_id: &str,
+        state: CharacterQuestState,
+        inventory: &mut crate::inventory::InventoryState,
+    ) -> Result<CompletedQuest, QuestCompletionError> {
+        let plan = self.plan_completion(quest_id, &state, inventory)?;
+        let mut draft = inventory.clone();
+        let completed = self.execute_completion(&plan, &state, &mut draft)?;
+
+        let data = encode_state_for_db(&completed).map_err(QuestCompletionError::Persistence)?;
+        let mut tx = db.begin().await.map_err(|e| {
+            QuestCompletionError::Persistence(format!("Abschluss-Transaktion beginnen: {e}"))
+        })?;
+
+        // §27.26 Schritte 2–4, Teil 1: resultierendes Inventar (Deliver-Items
+        // entfernt) innerhalb derselben Transaktion persistent schreiben.
+        crate::db::write_inventory(&mut tx, char_id, &draft)
+            .await
+            .map_err(QuestCompletionError::Persistence)?;
+        // Belohnungen EXP/Gold: V1.2a-Definitionen tragen keine Belohnungen —
+        // es werden keine künstlichen Quest-EXP/-Gold-Rewards erzeugt. Die
+        // transaktionskomponierbaren Pfade `write_progression`/`write_gold`
+        // stehen für künftige Belohnungsdefinitionen bereit.
+
+        // §27.26 Schritt 5 + Doppelabschluss-Schutz: DB-Guard für den
+        // persistenten ACTIVE→COMPLETED-Übergang (auch gegen zweite
+        // Realm-Prozesse). Liefert false bei 0 betroffenen Zeilen.
+        let guard_ok =
+            crate::db::guarded_complete_quest(&mut tx, char_id, &completed.quest_id, &data)
+                .await
+                .map_err(QuestCompletionError::Persistence)?;
+        if !guard_ok {
+            // Guard schlug fehl: Die Quest ist nicht mehr ACTIVE in der DB
+            // (bereits COMPLETED durch einen konkurrierenden Prozess /
+            // Doppelabschluss). Die Transaktion wird NICHT committet —
+            // Inventar-/Quest-Writes verfallen mit dem Rollback (§27.26
+            // Fehlerfall). Quest/RAM bleiben unverändert.
+            log::warn!(
+                "complete_for_character {char_id}/{quest_id}: \
+                 ACTIVE→COMPLETED-Guard schlug fehl (keine ACTIVE-Zeile) — kein COMMIT"
+            );
+            return Err(QuestError::NotActive.into());
+        }
+
+        tx.commit().await.map_err(|e| {
+            QuestCompletionError::Persistence(format!("Abschluss-Transaktion commit: {e}"))
+        })?;
+        // Erst nach erfolgreichem COMMIT in den autoritativen RAM übernehmen.
+        *inventory = draft;
+        Ok(CompletedQuest {
+            state: completed,
+            inventory: inventory.clone(),
+        })
+    }
+
     /// Lädt und rekonstruiert die persistierten Spieler-Questzustände eines
     /// Charakters aus der Tabelle `quests` (§13). Mindestens vorhandene
     /// ACTIVE-, COMPLETED- und FAILED-Zustände werden korrekt rekonstruiert.
@@ -547,15 +798,7 @@ impl QuestService {
         // §27.5) und dürfen nie in die Tabelle `quests` geschrieben werden —
         // die Spalte `state` (Default 0) bekommt dadurch auch nie einen
         // abgeleiteten Zustand.
-        if !is_persistable(state) {
-            return Err(format!(
-                "Quest {}: Zustand {:?} ist abgeleitet und nicht persistierbar",
-                state.quest_id, state.state
-            ));
-        }
-        let data = encode_quest_data(state);
-        let data =
-            serde_json::to_string(&data).map_err(|e| format!("Quest-Daten kodieren: {e}"))?;
+        let data = encode_state_for_db(state)?;
         crate::db::save_quest_state(db, char_id, &state.quest_id, state.state.db_value(), &data)
             .await
     }
@@ -574,6 +817,24 @@ fn prerequisites_met(
 /// werden bewusst ausgeschlossen.
 fn is_persistable(state: &CharacterQuestState) -> bool {
     !matches!(state.state, QuestState::Hidden | QuestState::Available)
+}
+
+/// Gemeinsamer Encoder für alle `quests.data`-Persistierungen: kodiert
+/// ausschließlich persistierbare Zustände (ACTIVE/COMPLETED/FAILED) als
+/// JSON-String. Abgeleitete Zustände (HIDDEN/AVAILABLE) werden abgelehnt,
+/// damit die Spalte `state` (Default 0) nie einen abgeleiteten Zustand
+/// erhält (§27.5). Wird von `persist_state` und dem atomaren
+/// Questabschluss (`complete_for_character`) verwendet, damit beide
+/// denselben `data`-String erzeugen.
+fn encode_state_for_db(state: &CharacterQuestState) -> Result<String, String> {
+    if !is_persistable(state) {
+        return Err(format!(
+            "Quest {}: Zustand {:?} ist abgeleitet und nicht persistierbar",
+            state.quest_id, state.state
+        ));
+    }
+    let data = encode_quest_data(state);
+    serde_json::to_string(&data).map_err(|e| format!("Quest-Daten kodieren: {e}"))
 }
 
 /// Serialisiert den V1-Spielerzustand in die `data`-JSON-Spalte der
@@ -1105,6 +1366,215 @@ mod tests {
             svc.complete(QUEST_KILL, &hidden),
             Err(QuestError::NotActive)
         );
+    }
+
+    // ── V1.2a: Abschluss-Transaktion (docs/Quest-System.md §27.26) ────────
+
+    /// Inventar mit `total` Wolfsfellen (normales, stapelbares Material;
+    /// docs/Quest-System.md §27.17/§27.18).
+    fn fur_inventory(total: i64) -> crate::inventory::InventoryState {
+        let mut inv = crate::inventory::InventoryState::new(8);
+        let mut def = crate::item::ItemDefinition::new(
+            "wolf_fur",
+            "Wolfsfell",
+            crate::item::ItemCategory::RawMaterial,
+        );
+        def.max_stack = 100;
+        inv.try_add(&def, total);
+        inv
+    }
+
+    fn deliver_state(svc: &QuestService) -> CharacterQuestState {
+        let mut state = svc
+            .accept(QUEST_DELIVER, None, 2, &completed_set(&[]))
+            .unwrap();
+        svc.add_progress(QUEST_DELIVER, &mut state, DELIVER_FURS, 8)
+            .unwrap();
+        state
+    }
+
+    #[test]
+    fn completion_plan_derives_deliver_removals_only() {
+        let svc = test_service();
+        let state = deliver_state(&svc);
+        let plan = svc
+            .plan_completion(QUEST_DELIVER, &state, &fur_inventory(8))
+            .unwrap();
+        assert_eq!(
+            plan.removals,
+            vec![ItemRemoval {
+                item_id: "wolf_fur".into(),
+                qty: 8,
+            }]
+        );
+        // collect bleibt ein Besitznachweis → keine Entfernung im Plan.
+        let mut col = svc
+            .accept(QUEST_COLLECT, None, 1, &completed_set(&[]))
+            .unwrap();
+        svc.add_progress(QUEST_COLLECT, &mut col, COLLECT_FURS, 8)
+            .unwrap();
+        let plan = svc
+            .plan_completion(QUEST_COLLECT, &col, &fur_inventory(8))
+            .unwrap();
+        assert!(plan.removals.is_empty());
+    }
+
+    #[test]
+    fn missing_deliver_items_abort_completion_without_mutation() {
+        let svc = test_service();
+        let state = deliver_state(&svc);
+        let inventory = fur_inventory(7); // 1 Wolfsfell zu wenig
+        assert_eq!(
+            svc.plan_completion(QUEST_DELIVER, &state, &inventory),
+            Err(QuestError::DeliverItemsMissing)
+        );
+        // Zustand unverändert: nichts entfernt, Quest bleibt ACTIVE.
+        assert_eq!(inventory.count_of("wolf_fur"), 7);
+        assert_eq!(state.state, QuestState::Active);
+    }
+
+    #[test]
+    fn completion_executes_deliver_removal_and_sets_completed() {
+        let svc = test_service();
+        let state = deliver_state(&svc);
+        let plan = svc
+            .plan_completion(QUEST_DELIVER, &state, &fur_inventory(12))
+            .unwrap();
+        let mut inventory = fur_inventory(12);
+        let completed = svc
+            .execute_completion(&plan, &state, &mut inventory)
+            .unwrap();
+        assert_eq!(completed.state, QuestState::Completed);
+        assert!(completed.completed_at_ms.is_some());
+        // Nur die benötigte Menge (8) wird entfernt; die übrigen 4 bleiben.
+        assert_eq!(inventory.count_of("wolf_fur"), 4);
+        // Doppelabschluss derselben Quest → kein zweiter Plan und keine
+        // zweite Entfernung/Belohnung (§27.26 Doppelabschluss-Schutz).
+        assert_eq!(
+            svc.plan_completion(QUEST_DELIVER, &completed, &inventory),
+            Err(QuestError::AlreadyCompleted)
+        );
+        // collect entfernt beim Abschluss nichts (Items bleiben beim Spieler).
+        let mut col = svc
+            .accept(QUEST_COLLECT, None, 1, &completed_set(&[]))
+            .unwrap();
+        svc.add_progress(QUEST_COLLECT, &mut col, COLLECT_FURS, 8)
+            .unwrap();
+        let plan = svc
+            .plan_completion(QUEST_COLLECT, &col, &fur_inventory(8))
+            .unwrap();
+        let mut inv2 = fur_inventory(8);
+        svc.execute_completion(&plan, &col, &mut inv2).unwrap();
+        assert_eq!(inv2.count_of("wolf_fur"), 8);
+    }
+
+    #[test]
+    fn completion_final_validation_prevents_all_negative_paths() {
+        let svc = test_service();
+        let inventory = fur_inventory(7);
+        // Nicht erfüllte Objectives → kein Abschlussplan.
+        let partial = svc
+            .accept(QUEST_DELIVER, None, 2, &completed_set(&[]))
+            .unwrap();
+        assert_eq!(
+            svc.plan_completion(QUEST_DELIVER, &partial, &inventory),
+            Err(QuestError::ObjectivesNotMet)
+        );
+        // final validierte Deliver-Mengen fehlen → kein Teilerfolg.
+        let state = deliver_state(&svc);
+        let full_plan = svc
+            .plan_completion(QUEST_DELIVER, &state, &fur_inventory(8))
+            .unwrap();
+        let mut inventory = fur_inventory(7);
+        assert_eq!(
+            svc.execute_completion(&full_plan, &state, &mut inventory),
+            Err(QuestCompletionError::Quest(QuestError::DeliverItemsMissing))
+        );
+        assert_eq!(inventory.count_of("wolf_fur"), 7);
+        // COMPLETED-Zustand kann nicht erneut ausgeführt werden (NotActive).
+        let done = svc.complete(QUEST_DELIVER, &state).unwrap();
+        assert_eq!(
+            svc.execute_completion(&full_plan, &done, &mut inventory),
+            Err(QuestCompletionError::Quest(QuestError::NotActive))
+        );
+    }
+
+    // ── V1.2a.2: atomarer Abschluss — pure Kontrolllogik (ohne MariaDB) ──
+    //
+    // Integrations-/Crash-Eigenschaften (COMMIT-Atomizität, Rollback bei
+    // fehlgeschlagenem Guard) werden von MariaDB/InnoDB selbst garantiert und
+    // sind ohne echte DB nicht unit-testbar (keine künstliche MariaDB-
+    // Simulation). Hier wird die PURE, DB-unkritische Kontrolllogik abge-
+    // sichert: der Guard-Kontrakt (Spaltenwerte 1/2), der gemeinsame
+    // data-Encoder sowie die Zuordnung abgeleiteter vs. Datenzustände.
+
+    #[test]
+    fn persisted_state_values_match_guard_contract() {
+        // Die numerischen Werte von ACTIVE/COMPLETED (quest.rs) sind der
+        // Vertrag, an dem der DB-seitige ACTIVE→COMPLETED-Guard gemessen
+        // wird (db::guarded_complete_quest: `SET state = 2 ... AND
+        // state = 1`). Ändern die Werte sich, schlägt dieser Test fehl.
+        assert_eq!(QuestState::Active.db_value(), 1);
+        assert_eq!(QuestState::Completed.db_value(), 2);
+        assert_eq!(QuestState::Failed.db_value(), 3);
+        // COMPLETED ist ein Datenzustand und damit persistierbar.
+        let done = CharacterQuestState {
+            quest_id: QUEST_DELIVER.into(),
+            state: QuestState::Completed,
+            progress: vec![],
+            started_at_ms: None,
+            completed_at_ms: Some(1),
+        };
+        assert!(is_persistable(&done));
+    }
+
+    fn state_with(state: QuestState) -> CharacterQuestState {
+        CharacterQuestState {
+            quest_id: QUEST_DELIVER.into(),
+            state,
+            progress: vec![],
+            started_at_ms: None,
+            completed_at_ms: None,
+        }
+    }
+
+    #[test]
+    fn encode_state_for_db_rejects_derived_accepts_data_states() {
+        // Abgeleitete Zustände werden nie in die Spalte `quests.state`
+        // geschrieben (wert 0 wäre kein gültiger Datenzustand, §27.5).
+        assert!(encode_state_for_db(&state_with(QuestState::Hidden)).is_err());
+        assert!(encode_state_for_db(&state_with(QuestState::Available)).is_err());
+        // Datenzustände kodieren und round-trippen.
+        for st in [
+            QuestState::Active,
+            QuestState::Completed,
+            QuestState::Failed,
+        ] {
+            let data = encode_state_for_db(&state_with(st)).unwrap();
+            let decoded = decode_quest_data(QUEST_DELIVER, st, Some(&data)).unwrap();
+            assert_eq!(decoded.state, st);
+            assert_eq!(decoded, state_with(st));
+        }
+    }
+
+    #[test]
+    fn completed_quest_data_roundtrips_preserves_progress_and_timestamp() {
+        // Die `data`-Zeile, die der atomare Abschluss per Guard in die
+        // Tabelle `quests` schreibt, muss den vollen COMPLETED-Zustand
+        // (Fortschritt + Zeitstempel) verlustfrei rekonstruierbar enthalten.
+        let completed = CharacterQuestState {
+            quest_id: QUEST_DELIVER.into(),
+            state: QuestState::Completed,
+            progress: vec![CharacterObjectiveProgress {
+                objective_id: DELIVER_FURS.into(),
+                current: 8,
+            }],
+            started_at_ms: Some(111),
+            completed_at_ms: Some(222),
+        };
+        let data = encode_state_for_db(&completed).unwrap();
+        let decoded = decode_quest_data(QUEST_DELIVER, QuestState::Completed, Some(&data)).unwrap();
+        assert_eq!(decoded, completed);
     }
 
     // ── §17-Testliste: FAILED ────────────────────────────────────────────
