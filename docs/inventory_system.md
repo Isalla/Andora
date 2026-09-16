@@ -16,6 +16,11 @@ persistiert). Anbindung: Laden + serverseitiges Entfernen defekten Equipments be
 Kein Client-UI, keine Protokoll-IDs (folgen mit dem Spiellayer). Loot-/Quest-Aufrufer
 nutzen die Kern-API (`try_add`/`fits`/`capacity_for`) — im V1-Loop noch kein Aufrufer.
 
+Verbindliche Lifecycle-Regeln: Abschnitt 11 legt den Sicherheits-Puffer als
+ausschließlich temporären, nie persistierten Runtime-State fest; Abschnitt 16
+regelt den Item-Instanz-Lifecycle und verwaiste Iteminstanzen. Für diese
+Dokumentation wurde kein Produktionscode geändert.
+
 Die bestehende Item-System-V1-Architektur (`item_properties.md`, Abschnitt „Item System V1 – Implementierungsstand") ist verbindlich und wird hier nicht verändert.
 
 ---
@@ -323,6 +328,68 @@ Der Puffer ist **temporär**.
 Dies muss in der Dokumentation ausdrücklich als bewusstes
 Sicherheits- / Ausnahmesystem beschrieben werden.
 
+### Persistenz-Ausschluss (verbindlich)
+
+Der Sicherheits-Puffer ist ausschließlich temporärer Runtime-State innerhalb
+einer laufenden Player-Session. Er ist **kein** persistenter Inventarspeicher.
+
+Der Puffer wird deshalb durch **keinen** Player-Save geschrieben:
+
+* periodischer Player-Save (Dirty-State / periodischer Flush,
+  `Player_Persistenz.md`)
+* Disconnect-Save
+* Graceful-Shutdown-Save
+
+Ein erfolgreicher normaler Player-Save verändert diese Regel nicht: Auch nach
+einem erfolgreichen Speichern bleibt der Pufferinhalt Teil des flüchtigen
+Runtime-Zustands und gelangt nicht in die persistierte Inventarrepräsentation.
+
+Abgrenzung zur Player-Persistenz (`Player_Persistenz.md` §6): Die Komponente
+„inventory dirty" umfasst ausschließlich die persistenten Inventarbestandteile
+(Grundinventar, Rucksäcke / Bag-Slots, Equipment). Der Sicherheits-Puffer fällt
+ausdrücklich **nicht** unter die Dirty- / Persistenzpflicht.
+
+### Session-Ende – Verwerfen (verbindlich)
+
+Beim Ende der Player-Session verbleibende Buffer-Items werden **verworfen**.
+Dies entspricht der bestehenden Gameplayregel:
+
+> **Beim Logout verbleibende Items im Puffer gehen verloren.**
+
+Es darf **keinen** Mechanismus geben, durch den verworfene Buffer-Items bei
+einem späteren Login aus alten DB-Daten wiederhergestellt werden. Ein Puffer-Item,
+das einmal dem Session-Ende zum Opfer gefallen ist, bleibt endgültig vernichtet
+(bewusster Gameplay-Verlust gemäß dieser Regel, kein verlorener persistenter
+Besitz).
+
+Die RAM-seitige Entsorgung ist bereits vorhanden: `drop_buffer()` (`inventory.rs`)
+im Disconnect-Pfad (`net.rs`). Die unten beschriebene DB-Inkonsistenz muss
+bereinigt werden, damit die „keine Wiederherstellung"-Regel auch technisch gilt.
+
+### Bekannte DB-Inkonsistenz (in einem späteren Coding-Auftrag zu bereinigen)
+
+Der Read-only-Audit hat folgende technische Inkonsistenz festgestellt:
+
+* `write_inventory` (`db.rs`) persistiert den Puffer **nicht** (Puffer wird im
+  Transaktions-Vollwrite übergangen; dieser Zustand entspricht dem vorgesehenen
+  Persistenz-Ausschluss).
+* `load_inventory` (`db.rs`) kann jedoch vorhandene `inventory_buffer`-Zeilen
+  laden, sodass alte Puffer-Einträge bei einem späteren Login wieder erscheinen
+  können. Das widerspricht der verbindlichen Regel „keine Wiederherstellung
+  verworfener Buffer-Items".
+* `wipe_logout_buffer` (`db.rs`) existiert derzeit als `#[allow(dead_code)]`-
+  Funktion ohne aktiven vollständigen Pfad: In V1 werden `inventory_buffer`-Zeilen
+  nie geschrieben, daher wäre der Wipe ein No-Op; die Funktion steht bisher nur
+  als Entwurf bereit.
+
+Diese Punkte müssen bei der späteren Implementierung bereinigt werden – Zielzustand:
+ein verworfenes Puffer-Item ist endgültig weg und kann nicht aus `inventory_buffer`
+wiederbelebt werden.
+
+Für diesen Dokumentationsauftrag wird **keine Migration und kein Rust-Code**
+geschrieben; die konkrete technische Bereinigung (z. B. Pufferzeilen gar nicht
+mehr laden/erzeugen oder sauber wippen) bleibt dem Coding-Auftrag vorbehalten.
+
 ---
 
 ## 12. Haltbarkeit
@@ -398,3 +465,70 @@ verbindlichen Entscheidungen nicht widersprechen.
 | Quest-System | Questbelohnungen folgen dem normalen Inventarprinzip |
 | Loot-System | World-Loot bleibt bei vollem Inventar in der Welt (nicht Teil von V1) |
 | Coordinator / Mail-System | Rückerstattungen über das Realm-Mail-System; kein Bestandteil von Inventory V1 (`Coordinator.md`) |
+
+---
+
+## 16. Item-Instanz-Lifecycle und verwaiste Instanzen
+
+Dieser Abschnitt regelt die persistente Repräsentation von Item-Instanzen
+(`item_instances`), insbesondere deren Entfernung, wenn die zugehörige
+Spiel-Instanz endgültig vernichtet wurde.
+
+### Grundregel
+
+Eine endgültig vernichtete Iteminstanz darf nicht unbegrenzt als verwaiste
+persistente `item_instance`-Zeile in MariaDB verbleiben.
+
+> Wenn eine Iteminstanz endgültig keinen gültigen persistenten Besitzer / keine
+> gültige persistente Platzierung mehr besitzt und laut Gameplay vernichtet
+> wurde, muss auch ihre persistente Repräsentation kontrolliert entfernt werden.
+
+### Bevorzugt: Lifecycle-basiertes Entfernen
+
+Bevorzugt wird **Lifecycle-basiertes Entfernen beim endgültigen Item-Untergang**
+(d. h. zum Zeitpunkt des Lebenszyklus-Endes des Items, nicht durch pauschale
+Rückwärts-Scans).
+
+Beispielhafte Lifecycle-Endpunkte ohne neue Gameplayregeln:
+
+* Eine Iteminstanz verliert ihre letzte gültige Platzierung und wurde laut
+  Gameplay vernichtet (z. B. verbraucht oder entfernt).
+* Ein Puffer-Item, das beim Session-Ende gemäß Abschnitt 11 verworfen wird –
+  die Instanz ist damit endgültig vernichtet.
+
+Die konkrete Umsetzung (Zeitpunkt, Transaktionsgrenze) wird im Implementierungs-
+auftrag gegen den vorhandenen Code entschieden (vorhandene Bausteine: `write_*`-
+Transaktionshelfer, `wipe_logout_buffer` als Entwurf, `db.rs`).
+
+### Kein pauschaler periodischer SQL-Garbage-Collector (V1)
+
+Für V1 wird **kein** pauschaler periodischer SQL-GC als Grundlösung festgelegt
+(also kein regelmäßiger Voll-Scan über sämtliche `item_instances`-Zeilen mit
+automatischer Löschung).
+
+Begründung analog `Runtime_Lifecycle_Cleanup.md` §7: bevorzugt werden
+Lifecycle-basierte Entfernungen statt periodischer Voll-Scans. Ein periodischer
+Sweep darf später allenfalls als begrenzter Sicherheitsmechanismus erwogen
+werden, nicht als primäre Säuberungslogik.
+
+### Safety-/Diagnose-Mechanismus (getrennt)
+
+Ein späterer Diagnose- / Safety-Mechanismus darf verwaiste Iteminstanzen
+**erkennen** und melden (Monitoring-/Telemetrieebene).
+
+Das ist **getrennt** vom normalen Item-Lifecycle: Seine Ergebnisse führen
+nicht automatisch zu Löschungen im normalen Spielablauf. In diesem
+Dokumentationsauftrag wird **keine** automatische Löschlogik für einen solchen
+Safety-Mechanismus entworfen.
+
+### Abgrenzung zur Player-Persistenz
+
+* Persistente Inventarbestandteile → Dirty-State bzw. periodischer / finaler
+  Player-Save (`Player_Persistenz.md`). Der Sicherheits-Puffer ist ausdrücklich
+  ausgeschlossen (Abschnitt 11).
+* Der Questabschluss mit seinen beteiligten persistenten Änderungen bleibt eine
+  sofortige atomare Transaktion (`Quest-System.md` §27.26) und wird von den
+  Regeln dieses Abschnitts **nicht** verändert.
+* Dieser Abschnitt legt keine neuen Regeln für Inventarkapazität, Loot,
+  Questbelohnungen, Itemhandel, Haltbarkeit, Puffer-Größe oder die Wiederher-
+  stellung verlorener Puffer-Items fest.

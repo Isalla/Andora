@@ -115,6 +115,14 @@ Ziel:
 
 > Eine Änderung am Questfortschritt soll nicht unnötig einen vollständigen Inventar-Write erzwingen.
 
+Die Komponente „inventory dirty" umfasst ausschließlich die persistenten
+Inventarbestandteile (Grundinventar, Rucksäcke/Bag-Slots, Equipment). Der
+temporäre Sicherheits-Puffer des Inventory-Systems (`inventory_system.md`
+§10/§11) ist ausschließlich flüchtiger Runtime-State einer laufenden Session
+und ausdrücklich **nicht** Teil der Dirty-/Persistenzpflicht: Er wird weder vom
+periodischen noch vom finalen Player-Save geschrieben, unabhängig von dessen
+Erfolg.
+
 Die Persistenzwege der einzelnen Komponenten bleiben unverändert diejenigen aus der jeweils autoritativen Doku (z. B. Inventar als Transaktions-Vollwrite gemäß `inventory_system.md` §11).
 
 ---
