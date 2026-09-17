@@ -144,6 +144,8 @@ In der Stufe-B-Architektur verläuft der periodische Persistenzlauf über die lo
 
 Im Sinne dieses periodischen Pfads gilt eine Persistenz erst dann als dauerhaft gesichert, wenn der Snapshot sicher in der Spool liegt (Abschnitt 35). Der anschließende Transfer nach MariaDB ist davon fachlich entkoppelt (Abschnitt 38); die Erkennung von Races zwischen persistierenden Läufen erfolgt über die `persist_generation` (Abschnitt 39).
 
+Für den Stufe-B-Spool-Pfad gilt die Granularität **pro Charakter**: Ist ein Charakter dirty, enthält sein Player-Eintrag im Batch einen **vollständigen Snapshot** aller persistenten Player-Komponenten, nicht nur die unmittelbar geänderte Komponente (Abschnitt 23).
+
 ---
 
 ## 8. Questfortschritt
@@ -416,7 +418,7 @@ Live Player-State im RAM
     -> nach erfolgreichem DB-COMMIT Spool-Datei löschen
 ```
 
-Ein Persistenzlauf erzeugt **einen** Spool-Snapshot (Batch), der die Einträge aller dirty Spieler enthält (Batch-Format: Abschnitt 35). Entfernt wird eine Spool-Datei erst, wenn **alle** darin enthaltenen Einträge erledigt (committet oder per Revision als erledigt befundet) bzw. einzeln in Quarantäne überführt wurden (Abschnitt 36).
+Ein Persistenzlauf erzeugt **einen** Spool-Snapshot (Batch), der die Einträge aller dirty Spieler enthält (Batch-Format: Abschnitt 35). Entfernt wird eine Spool-Datei erst, wenn **alle** darin enthaltenen Einträge erledigt (committet oder per Revision als erledigt befundet) bzw. einzeln in Quarantäne oder nach `superseded/` überführt wurden (Abschnitt 36).
 
 WICHTIG:
 
@@ -454,9 +456,11 @@ Das Intervall steuert die **Erzeugung** periodischer Spool-Snapshots; die Übert
 
 ---
 
-## 23. Stufe B – Für die Spool vorgesehene normale Dirty-Zustände
+## 23. Stufe B – Vollständiger persistenter Player-Snapshot
 
-Die Spool ist für normale persistierbare Player-Zustände vorgesehen, insbesondere:
+Sobald ein Charakter für einen regulären Persistence-Lauf **dirty** ist, wird in die Spool NICHT nur die unmittelbar veränderte Komponente geschrieben.
+
+Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** aller persistenten Player-Komponenten, die zur normalen Player Persistence gehören. Dazu gehören nach der bestehenden Architektur insbesondere:
 
 * Position
 * Progression
@@ -464,11 +468,33 @@ Die Spool ist für normale persistierbare Player-Zustände vorgesehen, insbesond
 * persistentes Inventar
 * Quest-State / normaler Quest-Fortschritt
 
-Die bestehenden Regeln zu komponentenbezogenem Dirty-State und zu Generationen bleiben bestehen (Abschnitte 6 und 15).
+Ausdrücklich NICHT enthalten sind:
 
-Der **Inventory Buffer** bleibt runtime-only und darf NICHT persistiert werden (Abschnitt 6; `inventory_system.md`).
+* **Inventory Buffer** (runtime-only, Abschnitt 6; `inventory_system.md`)
+* **Buyback History** (session-only)
+* sonstiger ausdrücklich runtime-/session-only Zustand
 
-Die **Buyback History** bleibt session-only und gehört NICHT in diese Player-Persistenz.
+Die Dirty-Bits bestimmen damit für den Spool primär:
+
+> Kommt dieser Charakter in den nächsten Batch?
+
+Sie bestimmen NICHT mehr:
+
+> Welche einzelnen persistenten Komponenten dieses Charakters im Spool-Snapshot stehen?
+
+Grund:
+
+Jede spätere gültige Revision soll einen vollständigen, wiederherstellbaren persistenten Charakterzustand darstellen.
+
+Beispiel:
+
+* DB-Revision 1
+* Revision 2 → beschädigt → Quarantäne
+* Revision 3 → vollständig und gültig
+
+Revision 3 darf den aktuellen vollständigen persistenten Zustand herstellen, ohne zwingend auf Revision 2 angewiesen zu sein.
+
+Die bestehenden Stufe-A-Regeln zu komponentenbezogenem Dirty-State und zu Generationen (Abschnitte 6 und 15) bleiben für die Dirty-/Race-Erkennung gültig; die Vollständigkeitsregel gilt für den neuen Spool-/Recovery-Pfad (Stufe B).
 
 ---
 
@@ -557,9 +583,22 @@ Der bestehende Webserver soll später mindestens darstellen können:
 * Gesamtgröße der ausstehenden Spool-Daten
 * Anzahl offener Quarantänefälle
 * Anzahl archivierter Quarantänefälle der letzten 30 Tage
+* Anzahl Superseded-Snapshots
+* Anzahl Superseded-Fälle der letzten 24 Stunden, 7 Tage und 30 Tage
+* Anzahl unterschiedlicher betroffener Charaktere
+* Häufung pro Charakter, soweit sinnvoll
+* Gesamtgröße der Superseded-Ablage
+* Alter des ältesten Superseded-Eintrags
 * DB-Latenz für Spool-/Persistenz-Übertragungen
 * Metriken zur Batch-Erstellung und Spool-Abarbeitung (Batch-Größe, Dauer, Fehler)
 * soweit sinnvoll Fehlergruppen/Kategorien
+
+Ziel der Superseded-Metriken ist die Unterscheidung zwischen einzelnen seltenen Recovery-/Crash-Sonderfällen, systemweiter Häufung und auffälliger Häufung bei einem bestimmten Charakter. Beispiele:
+
+* Viele Superseded-Fälle über viele Charaktere → möglicher allgemeiner Persistence-/Reihenfolgefehler.
+* Viele Fälle fast ausschließlich bei einem Charakter → möglicher charakterbezogener Fehler oder Sonderfall.
+
+Dies sind Monitoring-/Diagnosehinweise, keine automatische Fehlerdiagnose (Abschnitt 34).
 
 Systemnahe Metriken (z.B. Speicherplatz der Spool, Schreib-/Leselatenzen) werden über den bestehenden **Andora-Daemon** auf Host-Ebene (ohne Root-Zugriff) gesammelt. Für die DB-Latenzmetriken ist ein eigener DB-Monitoring-Zugang vorzusehen.
 
@@ -612,20 +651,38 @@ Monitoring/Administration soll während **RECOVERING** weiterhin verfügbar sein
 
 Jede DB-Persistenz besitzt einen serverseitig erzeugten, monoton aufsteigenden Persistenzbezug, die `persist_revision`. Beim Recovery wird anhand dieser Revision erkannt, ob der Spool-Zustand oder der vorhandene DB-Zustand neuer ist.
 
+Die `persist_revision` gilt **pro Charakter**: Sie ist KEINE globale Realm-Revision und KEINE Batch-Revision. Jeder Charakter besitzt seine eigene monotone `persist_revision`.
+
+Beispiel (Batch 9302):
+
+* Charakter A: `persist_revision` 3
+* Charakter B: `persist_revision` 157
+* Charakter C: `persist_revision` 42
+
+Die Batch-Identität (`batch_id`) und die Charakter-Persistenzrevision sind voneinander unabhängig. Eine spätere `batch_id` darf deshalb NIEMALS zur Bestimmung des persistenten Charakterzustands verwendet werden (Abschnitt 35).
+
+Konzeptionell beginnt jeder Charakter mit `persist_revision = 0`.
+
+`0` bedeutet: Für diesen Charakter wurde noch KEIN revisionierter Player-Snapshot erfolgreich in MariaDB committed.
+
+Der erste erfolgreich erzeugte revisionierte Snapshot erhält Revision 1, danach 2, 3, 4 usw. Dies gilt auch für neu erstellte Charaktere. Ob eine Revision tatsächlich als übernommen gilt, entscheidet erst die dauerhafte Spool-Sicherung (Abschnitt 39).
+
 Der Client darf diesen Wert NICHT bestimmen.
 
 Die `persist_revision` ist die **alleinige autoritative Grundlage** für die Recovery-Entscheidung. Der Zeitstempel `captured_at` wird nur zu Diagnose-/Nachvollziehbarkeitszwecken geführt, NICHT als Vergleichsgrundlage.
 
 Der Dateiname eines Snapshots darf einen lesbaren Zeitstempel enthalten, ist aber NICHT autoritative Grundlage für die Recovery-Entscheidung.
 
-Konkrete Spaltenbezeichnungen, DB-Migrationen und die genaue technische Erzeugung der Revision (z.B. zentral vergebene Sequenz) werden hier nicht festgelegt (Abschnitt 42).
+KEINE `previous_revision`-Kette: Für die automatische Vergleichsentscheidung benötigt ein Player-Snapshot insbesondere seine **eigene** `persist_revision`. Eine `previous_revision` wird NICHT als Voraussetzung eingeführt (z.B. dem Muster „DB-Revision muss exakt der previous_revision entsprechen“). Eine frühere Revision kann z.B. bereits in Quarantäne liegen; eine spätere gültige Revision muss trotzdem verarbeitet werden können.
 
-Fachliche Regel (Vergleich gegen den in MariaDB gespeicherten Stand):
+Fachliche Regel (Vergleich gegen den in MariaDB gespeicherten Stand des Charakters):
 
-* DB-Revision **kleiner** als Snapshot-Revision → Recovery erforderlich: Snapshot einspielen.
-* DB-Revision **gleich** Snapshot-Revision → Snapshot ist bereits abgedeckt → als erledigt behandeln, nicht erneut einspielen.
-* DB-Revision **größer** als Snapshot-Revision → Snapshot ist überholt → als erledigt behandeln, nicht überschreiben.
+* DB-Revision **kleiner** als Snapshot-Revision → Snapshot ist neuer → der Snapshot darf/muss mit dem aktuellen Persistence-Writer verarbeitet werden; nach erfolgreicher vollständiger DB-Transaktion wird die DB-Revision auf die Snapshot-Revision gesetzt.
+* DB-Revision **gleich** Snapshot-Revision → der Zustand wurde bereits committed bzw. ist bereits vorhanden → Snapshot nicht erneut anwenden; der Eintrag darf für diesen Batch als erledigt gelten.
+* DB-Revision **größer** als Snapshot-Revision → MariaDB besitzt bereits einen neueren Zustand → Snapshot NIEMALS über den neueren DB-Zustand schreiben; der Fall wird als **superseded** behandelt und der Eintrag in `superseded/` übernommen (Abschnitt 34).
 * fehlender/unlesbarer Revisionszustand → nicht blind überschreiben; der Eintrag bleibt lokal erhalten und wird nicht automatisch als erledigt behandelt.
+
+`persist_revision` ist für diese automatische Entscheidung maßgeblich. Konkrete Spaltenbezeichnungen, die DB-Migration und die genaue technische Erzeugung der Revision (z.B. pro Charakter vergebene Sequenz) werden hier nicht festgelegt (Abschnitt 42).
 
 ---
 
@@ -658,8 +715,13 @@ persistence/
 ├── spool/
 │   └── ausstehende, noch nach MariaDB zu übertragende Batch-Dateien (ein Batch pro Persistenzlauf)
 │
+├── superseded/
+│   └── gültige Player-Snapshots, die nicht angewendet wurden, weil MariaDB
+│       bereits eine höhere persist_revision besitzt (Abschnitt 34)
+│
 └── quarantine/
-    ├── offene, noch nicht untersuchte fehlerhafte Einzeleinträge aus Batches
+    ├── open/
+    │   └── offene, noch nicht untersuchte fehlerhafte Einzeleinträge aus Batches
     │
     └── archive/
         └── bereits untersuchte/bearbeitete Quarantänefälle
@@ -669,7 +731,7 @@ Die Verzeichnisangaben sind relativ gemeint; absolute Pfade und konkrete Dateina
 
 Kann ein Snapshot-/Einzeleintrag nicht sicher wiederhergestellt werden:
 
-* betroffenen Eintrag aus aktiver Spool in `quarantine/` überführen
+* betroffenen Eintrag aus aktiver Spool in `quarantine/open/` überführen
 * Originaldaten für Analyse erhalten
 * Fehler und relevante Metadaten protokollieren
 * Recovery mit anderen Snapshots fortsetzen
@@ -711,16 +773,18 @@ Es werden keine unnötigen vollständigen Debug-Dumps festgeschrieben.
 
 Mehrere ähnliche Quarantänefälle sollen später über Monitoring als möglicher systematischer Fehler erkennbar sein.
 
+Superseded-Snapshots sind eine davon **getrennte** Fehler-/Analyse-Kategorie (Abschnitt 34): Sie sind gültige, aber nicht angewendete Player-Snapshots – keine beschädigten Snapshots.
+
 ---
 
 ## 33. Stufe B – Quarantäne-Aufbewahrung
 
 VERBINDLICHE REGEL:
 
-Dateien direkt in:
+Dateien in:
 
 ```text
-persistence/quarantine/
+persistence/quarantine/open/
 ```
 
 sind OFFENE Fälle.
@@ -745,6 +809,67 @@ Dadurch bleiben ungefähr 30 Tage bereits bearbeiteter Fehlerfälle für Statist
 
 ---
 
+## 34. Stufe B – Superseded-Snapshots
+
+Ein **Superseded-Snapshot** entsteht, wenn MariaDB bereits eine höhere `persist_revision` besitzt als der gültige Player-Snapshot im Batch (DB-Revision > Snapshot-Revision, Abschnitt 29).
+
+Der ältere Snapshot wird dann NICHT einfach gelöscht und NICHT als normaler Quarantänefehler behandelt, sondern einer eigenen logischen Ablage zugeführt (Verzeichnisstruktur: Abschnitt 31):
+
+```text
+persistence/
+├── spool/
+├── superseded/
+└── quarantine/
+    ├── open/
+    └── archive/
+```
+
+Bedeutung:
+
+* `spool/` = noch zu verarbeitende Batch-Snapshots
+* `superseded/` = gültige Player-Snapshots, die nicht angewendet wurden, weil MariaDB bereits eine höhere `persist_revision` besitzt
+* `quarantine/` = tatsächlich fehlerhafte, beschädigte oder nicht zuverlässig verarbeitbare Player-Snapshots
+
+Superseded und Quarantäne sind ausdrücklich **unterschiedliche Fehler-/Analyse-Kategorien** (Abschnitt 32).
+
+**Extraktion pro Player:**
+
+Ein superseded Player-Eintrag wird analog zur Fehlerisolierung als eigener analysierbarer Player-Snapshot dauerhaft in `superseded/` übernommen. Die übrigen Player des Batches werden normal weiterverarbeitet.
+
+Erst nachdem der superseded Player-Snapshot sicher in `superseded/` übernommen wurde, darf dieser Eintrag für den aktiven Batch als erledigt gelten (Abschnitt 36). Danach kann die normale Batch-Abarbeitung fortgesetzt werden.
+
+Der ursprüngliche Batch wird weiterhin erst gelöscht, wenn **alle** Player-Einträge nach den dokumentierten Regeln erledigt sind (Abschnitt 36).
+
+**Zweck:**
+
+Superseded-Snapshots werden aufbewahrt für:
+
+* Persistence-Fehleranalyse
+* Erkennen ungewöhnlicher Revisionsreihenfolgen
+* Support
+* Vergleich alter/neuer Charakterzustände
+* Untersuchung möglicherweise verlorener wertvoller Items
+* Erkennen systematischer Fehler
+* Erkennen charakterbezogener Fehlerhäufungen
+
+Beispiel:
+
+Revision 2 enthält ein seltenes Item. MariaDB besitzt bereits Revision 3; Revision 2 wird deshalb nicht angewendet. Der Superseded-Snapshot kann später als Hinweis dienen, ob ein gemeldetes fehlendes Item in einem älteren Zustand vorhanden war.
+
+WICHTIG:
+
+Das Vorhandensein eines Items in einem älteren Snapshot beweist NICHT automatisch einen Persistence-Fehler – das Item könnte zwischen den Revisionen regulär verkauft, gehandelt, verbraucht, zerstört oder anderweitig entfernt worden sein. Superseded-Daten sind daher Diagnose-/Supportinformation und KEINE Grundlage für automatische Item-Wiederherstellung oder automatische Kompensation.
+
+**Aufbewahrung:**
+
+Superseded-Snapshots werden 30 Tage ab dem Zeitpunkt ihrer Ablage in `superseded/` aufbewahrt und dürfen danach automatisch gelöscht werden. Sie benötigen – anders als `quarantine/open/` – keine manuelle Bearbeitung/Freigabe vor Ablauf dieser Frist.
+
+Die bestehende Quarantäne-Aufbewahrungsregel bleibt unverändert (Abschnitt 33): Offene Quarantänefälle werden NICHT automatisch altersbasiert gelöscht; erst nach manueller Bearbeitung/Archivierung beginnt dort die bereits dokumentierte 30-Tage-Archivfrist.
+
+Superseded-Retention und Quarantäne-Retention nicht miteinander vermischen.
+
+---
+
 ## 35. Stufe B – Batch-Format / eine Datei pro Persistenzlauf
 
 Ein Persistenzlauf erzeugt **eine** Spool-Datei (Batch), die die PersistSnapshots aller im Lauf erfassten dirty Spieler enthält. Es gibt bewusst **keine** getrennten Dateien pro Spieler.
@@ -754,6 +879,8 @@ Für V1 gilt:
 * Format: **menschenlesbares, versioniertes JSON** (Abschnitt 25).
 * Jeder Batch besitzt eine eigene `format_version`; das konkrete Schema (Feldnamen, Struktur) bleibt offen (Abschnitt 42).
 * Ein Batch ist unabhängig von anderen Batches; innerhalb eines Batch sind die Player-Einträge unabhängig voneinander (Abschnitt 36).
+* Jeder Player-Eintrag trägt die eigene `persist_revision` seines Charakters; `batch_id` und `persist_revision` sind unabhängig voneinander (Abschnitt 29).
+* Jeder Player-Eintrag ist ein **vollständiger persistenter Player-Snapshot** (Abschnitt 23).
 
 Es gibt **keine** Zusammenführung/Kompression über mehrere Batches hinweg und kein verzögerungsfreies Neuschreiben älterer Batches (V1). Bereits geschriebene Batches bleiben unverändert erhalten, bis sie gemäß Abschnitt 36 erledigt sind.
 
@@ -767,9 +894,10 @@ Eine Batch-Datei wird erst dann entfernt, wenn **alle** ihre Player-Einträge er
 
 * (a) sein Snapshot erfolgreich mit dem aktuellen Persistenzcode committet wurde, oder
 * (b) er per Revision als gleich/überholt befundet wurde (Abschnitt 29), oder
-* (c) er einzeln in Quarantäne überführt wurde (Abschnitt 31).
+* (c) er einzeln in Quarantäne überführt wurde (Abschnitt 31), oder
+* (d) er als Superseded-Snapshot sicher in `superseded/` übernommen wurde (Abschnitt 34).
 
-Die Player-Einträge eines Batch werden **unabhängig** voneinander behandelt: Ein fehlerhafter oder in Quarantäne überführter Eintrag blockiert die übrigen Einträge desselben Batch nicht. Fehlerhafte Einzeleinträge werden einzeln isoliert; die Batch-Datei bleibt solange erhalten, bis alle Einträge gemäß (a)–(c) erledigt sind.
+Die Player-Einträge eines Batch werden **unabhängig** voneinander behandelt: Ein fehlerhafter, in Quarantäne überführter oder als superseded kenntlich gemachter Eintrag blockiert die übrigen Einträge desselben Batch nicht. Einzeleinträge werden einzeln isoliert; die Batch-Datei bleibt solange erhalten, bis alle Einträge gemäß (a)–(d) erledigt sind.
 
 ## 37. Stufe B – Sequentielle Verarbeitung (V1)
 
@@ -800,11 +928,30 @@ Dirty-Verhalten:
 * Die temporäre RAM-Kopie des PersistSnapshots kann nach dauerhafter Spool-Sicherung freigegeben werden (Abschnitt 21).
 * Die dauerhafte Übertragung nach MariaDB ist davon getrennt; erst nach erfolgreichem DB-COMMIT wird die Batch-Datei entfernt (Abschnitt 36).
 
+**Revision wird erst durch durable Spool real:**
+
+Eine neue `persist_revision` gilt im Live-Zustand erst dann als übernommen, wenn der zugehörige **vollständige** Player-Snapshot Bestandteil eines erfolgreich dauerhaft geschriebenen Batches ist (Abschnitt 23).
+
+Beispiel:
+
+* RAM `persist_revision` = 5, Player dirty → geplanter Snapshot `persist_revision` = 6.
+* Spool-Write schlägt fehl → Revision 6 gilt NICHT als erfolgreich erzeugt/übernommen; RAM bleibt auf 5; Player bleibt dirty; der nächste reguläre Versuch darf erneut Revision 6 verwenden (fehlgeschlagene Spool-Schreibversuche erzeugen keine künstlichen Revisionslücken, Abschnitt 40).
+* Spool-Write erfolgreich und nach den Durability-Regeln dauerhaft → Snapshot Revision 6 existiert dauerhaft; Live-RAM darf `persist_revision` 6 übernehmen; MariaDB darf zu diesem Zeitpunkt noch Revision 5 besitzen.
+* Dadurch kann später bereits Revision 7 in einem neuen Batch entstehen, während MariaDB Revision 6 noch verarbeitet.
+
+WICHTIG – `persist_revision` und `persist_generation` haben unterschiedliche Aufgaben:
+
+* `persist_generation`: erkennt Änderungen/Races im aktuellen Live-RAM während der Snapshot-Erstellung (Abschnitt 15).
+* `persist_revision`: ordnet dauerhaft erzeugte Player-Snapshots und DB-Stände (Abschnitt 29).
+
+Diese beiden Mechanismen NICHT vermischen.
+
 ## 40. Stufe B – Verhalten bei Spool-Schreibfehlern
 
 Schlägt das (dauerhafte) Sichern eines Batch in die Spool fehl:
 
 * Die Dirty-Bits werden **nicht** bereinigt – der Zustand bleibt dirty und für einen späteren Retry verfügbar (Abschnitt 7).
+* Die geplante `persist_revision` des fehlgeschlagenen Versuchs wird **nicht** verbraucht: Der nächste reguläre Versuch darf dieselbe Revision erneut verwenden – fehlgeschlagene Spool-Schreibversuche erzeugen keine künstlichen Revisionslücken (Abschnitt 39).
 * Der Persistence-Zustand des betroffenen Servers/Realms wird **DEGRADED** (Abschnitt 26).
 * Es werden **keine** gültigen bereits geschriebenen Spool-Dateien gelöscht.
 * Temporär geschriebene Dateien gelten **niemals** als gültig (Abschnitt 25).
@@ -832,18 +979,22 @@ Ohne vorhandene Entscheidung werden NICHT festgelegt:
 
 * konkretes JSON-Schema (Feldnamen, Struktur) – das Format selbst ist versioniertes menschenlesbares JSON (Abschnitt 35)
 * konkrete Dateinamen
-* absolute Spool-/Quarantäne-Pfade (die Struktur selbst ist relativ festgelegt: Abschnitt 31)
+* konkrete Superseded-Dateinamen
+* absolute Spool-/Superseded-/Quarantäne-Pfade (die Struktur selbst ist relativ festgelegt: Abschnitte 31/34)
+* konkrete MariaDB-Tabelle/Spalte/Datentyp für `persist_revision` (Abschnitt 29)
 * konkrete DB-Spaltennamen
 * konkrete DB-Migration
 * maximale Spool-Größe
 * maximale Anzahl Spool-Dateien
+* Spool-/Superseded-Größenlimits
+* batch_id-Implementierung
 * konkrete Push-Technik/App-Technik
 * konkrete HTTP/API-Endpunkte
 * spätere Parallelisierung der DB-Spool-Abarbeitung – für V1 ist **sequenzielle** Verarbeitung festgelegt (Abschnitt 37)
 * Snapshot-Kompression
 * Zusammenführen/Kompression über mehrere Batches hinweg – innerhalb eines Batch gibt es keine Zusammenführung (Abschnitt 35)
 * exakte Retry-Zeitpunkte außerhalb des normalen Persistenzzyklus
-* genaue technische Erzeugung der `persist_revision` (z.B. zentrale Sequenz) – der Mechanismus selbst ist festgelegt (Abschnitt 29)
+* genaue technische Erzeugung der `persist_revision` (z.B. pro Charakter vergebene Sequenz) – der Mechanismus selbst ist festgelegt (Abschnitt 29)
 * neue Gameplay-Regeln
 * Quest V1.2b
 * neue Item-/Loot-Regeln
