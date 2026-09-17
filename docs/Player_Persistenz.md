@@ -84,7 +84,7 @@ Stattdessen wird die betroffene persistente Spielerkomponente als **dirty** mark
 Beispiele:
 
 ```text
-Questfortschritt:   12/100 → 13/100
+Questfortschritt:   12/100 → 13/100   (Persistenz: Quest-Persistenzpfad, Abschnitt 8)
 EXP-Zuwachs
 Goldänderungen
 normale Inventaränderungen
@@ -127,6 +127,8 @@ Erfolg.
 
 Die Persistenzwege der einzelnen Komponenten bleiben unverändert diejenigen aus der jeweils autoritativen Doku (z. B. Inventar als Transaktions-Vollwrite gemäß `inventory_system.md` §11).
 
+Quest State / Quest Progress besitzen dagegen einen **eigenen direkten MariaDB-Persistenzweg** (Quest-Persistenzpfad, Abschnitt 8) und sind für Stufe B **nicht** Teil des normalen Player-Snapshot-/Spool-Systems (Abschnitt 23). Die bestehende Stufe-A-Dirty-Komponente für Quest wird nicht als verbindliche Stufe-B-Architektur übernommen (Abschnitt 8).
+
 ---
 
 ## 7. Periodischer Flush
@@ -144,13 +146,15 @@ In der Stufe-B-Architektur verläuft der periodische Persistenzlauf über die lo
 
 Im Sinne dieses periodischen Pfads gilt eine Persistenz erst dann als dauerhaft gesichert, wenn der Snapshot sicher in der Spool liegt (Abschnitt 35). Der anschließende Transfer nach MariaDB ist davon fachlich entkoppelt (Abschnitt 38); die Erkennung von Races zwischen persistierenden Läufen erfolgt über die `persist_generation` (Abschnitt 39).
 
-Für den Stufe-B-Spool-Pfad gilt die Granularität **pro Charakter**: Ist ein Charakter dirty, enthält sein Player-Eintrag im Batch einen **vollständigen Snapshot** aller persistenten Player-Komponenten, nicht nur die unmittelbar geänderte Komponente (Abschnitt 23).
+Für den Stufe-B-Spool-Pfad gilt die Granularität **pro Charakter**: Ist ein Charakter dirty, enthält sein Player-Eintrag im Batch einen **vollständigen Snapshot** aller persistenten Player-Komponenten des normalen Player-Persistence-Systems, nicht nur die unmittelbar geänderte Komponente (Abschnitt 23).
 
 ---
 
 ## 8. Questfortschritt
 
-Normaler Questfortschritt wird **nicht bei jedem einzelnen Ereignis sofort** persistent geschrieben.
+Quest State und Quest Progress gehören **nicht** zum normalen vollständigen Player-Snapshot des Stufe-B-Spool-Systems (Abschnitt 23). Quest-Persistence besitzt bewusst einen **eigenen direkten MariaDB-Persistenzweg** (Quest-Persistenzpfad). Der normale Player-Spool darf deshalb einen neueren Quest-Zustand in MariaDB **niemals** durch einen älteren Quest-Zustand aus einem Player-Snapshot überschreiben.
+
+Quest-Persistence erfolgt **nicht bei jeder kleinsten Queständerung**.
 
 Beispiel:
 
@@ -158,26 +162,32 @@ Beispiel:
 Quest: Töte 100 Wölfe.
 ```
 
-Nicht:
-
-```text
-1/100 → DB
-2/100 → DB
-3/100 → DB
-...
-```
+Wolf 1/100 → 2/100 → 3/100 usw. muss **nicht nach jedem einzelnen Kill** unmittelbar in MariaDB geschrieben werden.
 
 Sondern:
 
 ```text
 Kill bestätigt
-→ Questfortschritt im Realm-RAM erhöhen
-→ Questkomponente dirty markieren
+→ Questfortschritt im autoritativen Realm-RAM erhöhen
+→ im Realm-RAM halten bis zum nächsten relevanten Quest-Checkpoint
 ```
 
-Beim nächsten periodischen/finalen Flush wird der aktuelle Fortschritt persistiert.
+Normaler flüchtiger Quest-Fortschritt zwischen relevanten Quest-Checkpoints wird im Realm-RAM gehalten.
 
-Bei einem ungeplanten Prozess-/Host-Crash kann dadurch Fortschritt seit dem letzten erfolgreichen Flush verloren gehen. Das ist für normalen Zwischenfortschritt **bewusst akzeptiert** (insofern verändert sich gegenüber dem bisherigen Verhalten nichts: auch bisher wurde EXP erst bei Disconnect gespeichert, vgl. `Erfahrung_und_Progressionssystem.md`).
+Relevante Quest-Checkpoints werden dagegen **direkt** über den Quest-Persistenzpfad persistiert. Dazu gehören insbesondere:
+
+* Quest Acceptance (Abschnitt 10)
+* relevante Quest-Gespräche mit NPCs
+* Quest-Aktualisierungen, die durch einen NPC bzw. ein entsprechendes Quest-Ereignis ausgelöst werden
+* Quest Completion (Abschnitt 9)
+
+Die genaue Liste aller zukünftigen Quest-Checkpoint-Typen wird in dieser Datei bewusst nicht festgelegt.
+
+Bei einem ungeplanten Prozess-/Host-Crash kann Quest-Fortschritt seit dem letzten erfolgreich persistierten Quest-Checkpoint verloren gehen. Das ist für normalen Zwischenfortschritt **bewusst akzeptiert**.
+
+**Hinweis zur bestehenden Stufe-A-Implementierung:**
+
+Im bestehenden Rust-Code sind Quest State/Quest Progress derzeit noch Teil des bisherigen Player-Persistence-Pfads (`PersistComponent::QuestState`, Quest-Daten im bisherigen `PersistSnapshot`, `write_quest_state` im zentralen Stufe-A-Persistence-Pfad). Diese vorhandene Implementierung darf ausdrücklich **nicht** als neue verbindliche Stufe-B-Architektur übernommen werden. Für Stufe B gilt: Quest State/Quest Progress sind aus dem normalen Player-Spool ausgegliedert und werden über den Quest-Persistenzpfad behandelt. Die spätere Bereinigung/Anpassung des vorhandenen Stufe-A-Codes erfolgt in einem separaten Implementierungsauftrag.
 
 ---
 
@@ -207,7 +217,7 @@ AVAILABLE → ACTIVE
 
 Dieser Zustandsübergang soll **unmittelbar** persistent gespeichert werden.
 
-Normaler Objective-Fortschritt innerhalb ACTIVE darf anschließend über Dirty-State/periodischen Flush laufen (Abschnitt 8).
+Normaler Objective-Fortschritt innerhalb ACTIVE wird anschließend im Realm-RAM gehalten und erst bei den relevanten Quest-Checkpoints über den Quest-Persistenzpfad persistiert (Abschnitt 8); er gehört nicht zum normalen Player-Snapshot-/Spool-Pfad (Abschnitt 23).
 
 Aus dieser Regel werden **keine** weiteren Repeatable-/FAILED-/Abort-Regeln abgeleitet (die entsprechenden Semantiken bleiben in `Quest-System.md` offen, vgl. Abschnitte 27.20/27.21).
 
@@ -220,6 +230,27 @@ Bei einem normalen Spieler-Disconnect erfolgt ein **finaler Flush** der persiste
 Die Architektur verwendet nach Möglichkeit **denselben zentralen Player-Persistenzpfad** wie der periodische Save.
 
 Es werden keine voneinander abweichenden Persistenzregeln für dieselben Komponenten dupliziert: Der Disconnect-Save ist ein sofort ausgelöster Flush über denselben Pfad, nicht ein Satz eigener, paralleler Speicherlogik.
+
+**LOGOUT_AT**
+
+`logout_at` ist **kein** normaler periodischer Dirty-/Snapshot-Wert. Es besitzt einen **eigenen direkten Logout-Persistenzzeitpunkt**.
+
+Beim regulären Logout gilt konzeptionell:
+
+```text
+Spieler beginnt Logout
+→ finaler Player-Persistence-Vorgang
+→ logout_at wird als Teil des Logout-Abschlusses direkt für MariaDB behandelt
+→ erst danach wird die Runtime-/Session-Repräsentation entfernt
+```
+
+`logout_at` wartet NICHT auf den nächsten regulären 15-Minuten-Snapshot (Abschnitt 4) und benötigt deshalb kein normales Dirty-Bit (Abschnitt 5).
+
+WICHTIG:
+
+Der finale Player-Zustand beim Logout muss weiterhin den dokumentierten Sicherheitsregeln der Player Persistence entsprechen. Wenn MariaDB beim Logout nicht erreichbar ist, darf der finale persistente Player-Zustand nicht einfach verloren gehen (Abschnitte 16 und 30).
+
+Die genaue technische Koordination zwischen dem finalen Spool-Snapshot und dem direkten `logout_at`-DB-Eintrag wird hier nicht festgelegt (Abschnitt 42).
 
 ---
 
@@ -268,7 +299,7 @@ Ziel der Strategie ist ausdrücklich:
 
 Insbesondere muss nicht unmittelbar persistent werden:
 
-* jeder Kill-Questfortschritt
+* jeder Kill-Questfortschritt (persistiert wird erst an relevanten Quest-Checkpoints über den Quest-Persistenzpfad, Abschnitt 8)
 * jeder EXP-Punkt
 * jede Positionsänderung
 
@@ -295,8 +326,8 @@ konsistenten persistierbaren Zustand erfassen/snapshotten
 Beispiel:
 
 ```text
-Snapshot enthält Quest 20/100.
-Während des DB-Writes steigt RAM auf 21/100.
+Snapshot enthält Gold 20.
+Während des DB-Writes steigt RAM auf 21.
 ```
 
 Nach erfolgreichem Write von 20/100 darf der neue 21/100-Zustand **nicht versehentlich als clean** markiert werden. Diese Race-Bedingung wird über eine `persist_generation` des laufenden Realm-Prozesses erkannt und abgesichert (Abschnitt 20; Details und Verhalten in Abschnitt 39).
@@ -460,19 +491,56 @@ Das Intervall steuert die **Erzeugung** periodischer Spool-Snapshots; die Übert
 
 Sobald ein Charakter für einen regulären Persistence-Lauf **dirty** ist, wird in die Spool NICHT nur die unmittelbar veränderte Komponente geschrieben.
 
-Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** aller persistenten Player-Komponenten, die zur normalen Player Persistence gehören. Dazu gehören nach der bestehenden Architektur insbesondere:
+Der Begriff „vollständiger Player-Snapshot" bedeutet hier: ein vollständiger Snapshot aller persistenten Komponenten, die dem **normalen Player-Persistence-/Spool-System** zugeordnet sind. Daraus folgt ausdrücklich **nicht**, dass sämtliche persistenten Systeme des gesamten Spiels in diesem Snapshot enthalten sein müssen. Systeme mit eigenem verbindlichem Persistenzweg können ausdrücklich außerhalb dieses Snapshots liegen.
+
+Quest-Persistence ist ein solcher separater Persistenzweg (Abschnitt 8).
+
+**Grundregel des Full-Snapshots:**
+
+Der Snapshot speichert nach Möglichkeit die **eigentliche persistente Ursache** und nicht zusätzlich jeden daraus berechenbaren Wert. Abgeleitete Werte werden beim Laden bzw. bei relevanten Änderungen aus ihren persistenten Grundlagen neu berechnet.
+
+Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** dieser dem normalen Player-Persistence-/Spool-System zugeordneten Komponenten. Dazu gehören nach der bestehenden Architektur insbesondere:
+
+**IM NORMALEN STUFE-B-PLAYER-SNAPSHOT:**
 
 * Position
-* Progression
+* Progression / Level / EXP und zugehöriger normaler Fortschritt
 * Gold
-* persistentes Inventar
-* Quest-State / normaler Quest-Fortschritt
+* persistentes Inventar / Equipment
+* dauerhafte Charakterattribute (z.B. Stärke, Weisheit, Glück, Ausdauer und weitere bestehende Charakterattribute; keine neuen Attribute erfinden)
+* aktuelle HP (aktuell vorhandener Wert, z.B. 437)
+* aktuelles Mana (aktuell vorhandener Wert, z.B. 126)
+* Klasse (gewählte bzw. entwickelte Charakterklasse)
+* persistenter Zustand der Fraktionswahl/-zugehörigkeit (`faction_transition`)
+* dauerhaft trainierte Weapon Skills
+* dauerhaft erlernte / freigeschaltete Abilities
 
-Ausdrücklich NICHT enthalten sind:
+**BERECHNET – NICHT ALS EIGENE PERSISTENTE WAHRHEIT:**
+
+* **HP Max** – wird insbesondere aus Level, Attributen und Ausrüstung berechnet; beim Laden aus dem aktuellen persistenten Charakterzustand neu ermittelt
+* **Mana Max** – wird insbesondere aus Level, Attributen und Ausrüstung berechnet; beim Laden aus dem aktuellen persistenten Charakterzustand neu ermittelt
+* **zusammengefasster Armor-/Combat-Armor-Wert** – wird insbesondere aus der angelegten Ausrüstung und den relevanten Charakterwerten berechnet; beim Laden aus dem persistenten Equipment neu bestimmt
+
+Die genauen Berechnungsformeln werden hier nicht festgelegt (Abschnitt 42). Falls das bestehende DB-Schema derzeit Felder für HP Max, Mana Max oder `combat_armor` enthält, bedeutet deren heutige Existenz nicht, dass sie Teil der neuen Stufe-B-Architektur bleiben müssen; das bestehende Feld `combat_armor` darf dokumentiert bleiben, wird aber NICHT allein aufgrund seiner Existenz als verbindliche Stufe-B-Persistenzkomponente behandelt. Es findet keine DB-Änderung statt.
+
+**EIGENER PERSISTENZPFAD – NICHT IM NORMALEN PLAYER-SNAPSHOT:**
+
+* **Quest State / Quest Progress** – persistent, aber über einen eigenen direkten Quest-Persistenzweg behandelt; NICHT Teil des normalen Player-Snapshot-/Spool-Systems (Abschnitt 8)
+* **logout_at** – eigener direkter Logout-Persistenzwert, kein normaler periodischer Dirty-/Snapshot-Wert (Abschnitt 11)
+
+**NICHT DAUERHAFT PERSISTENT:**
 
 * **Inventory Buffer** (runtime-only, Abschnitt 6; `inventory_system.md`)
 * **Buyback History** (session-only)
 * sonstiger ausdrücklich runtime-/session-only Zustand
+
+Die Ausschlussgründe NICHT miteinander vermischen:
+
+* **Quest State / Quest Progress:** persistent, aber über einen eigenen direkten Persistence-Pfad (Quest-Persistenzpfad, Abschnitt 8) behandelt.
+* **logout_at:** eigener direkter Logout-Persistenzwert (Abschnitt 11).
+* **Inventory Buffer / Buyback:** nicht Bestandteil der normalen dauerhaften Player-Persistence (runtime-/session-only).
+
+Der normale Player-Spool darf einen neueren Quest-Zustand in MariaDB **niemals** durch einen älteren Quest-Zustand aus einem Player-Snapshot überschreiben. Da Quest State/Quest Progress nicht Bestandteil des normalen Player-Snapshots sind, enthält ein solcher Snapshot dieses System gar nicht; die Quest-Persistenz wird ausschließlich über den Quest-Persistenzpfad fortgeschrieben (Abschnitt 8). Die Revisions-/Vergleichsregeln (Abschnitt 29) beziehen sich damit nur auf die Komponenten des normalen Player-Snapshots.
 
 Die Dirty-Bits bestimmen damit für den Spool primär:
 
@@ -496,6 +564,10 @@ Revision 3 darf den aktuellen vollständigen persistenten Zustand herstellen, oh
 
 Die bestehenden Stufe-A-Regeln zu komponentenbezogenem Dirty-State und zu Generationen (Abschnitte 6 und 15) bleiben für die Dirty-/Race-Erkennung gültig; die Vollständigkeitsregel gilt für den neuen Spool-/Recovery-Pfad (Stufe B).
 
+Hinweis zur bestehenden Stufe-A-Implementierung:
+
+Der aktuelle Stufe-A-PersistSnapshot enthält die hier für Stufe B zusätzlich aufgeführten Komponenten (Attribute, aktuelle HP, aktuelles Mana, Klasse, Fraktionszustand, Weapon Skills, Abilities) noch nicht vollständig; für einige davon existieren derzeit noch keine zentralen Writer. Das ist ein Implementierungsunterschied zwischen Stufe A und Stufe B: Die spätere Implementierung muss diese Dokumentation erfüllen, nicht umgekehrt. In diesem Dokumentationsauftrag wird kein Rust-Code geändert, keine Writer- oder Dirty-Markierungs-Umsetzung vorgenommen und keine Migration erstellt (Abschnitt 42).
+
 ---
 
 ## 24. Stufe B – Kritische / atomare Transaktionen
@@ -507,6 +579,10 @@ Quest Acceptance:
 
 Quest Completion:
 → bestehende atomare MariaDB-Transaktion bleibt unverändert (Abschnitt 9; `Quest-System.md` §27.26).
+
+Relevante Quest-Checkpoints werden direkt über den Quest-Persistenzpfad persistiert (Abschnitt 8); der Player-Spool ist für Quest State/Quest Progress nicht zuständig und ersetzt diesen Persistenzweg NICHT (Abschnitt 23).
+
+Wenn die Quest Completion weitere persistente Änderungen erzeugt, die Bestandteil ihrer atomaren Transaktion sind (z.B. Questzustand und Questbelohnungen), bleiben diese Teil dieser Transaktion; der normale Player-Spool ersetzt diese Transaktion NICHT.
 
 Die lokale periodische Spool darf nicht dazu führen, dass ein kritischer Vorgang als erfolgreich gilt, obwohl seine vorgeschriebene unmittelbare DB-Transaktion nicht erfolgreich abgeschlossen wurde.
 
@@ -995,6 +1071,12 @@ Ohne vorhandene Entscheidung werden NICHT festgelegt:
 * Zusammenführen/Kompression über mehrere Batches hinweg – innerhalb eines Batch gibt es keine Zusammenführung (Abschnitt 35)
 * exakte Retry-Zeitpunkte außerhalb des normalen Persistenzzyklus
 * genaue technische Erzeugung der `persist_revision` (z.B. pro Charakter vergebene Sequenz) – der Mechanismus selbst ist festgelegt (Abschnitt 29)
+* konkrete Rust-Strukturen der neu hinzugekommenen Snapshot-Komponenten (Abschnitte 23/25)
+* konkrete Writer-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten
+* konkrete Dirty-Bit-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten (Attribute, aktuelle HP, aktuelles Mana, Klasse, Fraktionszustand, Weapon Skills, Abilities)
+* genaue HP-Max-/Mana-Max-Berechnung (die Werte selbst sind abgeleitet, Abschnitt 23)
+* genaue Armor-Berechnung (der Wert selbst ist abgeleitet, Abschnitt 23)
+* konkrete Logout-/Spool-Koordination für `logout_at` (Abschnitt 11)
 * neue Gameplay-Regeln
 * Quest V1.2b
 * neue Item-/Loot-Regeln
