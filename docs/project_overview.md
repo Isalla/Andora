@@ -109,6 +109,7 @@ Dazu gehören unter anderem:
 * Raids
 * Szenen
 * persistente Weltzustände
+* Weltzeit und Wetter (siehe `Weltzeit_und_Wettersystem.md`)
 
 Der Client stellt diese Informationen dar und sendet Spieleraktionen an den Server.
 

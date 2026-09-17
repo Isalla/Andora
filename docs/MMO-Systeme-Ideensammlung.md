@@ -654,6 +654,8 @@ Mögliche spätere Systeme:
 
 Ob und wie stark Wetter Gameplay beeinflusst, wird später entschieden.
 
+> Die verbindliche Grundarchitektur für Weltzeit, Tagesphasen und regionales Wetter steht in `Weltzeit_und_Wettersystem.md`. Diese Liste bleibt offene Ideenquelle (u. a. Wetterarten, Jahreszeiten) und wird nicht zurückgenommen.
+
 ---
 
 # Reisen und Transport

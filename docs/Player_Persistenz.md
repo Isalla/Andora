@@ -360,6 +360,7 @@ Diese Datei ändert **keinen** Code und legt **keine** neuen Gameplayregeln fest
 * Lua
 * Godot
 * Netzwerkprotokoll
+* **Weltzeit und Wetter** (persistenter Realm-/Weltzustand, keine spielergebundenen Zustände; getrennt behandelt in `Weltzeit_und_Wettersystem.md`)
 
 ---
 

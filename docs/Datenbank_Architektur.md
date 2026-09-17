@@ -307,6 +307,7 @@ Zum Beispiel:
 * persistente Monster-/Respawn-Zustände (laufende Respawn-Timer, auch langfristige über Realm-Neustarts hinweg; Werte aus Content/Lua beziehungsweise Spawn-/DB-Daten, siehe `Kampfsystem.md`, Abschnitt 21)
 * Weltveränderungen
 * regionale Zustände
+* Weltzeit/Wetter (Weltzeit, Spieltag, Tagesphasen und Wetter je Wetterregion sind persistenter Realm-/Weltzustand; getrennt von der Player-Persistenz, Details und Abgrenzung in `Weltzeit_und_Wettersystem.md`)
 * Eventzustände
 * Besitzverhältnisse
 * persistente Gebäude
