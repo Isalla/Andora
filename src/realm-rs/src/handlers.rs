@@ -237,6 +237,8 @@ pub async fn handle_hello(
         mana_regen_carry: 0.0,
         inventory,
         quests,
+        dirty: Default::default(),
+        persist_generation: 0,
     };
     let mut me = me;
     attributes::recompute_max_resources(&mut me);
@@ -347,6 +349,7 @@ pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value
         let (x, y) = apply_move(me.x, me.y, dx, dy, tick_ms);
         me.x = x;
         me.y = y;
+        me.mark_dirty(crate::persist::PersistComponent::Position);
         me.last_activity = Instant::now();
     }
 
@@ -1150,6 +1153,8 @@ mod tests {
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
                     quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
                 },
             );
             w.players.insert(
@@ -1197,6 +1202,8 @@ mod tests {
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
                     quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1304,6 +1311,8 @@ mod tests {
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
                     quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
                 },
             );
             w.players.insert(
@@ -1351,6 +1360,8 @@ mod tests {
                     mana_regen_carry: 0.0,
                     inventory: Default::default(),
                     quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1365,5 +1376,89 @@ mod tests {
         )
         .await;
         assert!(shared.lock().await.players["a"].combat.is_none());
+    }
+
+    #[tokio::test]
+    async fn movement_marks_position_dirty_but_stop_does_not() {
+        let shared = crate::world::new_shared();
+        {
+            let mut w = shared.lock().await;
+            let (ta, _) = mpsc::unbounded_channel();
+            w.players.insert(
+                "a".into(),
+                Player {
+                    id: "a".into(),
+                    name: "a".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 0,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: ta,
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    gold: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
+                    sitting: false,
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                },
+            );
+            w.by_conn.insert(7, "a".into());
+        }
+        // Gültige Bewegung → serverseitig neue Position + Position-dirty.
+        handle_move(&shared, 7, &serde_json::json!({"dir": [1.0, 0.0]}), 1000).await;
+        {
+            let w = shared.lock().await;
+            let p = &w.players["a"];
+            assert!(p.x > 0.0, "Bewegung ändert die Position");
+            assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+            assert_eq!(p.persist_generation, 1);
+        }
+        // Stopp (Richtung 0) → keine RAM-Mutation, kein neuer Dirty-Write.
+        {
+            let mut w = shared.lock().await;
+            w.players
+                .get_mut("a")
+                .unwrap()
+                .dirty
+                .clear(crate::persist::PersistComponent::Position);
+        }
+        handle_move(&shared, 7, &serde_json::json!({"dir": [0.0, 0.0]}), 1000).await;
+        {
+            let w = shared.lock().await;
+            let p = &w.players["a"];
+            assert!(!p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+            assert_eq!(p.persist_generation, 1);
+        }
     }
 }

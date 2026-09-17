@@ -191,6 +191,8 @@ mod tests {
             mana_regen_carry: 0.0,
             inventory: Default::default(),
             quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
             effects: Vec::new(),
             cooldowns: Default::default(),
             active_cast: None,

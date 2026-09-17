@@ -494,7 +494,11 @@ pub fn attempt_pickup(
             };
             let outcome = {
                 let p = world.players.get_mut(actor).expect("actor checked");
-                p.inventory.try_add(&def, count)
+                let outcome = p.inventory.try_add(&def, count);
+                if outcome.accepted > 0 {
+                    p.mark_dirty(crate::persist::PersistComponent::Inventory);
+                }
+                outcome
             };
             let remaining = outcome.remainder.max(0);
             let drop = world.loot_drops.get_mut(loot_id);
@@ -510,7 +514,10 @@ pub fn attempt_pickup(
             let amounts = group::split_exp_equally(count.max(0), recipients.len());
             for (pid, amt) in recipients.iter().zip(&amounts) {
                 if let Some(p) = world.players.get_mut(pid) {
-                    p.gold += amt;
+                    if *amt > 0 {
+                        p.gold += *amt;
+                        p.mark_dirty(crate::persist::PersistComponent::Gold);
+                    }
                 }
             }
             world.loot_drops.remove(loot_id);
@@ -623,6 +630,8 @@ mod tests {
                 mana_regen_carry: 0.0,
                 inventory: crate::inventory::InventoryState::new(2),
                 quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
             },
             rx,
         )
@@ -1027,6 +1036,72 @@ mod tests {
         assert_eq!(r2, PickupResult::PickedUp);
         assert_eq!(w.players["alice"].inventory.count_of("wolf_hide"), 10);
         assert_eq!(w.loot_drops[&id].count, 3, "Rest bleibt");
+    }
+
+    #[test]
+    fn gold_pickup_marks_gold_dirty() {
+        let mut w = world_with(100);
+        let (p, _rx) = player("alice", 0.0, 0.0);
+        w.players.insert("alice".into(), p);
+        let id = drop(&mut w, LootKind::Gold, None, 50, Some("alice"));
+        let r = attempt_pickup(
+            &mut w,
+            "alice",
+            &groups(),
+            &id,
+            Instant::now(),
+            &LootCfg::default(),
+        );
+        assert_eq!(r, PickupResult::PickedUp);
+        let p = &w.players["alice"];
+        assert_eq!(p.gold, 50);
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Gold));
+        assert_eq!(p.persist_generation, 1);
+    }
+
+    #[test]
+    fn item_pickup_marks_inventory_dirty_when_items_are_accepted() {
+        let mut w = world_with(50);
+        let (p, _rx) = player("alice", 0.0, 0.0); // 2 Basis-Slots
+        w.players.insert("alice".into(), p);
+        let id = drop(&mut w, LootKind::Item, Some("wolf_hide"), 3, Some("alice"));
+        let r = attempt_pickup(
+            &mut w,
+            "alice",
+            &groups(),
+            &id,
+            Instant::now(),
+            &LootCfg::default(),
+        );
+        assert_eq!(r, PickupResult::PickedUp);
+        let p = &w.players["alice"];
+        assert_eq!(p.inventory.count_of("wolf_hide"), 3);
+        assert!(
+            p.dirty
+                .is_dirty(crate::persist::PersistComponent::Inventory)
+        );
+    }
+
+    #[test]
+    fn item_pickup_without_accepted_items_does_not_mark_dirty() {
+        // Voller Inventar → nichts aufgenommen → keine RAM-Mutation → kein
+        // Inventory-Dirty (der periodische Flush würde nichts Neues schreiben).
+        let mut w = world_with(1);
+        let (mut p, _rx) = player("alice", 0.0, 0.0);
+        let _ = p.inventory.try_add(&def("wolf_hide", 1), 2); // beide Slots voll
+        w.players.insert("alice".into(), p);
+        let id = drop(&mut w, LootKind::Item, Some("wolf_hide"), 3, Some("alice"));
+        let _ = attempt_pickup(
+            &mut w,
+            "alice",
+            &groups(),
+            &id,
+            Instant::now(),
+            &LootCfg::default(),
+        );
+        let p = &w.players["alice"];
+        assert!(!p.dirty.any());
+        assert_eq!(p.persist_generation, 0);
     }
 
     // ── Truhen ───────────────────────────────────────────────────────

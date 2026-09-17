@@ -255,6 +255,29 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
     }
 }
 
+/// Interne Transaktionshilfe: Position in eine laufende sqlx-/MariaDB-
+/// Transaktion schreiben. Spiegel-Baustein zu `write_progression`/
+/// `write_gold`/`write_inventory`/`write_quest_state`, damit der zentrale
+/// Player-Persistenzpfad (docs/Player_Persistenz.md §15) die Position
+/// zusammen mit den anderen dirty Komponenten in EINEM Transaktionskontext
+/// schreiben kann. Der bisherige Einzelaufrufer `save_position` bleibt
+/// unverändert bestehen.
+pub(crate) async fn write_position(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    x: f64,
+    y: f64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET pos_x = ?, pos_y = ? WHERE id = ?")
+        .bind(x)
+        .bind(y)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("savePosition {char_id}: {e}"))?;
+    Ok(())
+}
+
 /// Interne Transaktionshilfe: Progressionsstand in eine laufende sqlx-/
 /// MariaDB-Transaktion schreiben (docs/Erfahrung_und_Progressionssystem.md
 /// §§4/7/12). Wird vom bisherigen Einzel-Save (`save_progression`) und vom

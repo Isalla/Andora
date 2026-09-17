@@ -25,6 +25,7 @@ mod progression;
 mod quest;
 mod regen;
 mod parental;
+mod persist;
 mod protocol;
 mod world;
 

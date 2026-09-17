@@ -193,6 +193,8 @@ mod tests {
             mana_regen_carry: 0.0,
             inventory: Default::default(),
             quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
         };
         w.players.insert("a".into(), a);
 

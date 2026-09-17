@@ -292,6 +292,22 @@ impl From<crate::inventory::InventoryError> for QuestCompletionError {
     }
 }
 
+/// Fehlerkatalog der serverseitigen Questannahme (docs/Player_Persistenz.md
+/// §10): reine Quest-Ablehnungen (`Quest` — unveränderte Annahmevalidierung,
+/// keine neuen Quest-Semantiken) oder Persistenzfehler der unmittelbaren
+/// ACTIVE-Persistierung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestAcceptError {
+    Quest(QuestError),
+    Persistence(String),
+}
+
+impl From<QuestError> for QuestAcceptError {
+    fn from(e: QuestError) -> Self {
+        QuestAcceptError::Quest(e)
+    }
+}
+
 /// Individueller Fortschrittswert einer Objective (SPIELER-ZUSTAND).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CharacterObjectiveProgress {
@@ -463,6 +479,66 @@ impl QuestService {
             started_at_ms: Some(now),
             completed_at_ms: None,
         })
+    }
+
+    /// Questannahme mit unmittelbarer Persistenz (docs/Player_Persistenz.md
+    /// §10): der bedeutende AVAILABLE→ACTIVE-Übergang wird sofort in die
+    /// Tabelle `quests` geschrieben — Upsert über `write_quest_state` in
+    /// einer eigenen Transaktion. Ablauf:
+    ///
+    ///   1. unveränderte Annahmevalidierung über `accept` (keine neuen
+    ///      Quest-Semantiken, §10: keine Repeatable-/FAILED-/Abort-Ableitungen),
+    ///   2. sofortiges Schreiben des ACTIVE-Zustands in EINER Transaktion,
+    ///   3. state-Lieferung erst NACH erfolgreichem COMMIT.
+    ///
+    /// Der RAM-Übergang (Übernahme in `player.quests`) ist Sache des
+    /// Aufrufers und darf ausschließlich nach `Ok` erfolgen: Liefert diese
+    /// Methode `Err`, wurde nichts persistiert und der ACTIVE-Zustand darf
+    /// NICHT in den autoritativen RAM übernommen werden (kein still-
+    /// schweigender RAM-only-ACTIVE). Der normale Objective-Fortschritt
+    /// innerhalb ACTIVE läuft wie dokumentiert über Dirty-State/periodischen
+    /// Flush (§8) — ersetzt wird hier nur der AVAILABLE→ACTIVE-Übergang.
+    ///
+    /// Der periodische Flush (§8) ist KEIN Ersatz für diese Sofortregel.
+    /// Persistierbar sind ausschließlich Datenzustände; `encode_state_for_db`
+    /// lehnt Abgeleitete ab. Ein Gameplay-Aufrufer (Questdialog) folgt in
+    /// V1.2; in V1.1 existiert noch keine Annahme-Handler-Nachricht.
+    #[allow(dead_code)]
+    pub async fn accept_for_character(
+        &self,
+        db: &Pool<MySql>,
+        char_id: &str,
+        quest_id: &str,
+        current: Option<&CharacterQuestState>,
+        character_level: u32,
+        completed_quests: &HashSet<String>,
+    ) -> Result<CharacterQuestState, QuestAcceptError> {
+        // Schritt 1: unveränderte Annahmevalidierung.
+        let accepted = self.accept(quest_id, current, character_level, completed_quests)?;
+        // Schritt 2: unmittelbare Persistenz (Upsert ACTIVE) in einer
+        // Transaktion. HIDDEN/AVAILABLE sind abgeleitet und wären hier
+        // ohnehin kein ACTIVE-Ergebnis; `accept` liefert ausschließlich
+        // persistierbare Datenzustände.
+        let data = encode_state_for_db(&accepted).map_err(QuestAcceptError::Persistence)?;
+        let mut tx = db.begin().await.map_err(|e| {
+            QuestAcceptError::Persistence(format!("Annahme-Transaktion beginnen: {e}"))
+        })?;
+        crate::db::write_quest_state(
+            &mut tx,
+            char_id,
+            &accepted.quest_id,
+            accepted.state.db_value(),
+            &data,
+        )
+        .await
+        .map_err(QuestAcceptError::Persistence)?;
+        tx.commit().await.map_err(|e| {
+            QuestAcceptError::Persistence(format!("Annahme-Transaktion commit: {e}"))
+        })?;
+        // Schritt 3: erst nach erfolgreichem COMMIT steht der Aufrufer in der
+        // Pflicht, den Zustand zu übernehmen; bei jedem Fehler bleibt die
+        // Quest im RAM wie in der DB AVAILABLE.
+        Ok(accepted)
     }
 
     /// Verwaltet serverseitig bestätigten Fortschritt eines ACTIVE-Zustands
@@ -814,8 +890,10 @@ fn prerequisites_met(
 
 /// Nur Datenzustände (ACTIVE/COMPLETED/FAILED) sind persistierbar; die
 /// abgeleiteten Zustände HIDDEN/AVAILABLE (docs/Quest-System.md §27.5)
-/// werden bewusst ausgeschlossen.
-fn is_persistable(state: &CharacterQuestState) -> bool {
+/// werden bewusst ausgeschlossen. Wird vom `encode_state_for_db` und vom
+/// zentralen Player-Persistenzpfad (crate::persist) zum Filtern der
+/// Snapshot-Questzustände verwendet.
+pub(crate) fn is_persistable(state: &CharacterQuestState) -> bool {
     !matches!(state.state, QuestState::Hidden | QuestState::Available)
 }
 
@@ -823,10 +901,10 @@ fn is_persistable(state: &CharacterQuestState) -> bool {
 /// ausschließlich persistierbare Zustände (ACTIVE/COMPLETED/FAILED) als
 /// JSON-String. Abgeleitete Zustände (HIDDEN/AVAILABLE) werden abgelehnt,
 /// damit die Spalte `state` (Default 0) nie einen abgeleiteten Zustand
-/// erhält (§27.5). Wird von `persist_state` und dem atomaren
-/// Questabschluss (`complete_for_character`) verwendet, damit beide
-/// denselben `data`-String erzeugen.
-fn encode_state_for_db(state: &CharacterQuestState) -> Result<String, String> {
+/// erhält (§27.5). Wird von `persist_state`, dem atomaren Questabschluss
+/// (`complete_for_character`) und dem zentralen Player-Persistenzpfad
+/// (crate::persist) verwendet, damit alle denselben `data`-String erzeugen.
+pub(crate) fn encode_state_for_db(state: &CharacterQuestState) -> Result<String, String> {
     if !is_persistable(state) {
         return Err(format!(
             "Quest {}: Zustand {:?} ist abgeleitet und nicht persistierbar",
@@ -1555,6 +1633,28 @@ mod tests {
             assert_eq!(decoded.state, st);
             assert_eq!(decoded, state_with(st));
         }
+    }
+
+    #[test]
+    fn accepted_state_is_immediately_persistable() {
+        // docs/Player_Persistenz.md §10: AVAILABLE→ACTIVE wird unmittelbar
+        // persistent gespeichert. Der frisch angenommene Zustand muss daher
+        // ein persistierbarer Datenzustand sein und durch den gemeinsamen
+        // Encoder verlustfrei roundtrippen — Voraussetzung für
+        // `accept_for_character` (Schritt 2: ACTIVE-Upsert).
+        let svc = test_service();
+        let accepted = svc
+            .accept(QUEST_KILL, None, 1, &completed_set(&[]))
+            .unwrap();
+        assert_eq!(accepted.state, QuestState::Active);
+        assert!(is_persistable(&accepted));
+        assert_eq!(accepted.progress.len(), 1);
+        assert_eq!(accepted.progress[0].current, 0);
+        assert!(accepted.started_at_ms.is_some());
+        assert!(accepted.completed_at_ms.is_none());
+        let data = encode_state_for_db(&accepted).unwrap();
+        let decoded = decode_quest_data(QUEST_KILL, QuestState::Active, Some(&data)).unwrap();
+        assert_eq!(decoded, accepted);
     }
 
     #[test]

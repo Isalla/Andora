@@ -104,6 +104,20 @@ pub struct Player {
     /// der Tabelle `quests` (realm_state). HIDDEN/AVAILABLE sind abgeleitet
     /// (§27.5) und liegen nie hier.
     pub quests: BTreeMap<String, crate::quest::CharacterQuestState>,
+    /// Persistenz-Dirty-State (docs/Player_Persistenz.md §5/§6): genau ein
+    /// Flag je persistenter Komponente (Position, Progression, Gold,
+    /// Inventory, Quest-State/-Progress). Mutationen setzen das Flag über
+    /// `mark_dirty`; der zentrale Persistenzpfad (crate::persist) schreibt
+    /// nur dirty Komponenten und setzt die Flags nach erfolgreichem Save
+    /// zurück.
+    pub dirty: crate::persist::PersistDirty,
+    /// Persistenz-Generation (docs/Player_Persistenz.md §15 Race-Regel):
+    /// monoton steigender Zähler, der bei JEDER Mutation einer persistenzen
+    /// Komponente erhöht wird. Der zentrale Save snapshotted diese Generation
+    /// unter der World-Sperre und setzt Dirty-Flags NUR zurück, wenn sie beim
+    /// Abschluss des DB-Writes unverändert ist (kein neuerer RAM-Zustand
+    /// während des Writes entstanden).
+    pub persist_generation: u64,
 }
 
 impl Player {
@@ -130,6 +144,18 @@ impl Player {
         self.exp = prog.exp;
         self.free_attr_points = prog.free_attr_points;
         self.rested_pool = prog.rested_pool;
+        self.mark_dirty(crate::persist::PersistComponent::Progression);
+    }
+
+    /// Markiert eine persistente Spielerkomponente als dirty
+    /// (docs/Player_Persistenz.md §5/§6) und erhöht den Persistenz-Generation-
+    /// Zähler (§15 Race-Regel). Jede Mutation einer persistenzen Komponente
+    /// MUSS diese Methode aufrufen; nur so verhindert der zentrale
+    /// Persistenzpfad, dass ein während des DB-Writes entstandener neuerer
+    /// RAM-Zustand fälschlich als clean markiert wird.
+    pub fn mark_dirty(&mut self, component: crate::persist::PersistComponent) {
+        self.persist_generation = self.persist_generation.wrapping_add(1);
+        self.dirty.mark(component);
     }
 }
 
@@ -457,6 +483,8 @@ mod tests {
                 mana_regen_carry: 0.0,
                 inventory: Default::default(),
                 quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
             },
             rx,
         )
