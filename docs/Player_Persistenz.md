@@ -43,7 +43,7 @@ Für die Dauer einer laufenden Realm-Session gilt:
 
 > Der Realm-RAM ist die autoritative Live-Repräsentation des Spielerzustands.
 
-Ein Spieler besitzt während seiner Session einen kompletten, konsistenten persistenzen Abbildzustand im Realm-RAM (Spielposition, Progression, Gold, Inventar, Questzustand/-fortschritt). Das Spiellayer arbeitet ausschließlich gegen diese RAM-Repräsentation.
+Ein Spieler besitzt während seiner Session einen kompletten, konsistenten persistenzen Abbildzustand im Realm-RAM (Spielposition, Progression, Idia, Inventar, Questzustand/-fortschritt). Das Spiellayer arbeitet ausschließlich gegen diese RAM-Repräsentation.
 
 MariaDB ist kein „Live-Backup" des RAM: Nicht jede RAM-Änderung wird unmittelbar nach MariaDB geschrieben. Die DB hält den zuletzt erfolgreich persistierten Stand und wird über die in dieser Datei beschriebenen Flush-Wege aktualisiert.
 
@@ -86,7 +86,7 @@ Beispiele:
 ```text
 Questfortschritt:   12/100 → 13/100   (Persistenz: Quest-Persistenzpfad, Abschnitt 8)
 EXP-Zuwachs
-Goldänderungen
+Idia-Änderungen
 normale Inventaränderungen
 Positionsänderungen
 ```
@@ -106,7 +106,7 @@ Konzeptionell:
 ```text
 position dirty
 progression dirty
-gold dirty
+idia dirty
 inventory dirty
 quest state/progress dirty
 ```
@@ -326,7 +326,7 @@ konsistenten persistierbaren Zustand erfassen/snapshotten
 Beispiel:
 
 ```text
-Snapshot enthält Gold 20.
+Snapshot enthält Idia 20.
 Während des DB-Writes steigt RAM auf 21.
 ```
 
@@ -505,7 +505,7 @@ Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** d
 
 * Position
 * Progression / Level / EXP und zugehöriger normaler Fortschritt
-* Gold
+* Idia
 * persistentes Inventar / Equipment
 * dauerhafte Charakterattribute (z.B. Stärke, Weisheit, Glück, Ausdauer und weitere bestehende Charakterattribute; keine neuen Attribute erfinden)
 * aktuelle HP (aktuell vorhandener Wert, z.B. 437)
@@ -514,6 +514,31 @@ Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** d
 * persistenter Zustand der Fraktionswahl/-zugehörigkeit (`faction_transition`)
 * dauerhaft trainierte Weapon Skills
 * dauerhaft erlernte / freigeschaltete Abilities
+
+**Idia als absoluter Gesamtbestand:**
+
+Die normale Währung der Spielwelt Andora heißt verbindlich **Idia**. Der gespeicherte Idia-Wert ist IMMER der absolute aktuelle Gesamtbestand, den der Charakter zum Zeitpunkt des Snapshots besitzt.
+
+Beispiel:
+
+```text
+Charakter besitzt zunächst:   8.500 Idia
+Verkauf:                      +1.200 Idia
+Kauf:                           -300 Idia
+Aktueller Zustand:             9.400 Idia
+
+Snapshot:  idia = 9400
+```
+
+Der Snapshot enthält NICHT die Einzeländerungen `+1200`, `-300` oder irgendein anderes Delta. Recovery stellt den absoluten Snapshot-Zustand wieder her. Dadurch darf die wiederholte Verarbeitung eines Zustands niemals dazu führen, dass eine vorherige Idia-Änderung erneut addiert oder subtrahiert wird. Die bestehenden `persist_revision`-Regeln (Abschnitt 29) bleiben hierfür maßgeblich.
+
+**Gold → Idia (Legacy-Hinweis):**
+
+Die bestehende Implementierung verwendet derzeit an mehreren Stellen noch `gold`/`Gold`. Das ist Legacy-Terminologie des aktuellen Codes und NICHT die gewünschte dauerhafte Andora-Terminologie. Für die normale Spielerwährung gilt verbindlich der Name **Idia**.
+
+In einem späteren separaten Implementierungsauftrag soll die normale Spielerwährung projektweit konsistent auf Idia umgestellt werden, insbesondere `gold`/`Gold`, `PersistComponent::Gold`, entsprechende Rust-Felder, entsprechende MariaDB-Felder sowie Loot-/Persistence-Verwendungen. Dabei müssen alle tatsächlichen Vorkommen im Projekt geprüft werden, damit Dokumentation, Rust-Code, MariaDB-Schema, Persistence, Loot und Tests nicht unterschiedliche Namen für dieselbe Währung verwenden.
+
+Dieser Dokumentationsauftrag führt die Umbenennung NICHT durch (keine Code-Umbenennung, keine DB-Umbenennung, keine Migration). Es werden ausdrücklich keine Mehrfachwährungen (z.B. Kupfer/Silber/Gold/Platin) und keine zusätzliche Währung neben Idia eingeführt.
 
 **BERECHNET – NICHT ALS EIGENE PERSISTENTE WAHRHEIT:**
 
@@ -957,6 +982,34 @@ Für V1 gilt:
 * Ein Batch ist unabhängig von anderen Batches; innerhalb eines Batch sind die Player-Einträge unabhängig voneinander (Abschnitt 36).
 * Jeder Player-Eintrag trägt die eigene `persist_revision` seines Charakters; `batch_id` und `persist_revision` sind unabhängig voneinander (Abschnitt 29).
 * Jeder Player-Eintrag ist ein **vollständiger persistenter Player-Snapshot** (Abschnitt 23).
+
+**Keine Realm-ID im normalen Spool-Batch:**
+
+Jeder Realm besitzt seine eigene MariaDB und seinen eigenen Persistence-Spool. Deshalb muss ein normaler Stufe-B-Spool-Batch KEINE redundante Realm-ID als Bestandteil seines normalen Persistence-Datenmodells tragen. Die Zuordnung des normalen Spools zum Realm ist bereits durch die Realm-/Server-Umgebung eindeutig. Insbesondere darf eine Realm-ID NICHT als notwendiges Feld jedes Player-Snapshots vorgeschrieben werden.
+
+Das bedeutet NICHT, dass Realm-/Serverinformationen für die Fehleranalyse grundsätzlich verboten sind. Für Diagnose-/Supportmetadaten sowie für Quarantäne- oder Superseded-Metadaten dürfen Realm-/Serverinformationen weiterhin gespeichert werden, wenn sie zur Zuordnung und Analyse eines Problems sinnvoll sind (Abschnitt 32). Zu unterscheiden sind:
+
+* Normaler Persistence-Snapshot: → keine redundante Realm-ID erforderlich.
+* Diagnose-/Supportmetadaten: → Realm-/Serverkennung darf enthalten sein.
+
+Die bestehenden Quarantäne-/Support-Regeln (Abschnitte 31/32/33) bleiben unverändert gültig.
+
+**JSON-Schema als spätere technische Aufgabe:**
+
+Die fachlichen Inhalte des normalen Player-Snapshots sind verbindlich dokumentiert (Abschnitt 23). Das konkrete JSON-Datenmodell muss hier NICHT bis auf jedes Feld festgelegt werden; die spätere Implementierung darf die konkrete technische Struktur anhand der bestehenden Rust-Datenstrukturen sinnvoll gestalten. Verbindlich bleiben dabei insbesondere:
+
+* versioniertes Format (Abschnitt 25)
+* gemeinsamer Batch mit mehreren Player-Einträgen (dieser Abschnitt)
+* Player-Einträge unabhängig verarbeitbar (Abschnitt 36)
+* `persist_revision` pro Charakter (Abschnitt 29)
+* `captured_at` für Diagnose (Abschnitt 29)
+* vollständiger Zustand der dem normalen Player-Persistence-System zugeordneten Komponenten (Abschnitt 23)
+* Idia als absoluter Gesamtbestand (Abschnitt 23)
+* keine Quest State/Quest Progress-Daten im normalen Player-Snapshot (Abschnitt 8)
+* kein Inventory Buffer, keine Buyback History (Abschnitt 23)
+* keine notwendige Realm-ID im normalen Batch (dieser Abschnitt)
+
+Keine konkrete JSON-Feldverschachtelung wird hier festgelegt, wenn sie bisher nicht entschieden wurde (Abschnitt 42).
 
 Es gibt **keine** Zusammenführung/Kompression über mehrere Batches hinweg und kein verzögerungsfreies Neuschreiben älterer Batches (V1). Bereits geschriebene Batches bleiben unverändert erhalten, bis sie gemäß Abschnitt 36 erledigt sind.
 
