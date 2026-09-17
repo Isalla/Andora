@@ -142,6 +142,8 @@ Regeln:
 
 In der Stufe-B-Architektur verläuft der periodische Persistenzlauf über die lokale Persistence-Spool (Abschnitt 21): Der erfasste PersistSnapshot wird zunächst sicher lokal geschrieben und von dort mit dem aktuellen Persistenzcode nach MariaDB übertragen.
 
+Im Sinne dieses periodischen Pfads gilt eine Persistenz erst dann als dauerhaft gesichert, wenn der Snapshot sicher in der Spool liegt (Abschnitt 35). Der anschließende Transfer nach MariaDB ist davon fachlich entkoppelt (Abschnitt 38); die Erkennung von Races zwischen persistierenden Läufen erfolgt über die `persist_generation` (Abschnitt 39).
+
 ---
 
 ## 8. Questfortschritt
@@ -295,9 +297,7 @@ Snapshot enthält Quest 20/100.
 Während des DB-Writes steigt RAM auf 21/100.
 ```
 
-Nach erfolgreichem Write von 20/100 darf der neue 21/100-Zustand **nicht versehentlich als clean** markiert werden. Eine passende Technik (beispielsweise Generation Counter, Version oder Vergleich) muss diese Race-Bedingung verhindern.
-
-Die konkrete technische Lösung wird **nicht** in dieser Doku festgelegt (Abschnitt 20) – die Implementierung muss die Bedingung jedoch verhindern.
+Nach erfolgreichem Write von 20/100 darf der neue 21/100-Zustand **nicht versehentlich als clean** markiert werden. Diese Race-Bedingung wird über eine `persist_generation` des laufenden Realm-Prozesses erkannt und abgesichert (Abschnitt 20; Details und Verhalten in Abschnitt 39).
 
 Der dabei erfasste konsistente Zustand entspricht dem PersistSnapshot der Stufe-B-Spool-Architektur (Abschnitt 21).
 
@@ -381,15 +381,15 @@ Diese Datei ändert **keinen** Code und legt **keine** neuen Gameplayregeln fest
 Folgende Punkte werden im separaten Coding-/Architekturauftrag anhand der bestehenden Serverarchitektur entschieden und hier bewusst **nicht** festgelegt:
 
 * konkrete Rust-Dirty-Datenstruktur
-* Generation-Counter-Implementierung / Race-Lösung aus Abschnitt 15
+* konkrete `persist_generation`-Datenstruktur/-Implementierung (Mechanismus und Verhalten selbst sind festgelegt: Abschnitt 39)
 * exakte Save-Batchgröße
 * konkrete Retry-Zeiten
-* Parallelitätsgrad der DB-Saves
+* Parallelität/Worker-Anzahl der DB-Spool-Abarbeitung – für V1 ist **sequentielle** Verarbeitung festgelegt (Abschnitt 37)
 * genaue Shutdown-Timeouts
 * adaptive Intervalle (für V1 generell nicht vorgesehen, Abschnitt 18)
 * genaue Einbindung/Auswertung des `PLAYER_PERSIST_INTERVAL_MS`-Config-Keys in `config.rs`
 
-Zusätzlich für Stufe B (Spool-/Recovery-Architektur) bewusst offen gelassene Punkte: Abschnitt 34.
+Zusätzlich für Stufe B (Spool-/Recovery-Architektur) bewusst offen gelassene Punkte: Abschnitt 42.
 
 ---
 
@@ -415,6 +415,8 @@ Live Player-State im RAM
     -> Spool-Snapshot mit aktuellem Rust-Persistenzcode nach MariaDB übertragen
     -> nach erfolgreichem DB-COMMIT Spool-Datei löschen
 ```
+
+Ein Persistenzlauf erzeugt **einen** Spool-Snapshot (Batch), der die Einträge aller dirty Spieler enthält (Batch-Format: Abschnitt 35). Entfernt wird eine Spool-Datei erst, wenn **alle** darin enthaltenen Einträge erledigt (committet oder per Revision als erledigt befundet) bzw. einzeln in Quarantäne überführt wurden (Abschnitt 36).
 
 WICHTIG:
 
@@ -447,6 +449,8 @@ also 15 Minuten / 900 Sekunden.
 Das Intervall bleibt konfigurierbar.
 
 Für V1 gilt weiterhin **kein adaptives Persistenzintervall** (Abschnitt 18).
+
+Das Intervall steuert die **Erzeugung** periodischer Spool-Snapshots; die Übertragung nach MariaDB ist davon fachlich entkoppelt und erfolgt unabhängig vom Persistenzintervall (Abschnitt 38). Zu einem Zeitpunkt wird höchstens **ein** Batch erzeugt.
 
 ---
 
@@ -497,7 +501,7 @@ Snapshot zunächst in temporäre Datei schreiben
 
 Eine unvollständig geschriebene Datei darf nicht als gültiger Recovery-Snapshot behandelt werden.
 
-Ein endgültiges Serialisierungsformat/API wird hier nicht festgelegt (Abschnitt 34).
+Für V1 wird ein **menschenlesbares, versioniertes JSON-Format** festgelegt. Das konkrete Schema (Feldnamen, Struktur) wird hier nicht festgelegt (Abschnitt 42).
 
 Architekturentscheidung:
 
@@ -512,6 +516,8 @@ Ein Fehler kann gerade im alten SQL-/Persistenzcode liegen. Nach einem Fix soll 
 Das Datenformat muss versionierbar sein, z.B. über eine `format_version`.
 
 Unbekannte/nicht unterstützte Formatversionen dürfen nicht blind eingespielt werden.
+
+Das Safe-Write-Prinzip dieses Abschnitts gilt für jede Spool-Datei (Batch) gleichermaßen: Eine temporär geschriebene Datei gilt erst nach der atomaren Umbenennung als gültig (Batch-Datei und Durability: Abschnitt 35).
 
 ---
 
@@ -551,7 +557,11 @@ Der bestehende Webserver soll später mindestens darstellen können:
 * Gesamtgröße der ausstehenden Spool-Daten
 * Anzahl offener Quarantänefälle
 * Anzahl archivierter Quarantänefälle der letzten 30 Tage
+* DB-Latenz für Spool-/Persistenz-Übertragungen
+* Metriken zur Batch-Erstellung und Spool-Abarbeitung (Batch-Größe, Dauer, Fehler)
 * soweit sinnvoll Fehlergruppen/Kategorien
+
+Systemnahe Metriken (z.B. Speicherplatz der Spool, Schreib-/Leselatenzen) werden über den bestehenden **Andora-Daemon** auf Host-Ebene (ohne Root-Zugriff) gesammelt. Für die DB-Latenzmetriken ist ein eigener DB-Monitoring-Zugang vorzusehen.
 
 Später soll eine Admin-App diese Server-/Realm-Zustände übernehmen und Push-Benachrichtigungen erzeugen können.
 
@@ -590,29 +600,32 @@ Wenn Snapshots vorhanden:
     -> erfolgreich erledigte Spool-Snapshots entfernen
 ```
 
+Die Snapshots werden in Reihenfolge verarbeitet, **ältester zuerst** (Batch-Sortierung: Abschnitt 36).
+
 Erst wenn alle normal verarbeitbaren Spool-Snapshots erledigt oder ordnungsgemäß aus der aktiven Recovery in Quarantäne überführt wurden, darf der Realm **READY** werden.
 
 Monitoring/Administration soll während **RECOVERING** weiterhin verfügbar sein.
 
 ---
 
-## 29. Stufe B – Neuerer Zustand gewinnt
+## 29. Stufe B – Neuerer Zustand gewinnt / persist_revision
 
-Jede DB-Persistenz soll einen serverseitig erzeugten zeitlichen bzw. versionierten Persistenzbezug besitzen, sodass beim Recovery erkannt werden kann, ob der Spool-Zustand oder der vorhandene DB-Zustand neuer ist.
+Jede DB-Persistenz besitzt einen serverseitig erzeugten, monoton aufsteigenden Persistenzbezug, die `persist_revision`. Beim Recovery wird anhand dieser Revision erkannt, ob der Spool-Zustand oder der vorhandene DB-Zustand neuer ist.
 
 Der Client darf diesen Wert NICHT bestimmen.
 
-Der Dateiname eines Snapshots darf einen lesbaren Zeitstempel enthalten, ist aber NICHT alleinige autoritative Grundlage für die Recovery-Entscheidung.
+Die `persist_revision` ist die **alleinige autoritative Grundlage** für die Recovery-Entscheidung. Der Zeitstempel `captured_at` wird nur zu Diagnose-/Nachvollziehbarkeitszwecken geführt, NICHT als Vergleichsgrundlage.
 
-Die entscheidenden Metadaten müssen Bestandteil des Snapshot-/Persistenzmodells sein.
+Der Dateiname eines Snapshots darf einen lesbaren Zeitstempel enthalten, ist aber NICHT autoritative Grundlage für die Recovery-Entscheidung.
 
-Konkrete Spaltenbezeichnungen oder DB-Migrationen werden hier nicht erfunden (Abschnitt 34).
+Konkrete Spaltenbezeichnungen, DB-Migrationen und die genaue technische Erzeugung der Revision (z.B. zentral vergebene Sequenz) werden hier nicht festgelegt (Abschnitt 42).
 
-Fachliche Regel:
+Fachliche Regel (Vergleich gegen den in MariaDB gespeicherten Stand):
 
-* Spool neuer als DB → Recovery erforderlich.
-* DB gleich oder neuer → Snapshot darf als bereits überholt/erledigt behandelt werden.
-* unklarer Zustand → nicht blind überschreiben.
+* DB-Revision **kleiner** als Snapshot-Revision → Recovery erforderlich: Snapshot einspielen.
+* DB-Revision **gleich** Snapshot-Revision → Snapshot ist bereits abgedeckt → als erledigt behandeln, nicht erneut einspielen.
+* DB-Revision **größer** als Snapshot-Revision → Snapshot ist überholt → als erledigt behandeln, nicht überschreiben.
+* fehlender/unlesbarer Revisionszustand → nicht blind überschreiben; der Eintrag bleibt lokal erhalten und wird nicht automatisch als erledigt behandelt.
 
 ---
 
@@ -630,6 +643,8 @@ Die detaillierte Shutdown-Implementierung bleibt einer späteren Stufe vorbehalt
 
 Die Final-Save-Reihenfolge aus Abschnitt 12 bleibt unverändert gültig.
 
+Gelingt beim Shutdown **weder** die DB-Übertragung **noch** die lokale Spool-Sicherung, wird der Vorgang NICHT als erfolgreich persistiert gemeldet: Der Zustand ist dann nicht dauerhaft gesichert und als schwerwiegender Persistence-Fehler zu behandeln (Abschnitt 41).
+
 ---
 
 ## 31. Stufe B – Irreparabel beschädigte Snapshots / Quarantäne
@@ -641,21 +656,25 @@ Verzeichnissemantik:
 ```text
 persistence/
 ├── spool/
-│   └── ausstehende, noch nach MariaDB zu übertragende Snapshots
+│   └── ausstehende, noch nach MariaDB zu übertragende Batch-Dateien (ein Batch pro Persistenzlauf)
 │
 └── quarantine/
-    ├── offene, noch nicht untersuchte fehlerhafte Snapshots
+    ├── offene, noch nicht untersuchte fehlerhafte Einzeleinträge aus Batches
     │
     └── archive/
         └── bereits untersuchte/bearbeitete Quarantänefälle
 ```
 
-Kann ein Snapshot nicht sicher wiederhergestellt werden:
+Die Verzeichnisangaben sind relativ gemeint; absolute Pfade und konkrete Dateinamen werden nicht festgelegt (Abschnitt 42).
 
-* aus aktiver Spool in `quarantine/` verschieben
+Kann ein Snapshot-/Einzeleintrag nicht sicher wiederhergestellt werden:
+
+* betroffenen Eintrag aus aktiver Spool in `quarantine/` überführen
 * Originaldaten für Analyse erhalten
 * Fehler und relevante Metadaten protokollieren
 * Recovery mit anderen Snapshots fortsetzen
+
+Ein fehlerhafter Einzeleintrag wird **einzeln** aus seinem Batch isoliert; die übrigen Einträge desselben Batch bleiben weiter verarbeitbar, und die Batch-Datei wird erst entfernt, wenn alle Einträge erledigt sind (Einzelsemantik: Abschnitt 36).
 
 Wenn alle übrigen verarbeitbaren Snapshots erledigt sind:
 
@@ -726,22 +745,105 @@ Dadurch bleiben ungefähr 30 Tage bereits bearbeiteter Fehlerfälle für Statist
 
 ---
 
-## 34. Stufe B – Bewusst offen gelassene / nicht festgelegte Punkte
+## 35. Stufe B – Batch-Format / eine Datei pro Persistenzlauf
+
+Ein Persistenzlauf erzeugt **eine** Spool-Datei (Batch), die die PersistSnapshots aller im Lauf erfassten dirty Spieler enthält. Es gibt bewusst **keine** getrennten Dateien pro Spieler.
+
+Für V1 gilt:
+
+* Format: **menschenlesbares, versioniertes JSON** (Abschnitt 25).
+* Jeder Batch besitzt eine eigene `format_version`; das konkrete Schema (Feldnamen, Struktur) bleibt offen (Abschnitt 42).
+* Ein Batch ist unabhängig von anderen Batches; innerhalb eines Batch sind die Player-Einträge unabhängig voneinander (Abschnitt 36).
+
+Es gibt **keine** Zusammenführung/Kompression über mehrere Batches hinweg und kein verzögerungsfreies Neuschreiben älterer Batches (V1). Bereits geschriebene Batches bleiben unverändert erhalten, bis sie gemäß Abschnitt 36 erledigt sind.
+
+Durability: Für jede Batch-Datei gilt das Safe-Write-Prinzip aus Abschnitt 25 – erst nach vollständigem Schreiben, dauerhafter Sicherung (flush/fsync) und atomarer Umbenennung gilt die Datei als gültig.
+
+## 36. Stufe B – Batch-Verarbeitung / Reihenfolge und Einzelsemantik
+
+Ausstehende Batches werden in Reihenfolge verarbeitet, **ältester zuerst** (Abschnitt 28). Die `persist_revision` verhindert dabei das Überschreiben eines neueren DB-Stands.
+
+Eine Batch-Datei wird erst dann entfernt, wenn **alle** ihre Player-Einträge erledigt sind. Ein Eintrag gilt als erledigt, wenn:
+
+* (a) sein Snapshot erfolgreich mit dem aktuellen Persistenzcode committet wurde, oder
+* (b) er per Revision als gleich/überholt befundet wurde (Abschnitt 29), oder
+* (c) er einzeln in Quarantäne überführt wurde (Abschnitt 31).
+
+Die Player-Einträge eines Batch werden **unabhängig** voneinander behandelt: Ein fehlerhafter oder in Quarantäne überführter Eintrag blockiert die übrigen Einträge desselben Batch nicht. Fehlerhafte Einzeleinträge werden einzeln isoliert; die Batch-Datei bleibt solange erhalten, bis alle Einträge gemäß (a)–(c) erledigt sind.
+
+## 37. Stufe B – Sequentielle Verarbeitung (V1)
+
+Für V1 ist festgelegt: Die Abarbeitung der Spool-Batches nach MariaDB erfolgt **sequenziell** in einem einzigen Durchlauf – keine parallelen Worker, kein Pool.
+
+Eine spätere Parallelisierung bleibt möglich und wird in Abschnitt 42 als offener Punkt geführt.
+
+## 38. Stufe B – Entkopplung von Spool und MariaDB
+
+Die lokale Spool-Sicherung und der Transfer nach MariaDB sind fachlich **entkoppelt**:
+
+* Die Erzeugung eines Batch ist unabhängig vom aktuellen MariaDB-Zustand.
+* Zu einem Zeitpunkt wird höchstens **ein** Batch erzeugt (Abschnitt 22).
+* Schlägt der MariaDB-Transfer fehl, entsteht der Rückstau in der **Spool** (bereits dauerhaft gesicherte Batch-Dateien), nicht im RAM. Neue Änderungen werden in nachfolgenden Läufen normal erfasst und als weitere Batches gesichert.
+
+Dadurch bleibt die periodische Persistenz funktionsfähig, auch wenn MariaDB längere Zeit nicht erreichbar ist.
+
+## 39. Stufe B – RAM-/Dirty-Verhalten und persist_generation
+
+Die Race-Lösung aus Abschnitt 15 wird über eine serverseitig erzeugte, monoton aufsteigende `persist_generation` umgesetzt (Abschnitt 20):
+
+* Die Generation wird beim Erfassen des PersistSnapshots mitgeführt und ist Bestandteil des Snapshot-/Batch-Modells (serverseitig, nie client-bestimmt).
+* Beim Verarbeiten kann so erkannt werden, ob der Snapshot noch aus dem aktuellen Lauf/Lebenszyklus stammt und ob zwischen Snapshot und Abschluss entstandene Änderungen vorliegen (Race-Erkennung gemäß Abschnitt 15).
+
+Dirty-Verhalten:
+
+* Dirty-Bits werden erst nach **dauerhafter** Spool-Sicherung des betreffenden PersistSnapshots bereinigt, also nach gültigem Batch-Schreiben (Abschnitt 35; Abschnitt 7).
+* Die temporäre RAM-Kopie des PersistSnapshots kann nach dauerhafter Spool-Sicherung freigegeben werden (Abschnitt 21).
+* Die dauerhafte Übertragung nach MariaDB ist davon getrennt; erst nach erfolgreichem DB-COMMIT wird die Batch-Datei entfernt (Abschnitt 36).
+
+## 40. Stufe B – Verhalten bei Spool-Schreibfehlern
+
+Schlägt das (dauerhafte) Sichern eines Batch in die Spool fehl:
+
+* Die Dirty-Bits werden **nicht** bereinigt – der Zustand bleibt dirty und für einen späteren Retry verfügbar (Abschnitt 7).
+* Der Persistence-Zustand des betroffenen Servers/Realms wird **DEGRADED** (Abschnitt 26).
+* Es werden **keine** gültigen bereits geschriebenen Spool-Dateien gelöscht.
+* Temporär geschriebene Dateien gelten **niemals** als gültig (Abschnitt 25).
+
+Der Realm läuft weiter; ein späterer normaler Persistenzlauf versucht erneut.
+
+## 41. Stufe B – Graceful Shutdown bei beidseitigem Ausfall
+
+Beim Graceful Shutdown sind zwei Persistierungen zu unterscheiden:
+
+* MariaDB-Transfer erfolgreich → Zustand ist endgültig in MariaDB gesichert.
+* MariaDB-Transfer fehlgeschlagen, aber lokale Spool-Sicherung gelungen → Zustand bleibt lokal für die spätere Recovery erhalten (Abschnitt 30).
+
+Schlagen beim Shutdown **beide** Wege fehl (weder MariaDB-COMMIT noch lokale Spool-Sicherung), gilt:
+
+* Der Vorgang wird **NICHT** als erfolgreich persistiert gemeldet.
+* Der Zustand ist nicht dauerhaft gesichert – dies ist als **schwerwiegender Persistence-Fehler** zu behandeln und zu protokollieren.
+* Ein vermeintlich erfolgreicher Shutdown, dessen Daten weder in MariaDB noch in der Spool enthalten sind, wäre ein Fehler.
+
+---
+
+## 42. Stufe B – Bewusst offen gelassene / nicht festgelegte Punkte
 
 Ohne vorhandene Entscheidung werden NICHT festgelegt:
 
-* endgültiges JSON-/Binärschema
+* konkretes JSON-Schema (Feldnamen, Struktur) – das Format selbst ist versioniertes menschenlesbares JSON (Abschnitt 35)
 * konkrete Dateinamen
+* absolute Spool-/Quarantäne-Pfade (die Struktur selbst ist relativ festgelegt: Abschnitt 31)
 * konkrete DB-Spaltennamen
 * konkrete DB-Migration
 * maximale Spool-Größe
 * maximale Anzahl Spool-Dateien
 * konkrete Push-Technik/App-Technik
 * konkrete HTTP/API-Endpunkte
-* Parallelität/Worker-Anzahl der DB-Spool-Abarbeitung
+* spätere Parallelisierung der DB-Spool-Abarbeitung – für V1 ist **sequenzielle** Verarbeitung festgelegt (Abschnitt 37)
 * Snapshot-Kompression
-* Zusammenführen/Ersetzen mehrerer Snapshots desselben Spielers
+* Zusammenführen/Kompression über mehrere Batches hinweg – innerhalb eines Batch gibt es keine Zusammenführung (Abschnitt 35)
 * exakte Retry-Zeitpunkte außerhalb des normalen Persistenzzyklus
+* genaue technische Erzeugung der `persist_revision` (z.B. zentrale Sequenz) – der Mechanismus selbst ist festgelegt (Abschnitt 29)
 * neue Gameplay-Regeln
 * Quest V1.2b
 * neue Item-/Loot-Regeln
