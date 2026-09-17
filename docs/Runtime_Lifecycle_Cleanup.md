@@ -10,7 +10,7 @@ Sie ergänzt die Persistenzstrategie (`Player_Persistenz.md`) um die bewusst get
 
 Autoritativ bleiben die bestehenden Regeln:
 
-* `Player_Persistenz.md` – Dirty-State, periodischer Player-Save, finaler Disconnect-/Shutdown-Save
+* `Player_Persistenz.md` – Dirty-State, periodischer Player-Save (Stufe B: lokale Persistence-Spool-/Recovery-Schicht), finaler Disconnect-/Shutdown-Save
 * `Datenbank_Architektur.md` – Datenbankpersistenz (`realm_state_<realm>`)
 * `Deployment_Betriebsarchitektur.md` – insbesondere §7 Realm-Shutdown im Update-Ablauf
 * `inventory_system.md`, `Quest-System.md` – systembezogene Persistenz-/Lifecycle-Regeln der jeweiligen Systeme
@@ -43,6 +43,8 @@ Beispiel:
 
 ```text
 RAM-Zustand
+→ lokale Persistence-Spool (normale periodische Player-Persistenz,
+  `Player_Persistenz.md` Abschnitt 21)
 → MariaDB
 ```
 

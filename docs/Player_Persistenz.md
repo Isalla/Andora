@@ -2,7 +2,9 @@
 
 ## 1. Status
 
-**Dokumentation (Strategie, noch nicht vollständig implementiert).**
+**Player-Persistenz Stufe A (Dirty-State, periodischer Player-Save, Disconnect-/Shutdown-Flush) ist implementiert und abgeschlossen.**
+
+**Die Spool-/Recovery-Architektur (Stufe B) ist in dieser Datei dokumentiert, aber noch nicht implementiert.**
 
 Diese Datei definiert die allgemeine Persistenzstrategie für laufende Spielerzustände des Realm-Servers (`src/realm-rs`).
 
@@ -26,7 +28,7 @@ Grundprinzip:
 
 * **RAM** ist während einer laufenden Realm-Session die autoritative Live-Repräsentation des Spielerzustands.
 * Normale persistente Änderungen werden als **dirty** markiert.
-* Dirty-Zustände werden **periodisch nach MariaDB** geschrieben.
+* Dirty-Zustände werden **periodisch über eine lokale Persistence-Spool** (Stufe B, Abschnitt 21) **nach MariaDB** geschrieben.
 * **Kritische/irreversible Transaktionen** werden weiterhin **sofort** persistiert.
 * **Disconnect** führt zu einem finalen Player-Save.
 * **Graceful Shutdown** führt zu einem finalen Save der verbundenen Spieler.
@@ -138,6 +140,8 @@ Regeln:
 * Nach **erfolgreicher** Persistierung darf der entsprechende Dirty-Zustand **zurückgesetzt** werden.
 * Bei **fehlgeschlagener** Persistierung gilt der Zustand **nicht als sauber**: Er bleibt dirty und muss für einen späteren Retry verfügbar bleiben (Abschnitt 16).
 
+In der Stufe-B-Architektur verläuft der periodische Persistenzlauf über die lokale Persistence-Spool (Abschnitt 21): Der erfasste PersistSnapshot wird zunächst sicher lokal geschrieben und von dort mit dem aktuellen Persistenzcode nach MariaDB übertragen.
+
 ---
 
 ## 8. Questfortschritt
@@ -248,6 +252,8 @@ Es wird nicht garantiert, dass der Verlust exakt höchstens 900 Sekunden beträg
 
 Kritische, bereits erfolgreich committete Transaktionen bleiben davon unberührt (Abschnitt 9).
 
+Bereits sicher in der Persistence-Spool gesicherte Snapshots überstehen einen Prozess-/Host-Crash und werden beim nächsten Realm-Start im Rahmen der Recovery verarbeitet (Abschnitt 28).
+
 ---
 
 ## 14. DB-Last
@@ -293,6 +299,8 @@ Nach erfolgreichem Write von 20/100 darf der neue 21/100-Zustand **nicht versehe
 
 Die konkrete technische Lösung wird **nicht** in dieser Doku festgelegt (Abschnitt 20) – die Implementierung muss die Bedingung jedoch verhindern.
 
+Der dabei erfasste konsistente Zustand entspricht dem PersistSnapshot der Stufe-B-Spool-Architektur (Abschnitt 21).
+
 ---
 
 ## 16. Save-Fehler
@@ -308,6 +316,8 @@ Konkrete Retry-Abstände/-Anzahlen werden **nicht** festgelegt.
 
 Für Graceful-Shutdown-Fehler darf später eine eigene begrenzte Retry-/Shutdown-Regel definiert werden.
 
+In der Stufe-B-Architektur bleibt der Spool-Snapshot bei fehlgeschlagener DB-Übertragung lokal erhalten; der Realm läuft weiter und sein Persistence-Zustand wird DEGRADED (Details: Abschnitt 26).
+
 ---
 
 ## 17. Monitoring
@@ -321,6 +331,8 @@ Die Architektur soll später mindestens beobachtbar machen können:
 * Dirty-Zustände bzw. Backlog, soweit sinnvoll
 
 Es wird **keine konkrete Dashboard-UI** in dieser Datei entworfen. Die vorhandene Monitoring-Schnittstelle (`monitoring_web_panel.md`, `/status`-Metriken) ist der natürliche Anzeige-Ort; die konkreten Metrikfelder legt der Coding-Auftrag fest.
+
+Die Spool-/Recovery-spezifischen Beobachtungsanforderungen der Stufe B (Persistence-Status auf Server-/Realm-Ebene, ausstehende Spool-Snapshots, Quarantänefälle, Push-Konzept) sind in Abschnitt 27 dokumentiert.
 
 ---
 
@@ -376,3 +388,362 @@ Folgende Punkte werden im separaten Coding-/Architekturauftrag anhand der besteh
 * genaue Shutdown-Timeouts
 * adaptive Intervalle (für V1 generell nicht vorgesehen, Abschnitt 18)
 * genaue Einbindung/Auswertung des `PLAYER_PERSIST_INTERVAL_MS`-Config-Keys in `config.rs`
+
+Zusätzlich für Stufe B (Spool-/Recovery-Architektur) bewusst offen gelassene Punkte: Abschnitt 34.
+
+---
+
+## 21. Stufe B – Spool-/Recovery-Architektur (Grundarchitektur)
+
+**Status:** Architektur dokumentiert; Implementierung in einem separaten Coding-Auftrag.
+
+Die bisherige direkte Vorstellung
+
+```text
+RAM -> MariaDB
+```
+
+wird für die normale periodische Player-Persistenz um eine lokale, dauerhafte Spool-Schicht erweitert:
+
+```text
+Live Player-State im RAM
+    -> dirty
+    -> periodischer Persistenzlauf
+    -> PersistSnapshot erzeugen
+    -> Snapshot sicher lokal in Persistence-Spool schreiben
+    -> RAM-Kopie des PersistSnapshots kann danach freigegeben werden
+    -> Spool-Snapshot mit aktuellem Rust-Persistenzcode nach MariaDB übertragen
+    -> nach erfolgreichem DB-COMMIT Spool-Datei löschen
+```
+
+WICHTIG:
+
+Der aktive Player-State selbst bleibt selbstverständlich im RAM, solange der Spieler online ist.
+
+Freigegeben werden kann nur die zusätzliche Snapshot-Kopie, nachdem diese sicher auf dem lokalen Datenträger liegt.
+
+Die lokale Spool ist:
+
+* keine zweite Live-Datenbank,
+* kein Ersatz für MariaDB,
+* kein zweiter autoritativer Player-State.
+
+Sie ist eine dauerhafte Übergabe-/Recovery-Schicht zwischen RAM und MariaDB.
+
+MariaDB bleibt der endgültige persistente Datenspeicher (Abschnitt 3; `Datenbank_Architektur.md`). RAM bleibt während der laufenden Realm-Session die autoritative Live-Repräsentation (Absatz „Grundprinzip" in Abschnitt 2).
+
+---
+
+## 22. Stufe B – Persistenzintervall
+
+Der bereits dokumentierte Standard (Abschnitt 4) bleibt gültig:
+
+```text
+PLAYER_PERSIST_INTERVAL_MS=900000
+```
+
+also 15 Minuten / 900 Sekunden.
+
+Das Intervall bleibt konfigurierbar.
+
+Für V1 gilt weiterhin **kein adaptives Persistenzintervall** (Abschnitt 18).
+
+---
+
+## 23. Stufe B – Für die Spool vorgesehene normale Dirty-Zustände
+
+Die Spool ist für normale persistierbare Player-Zustände vorgesehen, insbesondere:
+
+* Position
+* Progression
+* Gold
+* persistentes Inventar
+* Quest-State / normaler Quest-Fortschritt
+
+Die bestehenden Regeln zu komponentenbezogenem Dirty-State und zu Generationen bleiben bestehen (Abschnitte 6 und 15).
+
+Der **Inventory Buffer** bleibt runtime-only und darf NICHT persistiert werden (Abschnitt 6; `inventory_system.md`).
+
+Die **Buyback History** bleibt session-only und gehört NICHT in diese Player-Persistenz.
+
+---
+
+## 24. Stufe B – Kritische / atomare Transaktionen
+
+Die Spool ersetzt die bestehenden Sofort-/Atomar-Regeln NICHT.
+
+Quest Acceptance:
+→ unmittelbare Persistenz entsprechend der bestehenden Architektur (Abschnitt 10).
+
+Quest Completion:
+→ bestehende atomare MariaDB-Transaktion bleibt unverändert (Abschnitt 9; `Quest-System.md` §27.26).
+
+Die lokale periodische Spool darf nicht dazu führen, dass ein kritischer Vorgang als erfolgreich gilt, obwohl seine vorgeschriebene unmittelbare DB-Transaktion nicht erfolgreich abgeschlossen wurde.
+
+Es werden keine neuen kritischen Transaktionstypen erfunden.
+
+---
+
+## 25. Stufe B – Sicheres Schreiben der Spool-Datei
+
+Prinzip:
+
+```text
+Snapshot zunächst in temporäre Datei schreiben
+-> vollständiges Schreiben sicherstellen
+-> flush/fsync bzw. äquivalente dauerhafte Sicherung vorsehen
+-> danach atomare Umbenennung in die endgültige Spool-Datei
+```
+
+Eine unvollständig geschriebene Datei darf nicht als gültiger Recovery-Snapshot behandelt werden.
+
+Ein endgültiges Serialisierungsformat/API wird hier nicht festgelegt (Abschnitt 34).
+
+Architekturentscheidung:
+
+> Emergency-/Spool-Persistenz speichert DATEN, nicht fehlgeschlagene SQL-Befehle.
+
+Kein `backup.sql`-Konzept.
+
+Grund:
+
+Ein Fehler kann gerade im alten SQL-/Persistenzcode liegen. Nach einem Fix soll ein neuer Server die gespeicherten Daten mit dem aktuellen, reparierten Rust-Persistenzcode erneut nach MariaDB übertragen können.
+
+Das Datenformat muss versionierbar sein, z.B. über eine `format_version`.
+
+Unbekannte/nicht unterstützte Formatversionen dürfen nicht blind eingespielt werden.
+
+---
+
+## 26. Stufe B – DB-Fehler während des normalen Betriebs
+
+Wenn die Übertragung eines Spool-Snapshots nach MariaDB fehlschlägt:
+
+* Realm läuft weiter.
+* Snapshot bleibt lokal erhalten.
+* kein aggressiver unmittelbarer Retry-Loop.
+* Fehler wird protokolliert.
+* Persistence-Zustand des betroffenen Servers/Realms wird **DEGRADED**.
+* spätere reguläre Persistenz-/Recovery-Versuche dürfen erneut versuchen, ausstehende Daten zu übertragen.
+* fehlgeschlagene Snapshots dürfen nicht allein zur Speicherplatzbereinigung verworfen werden.
+
+WICHTIG:
+
+Die Warnung gilt auf **SERVER-/REALM-EBENE**, nicht pro Spieler.
+
+200 betroffene Player-Snapshots aufgrund eines DB-Ausfalls erzeugen einen Persistence-Störfall des Servers, nicht 200 einzelne Administratorwarnungen.
+
+Die bisherige Save-Fehler-Semantik (Abschnitt 16) bleibt gültig und wird hier um die Spool-Persistenz ergänzt.
+
+---
+
+## 27. Stufe B – Monitoring-Vorbereitung
+
+Keine Monitoring-Implementierung in der Stufe B. Dokumentiert werden hier die Anforderungen für eine spätere Monitoring-Stufe.
+
+Der bestehende Webserver soll später mindestens darstellen können:
+
+* Persistence-Status, z.B. **HEALTHY / DEGRADED / RECOVERING**
+* letzter erfolgreicher DB-Persistenzzeitpunkt
+* Zeitpunkt/Beginn eines anhaltenden Fehlers
+* Anzahl ausstehender Spool-Snapshots
+* Alter des ältesten ausstehenden Snapshots
+* Gesamtgröße der ausstehenden Spool-Daten
+* Anzahl offener Quarantänefälle
+* Anzahl archivierter Quarantänefälle der letzten 30 Tage
+* soweit sinnvoll Fehlergruppen/Kategorien
+
+Später soll eine Admin-App diese Server-/Realm-Zustände übernehmen und Push-Benachrichtigungen erzeugen können.
+
+Push-Konzept:
+
+* eine Meldung pro betroffenem Server/Realm-Störfall
+* keine Meldung pro betroffenem Spieler
+* Recovery/Entwarnung soll ebenfalls möglich sein
+
+Die Admin-App selbst gehört nicht zur Stufe-B-Implementierung.
+
+---
+
+## 28. Stufe B – Serverstart und Recovery
+
+Beim Realm-Start muss die Persistence-Spool geprüft werden, bevor normaler Spielbetrieb freigegeben wird.
+
+Grundablauf:
+
+```text
+Realm startet
+    -> MariaDB-Verbindung herstellen
+    -> Persistence-Spool prüfen
+
+Wenn keine ausstehenden Snapshots:
+    -> normaler Start / READY
+
+Wenn Snapshots vorhanden:
+    -> Realm-Zustand RECOVERING
+    -> normale Spieler-Logins zunächst blockiert
+    -> Snapshots validieren
+    -> Persistenzstand mit MariaDB vergleichen
+    -> erforderliche Snapshots mit dem AKTUELLEN Rust-Persistenzcode
+       nach MariaDB übertragen
+    -> erfolgreiche DB-COMMITs bestätigen
+    -> erfolgreich erledigte Spool-Snapshots entfernen
+```
+
+Erst wenn alle normal verarbeitbaren Spool-Snapshots erledigt oder ordnungsgemäß aus der aktiven Recovery in Quarantäne überführt wurden, darf der Realm **READY** werden.
+
+Monitoring/Administration soll während **RECOVERING** weiterhin verfügbar sein.
+
+---
+
+## 29. Stufe B – Neuerer Zustand gewinnt
+
+Jede DB-Persistenz soll einen serverseitig erzeugten zeitlichen bzw. versionierten Persistenzbezug besitzen, sodass beim Recovery erkannt werden kann, ob der Spool-Zustand oder der vorhandene DB-Zustand neuer ist.
+
+Der Client darf diesen Wert NICHT bestimmen.
+
+Der Dateiname eines Snapshots darf einen lesbaren Zeitstempel enthalten, ist aber NICHT alleinige autoritative Grundlage für die Recovery-Entscheidung.
+
+Die entscheidenden Metadaten müssen Bestandteil des Snapshot-/Persistenzmodells sein.
+
+Konkrete Spaltenbezeichnungen oder DB-Migrationen werden hier nicht erfunden (Abschnitt 34).
+
+Fachliche Regel:
+
+* Spool neuer als DB → Recovery erforderlich.
+* DB gleich oder neuer → Snapshot darf als bereits überholt/erledigt behandelt werden.
+* unklarer Zustand → nicht blind überschreiben.
+
+---
+
+## 30. Stufe B – Graceful Shutdown und Spool
+
+Die Spool dient gleichzeitig als Sicherheitsmechanismus beim kontrollierten Shutdown.
+
+Wenn ein finaler Player-Zustand beim Shutdown nicht erfolgreich nach MariaDB übertragen werden kann, muss der noch nicht dauerhaft in MariaDB gesicherte Zustand lokal in der Persistence-Spool erhalten bleiben.
+
+Dadurch ist KEIN separates `backup.sql`-System erforderlich (`Datenbank_Architektur.md` Abschnitt 25 bleibt als DB-Backup-Ebene unverändert gültig).
+
+Nach einem späteren Bugfix kann der neue Realm-Prozess die gespeicherten Daten mit dem aktuellen Persistenzcode wiederherstellen.
+
+Die detaillierte Shutdown-Implementierung bleibt einer späteren Stufe vorbehalten (Stufe D). Hier wird nur die Architektur dokumentiert.
+
+Die Final-Save-Reihenfolge aus Abschnitt 12 bleibt unverändert gültig.
+
+---
+
+## 31. Stufe B – Irreparabel beschädigte Snapshots / Quarantäne
+
+Ein einzelner irreparabel beschädigter oder nicht mehr automatisch verarbeitbarer Snapshot darf den gesamten Realm NICHT dauerhaft am Start hindern.
+
+Verzeichnissemantik:
+
+```text
+persistence/
+├── spool/
+│   └── ausstehende, noch nach MariaDB zu übertragende Snapshots
+│
+└── quarantine/
+    ├── offene, noch nicht untersuchte fehlerhafte Snapshots
+    │
+    └── archive/
+        └── bereits untersuchte/bearbeitete Quarantänefälle
+```
+
+Kann ein Snapshot nicht sicher wiederhergestellt werden:
+
+* aus aktiver Spool in `quarantine/` verschieben
+* Originaldaten für Analyse erhalten
+* Fehler und relevante Metadaten protokollieren
+* Recovery mit anderen Snapshots fortsetzen
+
+Wenn alle übrigen verarbeitbaren Snapshots erledigt sind:
+
+* Realm darf **READY** werden.
+* betroffener Spieler/Charakter wird NICHT automatisch gesperrt.
+* beim Login erhält er seinen letzten gültigen MariaDB-Stand.
+
+Der mögliche Verlust des Fortschritts seit dem letzten gültigen Persistenzstand wird akzeptiert.
+
+Besonders seltene/wertvolle verlorene Items können später nach manueller Prüfung gegebenenfalls durch Support kompensiert werden, z.B. über ein zukünftiges Briefkasten-/Postsystem.
+
+KEINE automatische Kompensationslogik wird festgelegt.
+
+---
+
+## 32. Stufe B – Quarantäne als Fehleranalyse
+
+Quarantäne-Snapshots dienen drei Zwecken:
+
+1. Recovery-/Datenanalyse
+2. Support bei relevanten verlorenen Zuständen/Items
+3. Analyse systematischer Fehler im Persistenzcode
+
+Sinnvolle technische Metadaten sollen vorgesehen werden, z.B.:
+
+* Realm-/Server-Zuordnung
+* Zeitpunkt
+* Snapshot-/Format-Version
+* Server-Build/Version, soweit verfügbar
+* betroffene Persistenzkomponenten
+* konkrete Validierungs-/Recovery-Fehlerkategorie
+
+Es werden keine unnötigen vollständigen Debug-Dumps festgeschrieben.
+
+Mehrere ähnliche Quarantänefälle sollen später über Monitoring als möglicher systematischer Fehler erkennbar sein.
+
+---
+
+## 33. Stufe B – Quarantäne-Aufbewahrung
+
+VERBINDLICHE REGEL:
+
+Dateien direkt in:
+
+```text
+persistence/quarantine/
+```
+
+sind OFFENE Fälle.
+
+Sie werden NIEMALS aufgrund ihres Alters automatisch gelöscht.
+
+Erst nachdem ein Fall untersucht/bearbeitet wurde, wird er nach:
+
+```text
+persistence/quarantine/archive/
+```
+
+verschoben.
+
+ERST BEIM ARCHIVIEREN beginnt die 30-Tage-Aufbewahrungsfrist.
+
+Archivierte Quarantänefälle dürfen 30 Tage nach ihrer Archivierung automatisch gelöscht werden.
+
+Die Frist beginnt NICHT beim ursprünglichen Snapshot-Zeitpunkt.
+
+Dadurch bleiben ungefähr 30 Tage bereits bearbeiteter Fehlerfälle für Statistik, Vergleich und Regressionsanalyse verfügbar.
+
+---
+
+## 34. Stufe B – Bewusst offen gelassene / nicht festgelegte Punkte
+
+Ohne vorhandene Entscheidung werden NICHT festgelegt:
+
+* endgültiges JSON-/Binärschema
+* konkrete Dateinamen
+* konkrete DB-Spaltennamen
+* konkrete DB-Migration
+* maximale Spool-Größe
+* maximale Anzahl Spool-Dateien
+* konkrete Push-Technik/App-Technik
+* konkrete HTTP/API-Endpunkte
+* Parallelität/Worker-Anzahl der DB-Spool-Abarbeitung
+* Snapshot-Kompression
+* Zusammenführen/Ersetzen mehrerer Snapshots desselben Spielers
+* exakte Retry-Zeitpunkte außerhalb des normalen Persistenzzyklus
+* neue Gameplay-Regeln
+* Quest V1.2b
+* neue Item-/Loot-Regeln
+
+Enthält bestehende Dokumentation zu einem dieser Punkte bereits eine verbindliche Regel, wird sie nicht stillschweigend geändert; ein solcher Konflikt wird gemeldet.
