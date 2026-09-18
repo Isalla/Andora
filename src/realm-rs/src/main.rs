@@ -27,6 +27,7 @@ mod regen;
 mod parental;
 mod persist;
 mod protocol;
+mod security;
 mod spool;
 mod world;
 

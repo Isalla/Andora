@@ -140,6 +140,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **provider_netzwerkauswertung.md** – Provider-/Netzwerkauswertung: Korrelationen sichtbar machen, keine automatischen Provider-Banns
 - **spielerreports.md** – Spielerreports: Klassifikationen (RMT/externer Werbung/Spam/ungeklärt), keine automatischen Sanktionen
 - **v1_v2_leitlinie.md** – V1-/V2- Leitlinie für den Livebetrieb: V1 ausreichend, V2 aus tatsächlichem Bedarf
+- **Serverautoritaet_und_Anti-Manipulation_V1.md** – Serverautorität & Anti-Manipulation V1 (Realm): Aktion-statt-Endwert-Protokoll (SPEND_ATTRIBUTE/ATTRIBUTE_RESULT), serverautoritatives Attribut-Ausgeben, Auktionskauf-Validierung aus Serverwerten (fail-closed-Stub ohne AH-State), frühe Netzwerkprüfung (Größe→Format→Typ→Session→Seq→Rate), gestaffelte Rate Limits, Tod-Verwerfung ohne Instanzabbruch, `sec-reject`-Logging; keine Banns, kein Anti-Cheat-Framework
 
 ---
 

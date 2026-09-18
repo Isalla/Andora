@@ -99,6 +99,8 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         .map_err(|e| format!("ws handshake: {e}"))?;
     log::info!("client connected");
     let conn_id = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
+    // V1-Schutzschicht je Verbindung (Rate-Fenster, Auffälligkeiten, Seq).
+    let mut guard = crate::security::ConnGuard::default();
     let (mut sink, mut stream) = ws.split();
     // Spielzustand -> Socket läuft über einen Kanal (siehe world.rs);
     // gezieltes Schließen (HELLO-Ablehnung, Force-Logout) über closer.
@@ -135,11 +137,37 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
             Message::Close(_) => break,
             _ => continue,
         };
+        // Serverautorität V1 — frühe, billige Prüfung (Reihenfolge):
+        // Größe → Format → Session → Sequenz → Rate Limit → Game Logic.
+        // Offensichtlich Ungültiges erreicht nie DB/Kampf/Inventar/Welt/KI.
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        if crate::security::frame_too_large(&sec_cfg, text.len()) {
+            log::warn!("sec-reject conn={conn_id} reason=frame_too_large bytes={}", text.len());
+            if guard.add_violation(&sec_cfg) {
+                break;
+            }
+            continue;
+        }
         let frame: Frame = match serde_json::from_str(&text) {
             Ok(f) => f,
-            Err(_) => continue, // ungültiges JSON ignorieren, kein Crash
+            Err(_) => {
+                log::warn!("sec-reject conn={conn_id} reason=bad_frame");
+                if guard.add_violation(&sec_cfg) {
+                    break;
+                }
+                continue; // ungültiges JSON ignorieren, kein Crash
+            }
         };
-        dispatch(&ctx, &tx, conn_id, frame).await;
+        if !crate::security::is_known_c2s(frame.msg_type) {
+            log::warn!("sec-reject conn={conn_id} reason=unknown_type type={}", frame.msg_type);
+            if guard.add_violation(&sec_cfg) {
+                break;
+            }
+            continue;
+        }
+        if dispatch(&ctx, &tx, conn_id, &mut guard, &sec_cfg, frame).await {
+            break; // massive/wiederholte Überschreitung → Disconnect, kein Bann
+        }
     }
 
     // Disconnect: Parental-State abräumen, finaler Persistenz-Flush
@@ -188,7 +216,56 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
     Ok(())
 }
 
-async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u64, frame: Frame) {
+/// Dispatcher mit V1-Gate: Session-, Sequenz- und Rate-Prüfung laufen VOR
+/// der Spiellogik. Gibt true zurück, wenn die Verbindung wegen massiver/
+/// wiederholter Überschreitung getrennt werden soll (kein permanenter Bann).
+async fn dispatch(
+    ctx: &Arc<Ctx>,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    guard: &mut crate::security::ConnGuard,
+    sec_cfg: &crate::security::SecurityCfg,
+    frame: Frame,
+) -> bool {
+    // Sequenz vermerken (Lag-tolerant: Duplikat/Out-of-Order ist kein Cheat,
+    // wird nur vermerkt — keine Ablehnung, keine Verurteilung).
+    guard.note_seq(frame.seq);
+    let authenticated = {
+        let world = ctx.shared.lock().await;
+        world.by_conn.contains_key(&conn_id)
+    };
+    match crate::security::gate_frame(sec_cfg, guard, frame.msg_type, authenticated, std::time::Instant::now()) {
+        crate::security::GateDecision::Allow => {}
+        crate::security::GateDecision::Drop => {
+            let world = ctx.shared.lock().await;
+            crate::security::log_reject(
+                world
+                    .by_conn
+                    .get(&conn_id)
+                    .and_then(|pid| world.players.get(pid)),
+                conn_id,
+                &crate::security::RejectInfo {
+                    reason: if authenticated {
+                        "rate_limited".into()
+                    } else {
+                        "no_session".into()
+                    },
+                    msg_type: frame.msg_type,
+                    detail: String::new(),
+                },
+                guard.violations,
+            );
+            return false;
+        }
+        crate::security::GateDecision::Disconnect => {
+            log::warn!(
+                "sec-disconnect conn={conn_id} type={} violations={}",
+                frame.msg_type,
+                guard.violations
+            );
+            return true;
+        }
+    }
     let data = frame.data.clone();
     match frame.msg_type {
         c2s::HELLO => {
@@ -231,6 +308,12 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
         c2s::GROUP_KICK => handlers::handle_group_kick(ctx, conn_id, &data).await,
         c2s::GROUP_TRANSFER => handlers::handle_group_transfer(ctx, conn_id, &data).await,
         c2s::PICKUP => handlers::handle_pickup(ctx, conn_id, &data).await,
+        c2s::SPEND_ATTRIBUTE => {
+            handlers::handle_spend_attribute(ctx, tx, conn_id, frame.seq, &data).await
+        }
+        c2s::AUCTION_BUY => {
+            handlers::handle_auction_buy(ctx, tx, conn_id, frame.seq, &data).await
+        }
         c2s::PARENTAL => {
             let pid: Option<String> = {
                 let world = ctx.shared.lock().await;
@@ -242,7 +325,9 @@ async fn dispatch(ctx: &Arc<Ctx>, tx: &mpsc::UnboundedSender<String>, conn_id: u
                 parental::handle_message(&ctx.parental, tx, &pid, frame.seq, action, pin).await;
             }
         }
-        // NPC_TALK / AUCTION_*: künftig (wie Übergangsstand).
+        // NPC_TALK / AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
+        // Unbekannte Typen werden bereits vor dem Gate verworfen.
         other => log::info!("unknown type {other}"),
     }
+    false
 }

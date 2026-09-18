@@ -421,6 +421,28 @@ pub async fn handle_attack(
     let is_npc = world.npcs.contains_key(target_id);
     // Validierung (immutable): Ziel existiert, nicht tot, in Reichweite,
     // Angreifer lebt. NPCs zusätzlich: attackable + nicht in Evade/Return.
+    // Serverautorität V1: Ein serverseitig toter Angreifer (hp <= 0) darf
+    // keinen gültigen Angriff ausführen — auch wenn ein manipulierter Client
+    // lokal 140000 HP anzeigt und weiter Angriffe sendet. Die Aktion wird
+    // verworfen (+ Auffälligkeit geloggt); der Raid/Dungeon läuft für alle
+    // anderen normal weiter (kein Instanzabbruch).
+    let attacker_dead = world.players.get(&pid).is_some_and(|me| me.hp <= 0);
+    if attacker_dead {
+        let me = world.players.get(&pid);
+        crate::security::log_reject(
+            me,
+            conn_id,
+            &crate::security::RejectInfo {
+                reason: "attacker_dead".into(),
+                msg_type: crate::protocol::c2s::ATTACK,
+                detail: format!("target={target_id}"),
+            },
+            0,
+        );
+        return;
+    }
+    // Validierung (immutable): Ziel existiert, nicht tot, in Reichweite,
+    // Angreifer lebt. NPCs zusätzlich: attackable + nicht in Evade/Return.
     let valid = {
         let me = match world.players.get(&pid) {
             Some(me) => me,
@@ -514,6 +536,30 @@ pub async fn handle_ability(
         .get(&pid)
         .map(|p| (p.x, p.y))
         .unwrap_or((0.0, 0.0));
+    // Serverautorität V1: Ablehnungen (u. a. toter Caster — ein manipulierter
+    // Client ignoriert ggf. den Todeszustand und castet weiter) verändern den
+    // Zustand nicht; sie werden nur verworfen (+ Auffälligkeit geloggt).
+    for event in &events {
+        if let crate::combat::events::CombatEvent::AbilityResult {
+            outcome: crate::combat::events::AbilityOutcome::Failed,
+            reason: Some(reason),
+            ability_id,
+            ..
+        } = event
+        {
+            crate::security::log_reject(
+                world.players.get(&pid),
+                conn_id,
+                &crate::security::RejectInfo {
+                    reason: reason.clone().into(),
+                    msg_type: crate::protocol::c2s::ABILITY,
+                    detail: format!("ability={ability_id}"),
+                },
+                0,
+            );
+            break;
+        }
+    }
     for event in &events {
         crate::combat::ability::broadcast_combat_event(
             &world, caster_x, caster_y, ctx.cfg.aofb_radius, event,
@@ -891,6 +937,133 @@ pub async fn handle_pickup(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
         &loot_id,
         Instant::now(),
         &ctx.cfg.loot,
+    );
+}
+
+/// SPEND_ATTRIBUTE {attribute} (Serverautorität V1): einen freien
+/// Attributpunkt serverautoritativ ausgeben.
+///
+/// Der Client übermittelt NUR die Aktion (welches Attribut). Der Server:
+/// 1. bestimmt den Charakter aus dem serverseitigen Zustand,
+/// 2. prüft die verfügbaren Punkte (free_attr_points, RAM — nie Clientwerte),
+/// 3. erhöht das Attribut intern um genau +1,
+/// 4. reduziert den freien Punkt,
+/// 5. sendet ATTRIBUTE_RESULT mit dem neuen Stand,
+/// 6. persistiert über die bestehende Spool-Architektur (dirty-Flag).
+/// Ein lokal manipuliertes `strength = 999` ist bedeutungslos.
+pub async fn handle_spend_attribute(
+    ctx: &Ctx,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    data: &serde_json::Value,
+) {
+    let attribute = get_str(data, "attribute");
+    let mut world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let Some(me) = world.players.get_mut(&pid) else {
+        return;
+    };
+    match crate::security::spend_attribute_point(me, &attribute) {
+        Ok(()) => {
+            let me = &world.players[&pid];
+            let a = &me.attributes;
+            let _ = tx.send(
+                Frame::new(
+                    seq,
+                    s2c::ATTRIBUTE_RESULT,
+                    serde_json::json!({
+                        "ok": true, "attribute": attribute.trim().to_lowercase(),
+                        "strength": a.strength, "constitution": a.constitution,
+                        "dexterity": a.dexterity, "intelligence": a.intelligence,
+                        "wisdom": a.wisdom, "luck": a.luck, "endurance": a.endurance,
+                        "free_attr_points": me.free_attr_points,
+                    }),
+                )
+                .encode(),
+            );
+        }
+        Err(e) => {
+            let reason = e.reason();
+            crate::security::log_reject(
+                world.players.get(&pid),
+                conn_id,
+                &crate::security::RejectInfo {
+                    reason: reason.into(),
+                    msg_type: crate::protocol::c2s::SPEND_ATTRIBUTE,
+                    detail: format!("attribute={attribute}"),
+                },
+                0,
+            );
+            let _ = tx.send(
+                Frame::new(
+                    seq,
+                    s2c::ATTRIBUTE_RESULT,
+                    serde_json::json!({"ok": false, "reason": reason}),
+                )
+                .encode(),
+            );
+        }
+    }
+}
+
+/// AUCTION_BUY {auction_id} (Serverautorität V1, Anschluss-Stub): Der Client
+/// übermittelt NUR die gewünschte Auktion. Der Server ermittelt selbst
+/// Existenz, Aktivität, Preis, Käufer-Gold (RAM), Eigentum und Gültigkeit.
+///
+/// V1-Stand: Es existiert noch kein Auktionshaus-State im Realm (keine
+/// auction-Tabellen/kein AH-Modul — siehe docs/Auktionshaus und Marktplatz).
+/// Deshalb wird JEDER Kauf aktuell mit `auction_unavailable` abgelehnt
+/// (fail-closed, kein Gold-/Item-Transfer), statt Clientwerten zu vertrauen.
+/// Die reine Validierungslogik (Preis/Gold/Eigentum aus Serverwerten) liegt
+/// in `crate::security::validate_auction_buy` und ist unit-getestet; sobald
+/// das Auktionshaus-State existiert, wird der Lookup dort angeschlossen
+/// (Aufrufstelle unten markiert) — kein Protokollumbau nötig.
+pub async fn handle_auction_buy(
+    ctx: &Ctx,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    data: &serde_json::Value,
+) {
+    let auction_id = data
+        .get("auction_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    let player = world.players.get(&pid);
+    // V1: kein AH-State → Angebot serverseitig unbekannt → ablehnen.
+    // Später: `let offer = ah_state.lookup(auction_id)` hier einsetzen und
+    // `validate_auction_buy(&pid, player.idia, offer.as_ref())` prüfen.
+    let err = crate::security::validate_auction_buy(
+        &pid,
+        player.map(|p| p.idia).unwrap_or(0),
+        None,
+    )
+    .expect_err("ohne AH-State ist kein Kauf gültig");
+    crate::security::log_reject(
+        player,
+        conn_id,
+        &crate::security::RejectInfo {
+            reason: err.reason().into(),
+            msg_type: crate::protocol::c2s::AUCTION_BUY,
+            detail: format!("auction_id={auction_id}"),
+        },
+        0,
+    );
+    let _ = tx.send(
+        Frame::new(
+            seq,
+            s2c::CHAT,
+            serde_json::json!({"from": "", "channel": "system",
+                "text": "Auktionshaus ist derzeit nicht verfügbar."}),
+        )
+        .encode(),
     );
 }
 

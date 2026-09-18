@@ -27,6 +27,11 @@ pub mod c2s {
     pub const GROUP_LEAVE: i64 = 17;
     pub const GROUP_KICK: i64 = 18; // {target_id}
     pub const GROUP_TRANSFER: i64 = 19; // {target_id}
+    /// Serverautorität V1: Attributpunkt ausgeben. Payload NUR die Aktion:
+    /// {attribute: "strength"|"constitution"|"dexterity"|"intelligence"|
+    ///  "wisdom"|"luck"|"endurance"}. KEINE Endwerte (kein SET_*).
+    /// Der Server erhöht serverseitig um genau +1, sofern ein Punkt frei ist.
+    pub const SPEND_ATTRIBUTE: i64 = 20;
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -54,6 +59,10 @@ pub mod s2c {
     pub const GROUP_INFO: i64 = 18; // {group_id, leader_id, members:[{id,name,class,level,hp,max_hp,mp,max_mp,online,in_range,effects}]}
     pub const GROUP_INVITE_S2C: i64 = 19; // {group_id, from_id}
     pub const GROUP_TOAST: i64 = 20; // {text, kind}
+    /// Serverautorität V1: Ergebnis von SPEND_ATTRIBUTE.
+    /// {ok, attribute?, reason?, strength?, constitution?, dexterity?,
+    ///  intelligence?, wisdom?, luck?, endurance?, free_attr_points?}
+    pub const ATTRIBUTE_RESULT: i64 = 21;
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -115,6 +124,8 @@ mod tests {
         assert_eq!(c2s::GROUP_LEAVE, 17);
         assert_eq!(c2s::GROUP_KICK, 18);
         assert_eq!(c2s::GROUP_TRANSFER, 19);
+        assert_eq!(c2s::SPEND_ATTRIBUTE, 20);
+        assert_eq!(s2c::ATTRIBUTE_RESULT, 21);
     }
 
     #[test]

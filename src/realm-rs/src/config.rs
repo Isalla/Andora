@@ -370,6 +370,66 @@ pub fn inventory_config(env: &HashMap<String, String>) -> InventoryCfg {
     }
 }
 
+/// Serverautorität & Anti-Manipulation V1
+/// (docs/Serverautoritaet_und_Anti-Manipulation_V1.md): frühe, billige
+/// Netzwerkprüfung + gestaffelte Rate Limits. Alle Werte sind Mechanik,
+/// kein Balancing.
+#[derive(Debug, Clone)]
+pub struct SecurityCfg {
+    /// Max. akzeptierte WS-Frame-Größe in Bytes (Default 65536).
+    pub max_frame_bytes: usize,
+    /// Erlaubte Requests je 1000-ms-Fenster je Kategorie.
+    pub movement_per_sec: u32,
+    pub interactive_per_sec: u32,
+    pub combat_per_sec: u32,
+    pub rare_per_sec: u32,
+    /// Auffälligkeiten je Verbindung bis zum Disconnect (kein Bann).
+    pub disconnect_after_violations: u32,
+}
+
+impl Default for SecurityCfg {
+    fn default() -> Self {
+        SecurityCfg {
+            max_frame_bytes: 65536,
+            movement_per_sec: 30,
+            interactive_per_sec: 10,
+            combat_per_sec: 10,
+            rare_per_sec: 5,
+            disconnect_after_violations: 50,
+        }
+    }
+}
+
+impl From<&SecurityCfg> for crate::security::SecurityCfg {
+    fn from(c: &SecurityCfg) -> Self {
+        crate::security::SecurityCfg {
+            max_frame_bytes: c.max_frame_bytes,
+            movement_per_sec: c.movement_per_sec,
+            interactive_per_sec: c.interactive_per_sec,
+            combat_per_sec: c.combat_per_sec,
+            rare_per_sec: c.rare_per_sec,
+            disconnect_after_violations: c.disconnect_after_violations,
+        }
+    }
+}
+
+pub fn security_config(env: &HashMap<String, String>) -> SecurityCfg {
+    let d = SecurityCfg::default();
+    SecurityCfg {
+        max_frame_bytes: num1(env, "SEC_MAX_FRAME_BYTES", d.max_frame_bytes as u64) as usize,
+        movement_per_sec: num1(env, "SEC_MOVE_PER_SEC", d.movement_per_sec as u64) as u32,
+        interactive_per_sec: num1(env, "SEC_INTERACTIVE_PER_SEC", d.interactive_per_sec as u64)
+            as u32,
+        combat_per_sec: num1(env, "SEC_COMBAT_PER_SEC", d.combat_per_sec as u32 as u64) as u32,
+        rare_per_sec: num1(env, "SEC_RARE_PER_SEC", d.rare_per_sec as u64) as u32,
+        disconnect_after_violations: num1(
+            env,
+            "SEC_DISCONNECT_AFTER_VIOLATIONS",
+            d.disconnect_after_violations as u64,
+        ) as u32,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Eigene Realm-ID (prüft Handoff-Bindung: handoff.realm_id muss passen).
@@ -408,6 +468,8 @@ pub struct Config {
     pub progression: ProgressionCfg,
     /// Spieler-Persistenz Stufe B (docs/Player_Persistenz.md).
     pub persist: PersistCfg,
+    /// Serverautorität & Anti-Manipulation V1 (frühe Prüfung + Rate Limits).
+    pub security: SecurityCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -527,6 +589,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         loot: loot_config(&env),
         progression: progression_config(&env),
         persist: persist_config(&env),
+        security: security_config(&env),
     })
 }
 

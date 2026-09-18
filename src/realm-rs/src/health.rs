@@ -189,6 +189,7 @@ mod tests {
             inventory: Default::default(),
             loot: Default::default(),
             progression: crate::progression::ProgressionCfg::default(),
+            security: crate::config::SecurityCfg::default(),
         }
     }
 
