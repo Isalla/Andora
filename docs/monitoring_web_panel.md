@@ -196,19 +196,58 @@ Produktions-Installation: siehe `deploy/README.md` (Units, sudoers, Rechte).
 6. **systemd/Sudo**: Einmalig auf dem Produktionsserver installieren
    (siehe `deploy/README.md`). Auf dem Dev-Rechner bleibt alles, wie es ist.
 7. **Ablösung durch Zielarchitektur**: Dieses lokale Panel ist ein Übergang.
-   Die Zielarchitektur (zentrales Panel, Andora-Agent pro Server, mTLS,
-   `andora`-Nicht-Root-Benutzer, `andora-updater`, signierte Manifeste und
-   automatisierte Realm-Updates) ist verbindlich in
-   `docs/Deployment_Betriebsarchitektur.md` dokumentiert.
- 8. **PHP-spezifische Optimierungen (Bugfix/Review durchgeführt)**: Die
-    History-Drosselung erfolgt ausschließlich über den Timestamp des letzten
-    Punkts in `data/history.json` (kein separates `.lastpoint`-File mehr),
-    die History wird mit echten Serverstatus-Werten gespeichert (keine
-    pauschal `online=true`/`players=0`), und der Token-fail-closed-Schutz
-    wird case-insensitiv auf den `x-api-token`-Header angewendet.
+   Die Zielarchitektur (zentrales Panel + Agent, mTLS, ohne Root-Benutzer,
+   `andora-updater`, signierte Manifeste und automatisierte Realm-Updates) ist
+   verbindlich in `docs/Deployment_Betriebsarchitektur.md` dokumentiert.
+  8. **PHP-spezifische Optimierungen (Bugfix/Review durchgeführt)**: Die
+     History-Drosselung erfolgt ausschließlich über den Timestamp des letzten
+     Punkts in `data/history.json` (kein separates `.lastpoint`-File mehr),
+     die History wird mit echten Serverstatus-Werten gespeichert (keine
+     pauschal `online=true`/`players=0` und alle Messwerte auf 0 gesetzt),
+     und der Token-fail-closed-Schutz
+     wird case-insensitiv auf den `x-api-token`-Header angewendet.
 9. **Agent-Authentifizierung (Zwischenlösung)**: Der Andora-Agent
    authentifiziert den Panel-Zugriff aktuell per Token (`AGENT_TOKEN`,
    versioniert über `X-Andora-Token`/`x-api-token`). Archivziel bleibt mTLS
    (CA-/Client-Zertifikate sind konfigurationsseitig bereits vorbereitet:
    `AGENT_CA_FILE`, `AGENT_CLIENT_CERT_FILE`, `AGENT_CLIENT_KEY_FILE`,
    Server-Einstellung `RequireAndVerifyClientCert`).
+
+---
+
+## 9. Technisches Monitoring und Support trennen
+
+Technisches Monitoring und Ticket-/Supportbearbeitung sind logisch und
+berechtigungsseitig getrennte Systeme.
+
+### TECHNISCHES MONITORING
+für Administration/Technik.
+
+Beispiele:
+- Realmstatus
+- Persistence
+- DB
+- Recovery/Spool
+- CPU/RAM
+- Netzwerk
+- technische Health-Werte
+
+### SECURITY
+für entsprechend berechtigte Security-/Adminrollen.
+
+Beispiele:
+- RMT-Zusammenhänge
+- IP-/Prefix-/ASN-/Providerinformationen
+- Netzwerksperren
+- Abuse-Historie
+- bestätigte Seller-Strukturen
+
+### SUPPORT/MODERATION
+nur die Informationen, die zur Bearbeitung des konkreten Falls
+erforderlich sind.
+
+Ein normales Supportteam benötigt keine vollständigen technischen
+Monitoringdaten und grundsätzlich auch keinen uneingeschränkten
+Zugriff auf detaillierte Security-/Netzwerkdaten.
+
+Rollen/Berechtigungen von Anfang an architektonisch berücksichtigen.

@@ -103,7 +103,8 @@ Solange die Elternkontrolle für einen Account aktiv ist, gelten die folgenden R
 
 Folgende Bereiche haben aktuell keine festgelegten Regeln und sind als noch nicht definiert zu behandeln:
 
-* Details der Chatfilter (welcher Inhalt gefiltert wird, Ersatzverhalten, Zeichengrenzen)
+* Details der Chatfilter (welcher Inhalt gefiltert wird, Ersatzverhalten, Zeichengrenzen) –
+  V1-Spezifikation siehe Abschnitt „1. Klassischer Chatfilter“ oben
 * Rate-Limits / Spam-Schutz für Chat
 * Welche Kanäle unter „öffentlicher Chat“ fallen (Mapping der Kanäle Say, Nähe, Lokal, Gruppe, Gilde auf die öffentliche/Chat-Genehmigung)
 * Freundesliste (Hinzunehmen/Entfernen, maximale Anzahl, Freundschaftsanfragen)
@@ -112,3 +113,50 @@ Folgende Bereiche haben aktuell keine festgelegten Regeln und sind als noch nich
 * Ob und wie Voice-Kommunikation geloggt wird (bisher sind nur Text-Chat und Spieler-KI-Chats definiert)
 * Welche Systeme als „berechtigtes Verwaltungs-/Moderationssystem“ gelten
 * Clientseitige Chatanzeige/-historie (z. B. Nachlesen alter Nachrichten)
+
+---
+
+## 1. Klassischer Chatfilter
+
+Andora besitzt einen serverseitigen Chatfilter.
+
+**V1:**
+- fixe verbotene Wörter/Phrasen/Muster
+- unabhängig von der KI
+- Regeln müssen zur Laufzeit aktualisierbar sein
+- kein Realm-Neustart für Filteränderungen
+- Filter arbeitet im Rust-Server
+
+**Noch NICHT festgelegt (offen):**
+- ob problematische Wörter maskiert werden
+- ob die komplette Nachricht verworfen wird
+- weitere Sanktionen
+
+Diese offenen Punkte sind ausdrücklich als offen dokumentiert und wurden nicht entschieden.
+
+**Architektur:**
+- Filter arbeitet serverseitig im Rust-Server
+- Regeln können zur Laufzeit aktualisiert werden ohne Realm-Neustart
+- Maskierung oder Verwerfen von Nachrichten sind aktuelle Design-Entscheidungen offen
+
+### Chatfilter-Workflow:
+
+1. Eingehende Chatnachricht wird am Server empfangen
+2. Schnelle Prüfung gegen fixe verbotene Wörter/Phrasen/Muster
+3. Bei unbekannten/verdächtigen Mustern: lokale KI-Klassifizierung (siehe AI-System)
+4. Erkannte neue RMT-/Spam-Muster können dem normalen Filter als neue normalisierte Regeln/Signaturen zur Verfügung gestellt werden
+5. Zukünftige gleiche/ähnliche Fälle benötigen möglichst keine erneute KI-Prüfung
+
+**Normalisierung (konzeptionell zu berücksichtigen):**
+- ungewöhnliche Leerzeichen
+- Unicode-Tricks
+- URL-Muster
+- Schreibvarianten
+- Geldbeträge/Echtgeldmuster
+- typische RMT-Werbestrukturen
+
+Nicht nur exakte Nachrichtentexte speichern.
+
+**Zugang:**
+- Berechtigtes Verwaltungs-/Moderationssystem kann Filter-Regeln einsehen und ändern
+- Clientseitige Chatanzeige/-historie bleibt offen

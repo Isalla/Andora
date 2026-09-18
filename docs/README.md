@@ -127,6 +127,22 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 - **Kommunikation:** voice_system.md (Zentraldokumentation: Voice-Mechanik, Rechte, Speicherung, Deaktivierung; verweist auf Kanal-/PTT-/Companion-Details, Elternkontrolle, Chat-Logging) + chat_system.md (Chat-/Voice-Regeln, Logging) + communication-voice-npc-commands.md (Kanäle, Voice-Mechanik, NPC-Sprachbefehle) + parental_control.md (Chat-/Voice-Gates unter Elternkontrolle).
 - **Expansionen:** exp1_Rasse_Luzilla.md + exp1_Unterwelt.md (Exp 1) und exp2_Rasse_Mandalonier.md + exp2_* (Exp 2) jeweils zusammen.
 
+### 11. V1-Dokumentation und Leitlinien
+
+- **anti_rmt_v1.md** – Anti-RMT V1: Accountebene/Charakterebene, Chatfilter-Kombination, KI-Beschränkungen, Normalisierung
+- **automatische_ip-sperre.md** – Automatische temporäre IP-Sperre: 20 Accounts-Schwellenwert, 24h-Dauer, Reports zählen nicht
+- **datenschutz_zugang.md** – Datenschutz/Zugang: rollenbasiert, Nachvollziehbarkeit, keine gesetzlichen Fristen erfinden
+- **gildenanalyse.md** – Gildenanalyse ist nicht V1: Account-/Charakterebene, V2 bei Live-Bedarf, Grundsatz
+- **ingame-gm-tickets.md** – Ingame-GM-Tickets: V1-funktional, Datensparsamkeit, unterschiedliche Falltypen
+- **internes_team-forenbereich.md** – Interner Team-/Forenbereich: Moderatoren/Support/GMs/Admins, kein Zugang für Spieler
+- **moderationsfaelle.md** – Moderationsfälle: Fallstruktur, Datenminimierung, KI-Ergebnis unabhängig
+- **netzwerk_ip_schutz.md** – Netzwerk-/IP-Schutz: IPv4/IPv6, keine MAC, GeoIP als keine Standort-Beweis
+- **provider_netzwerkauswertung.md** – Provider-/Netzwerkauswertung: Korrelationen sichtbar machen, keine automatischen Provider-Banns
+- **spielerreports.md** – Spielerreports: Klassifikationen (RMT/externer Werbung/Spam/ungeklärt), keine automatischen Sanktionen
+- **v1_v2_leitlinie.md** – V1-/V2- Leitlinie für den Livebetrieb: V1 ausreichend, V2 aus tatsächlichem Bedarf
+
+---
+
 ## Inhaltliche Überlappungen / mögliche Konflikte
 - **Arena.md vs. ai_cutscene_system.md:** `ai_cutscene_system.md` enthält im Wesentlichen Arena-Inhalt PLUS die Section „Cutscene/Scene-Lock“. Doppelte Wartungsrisiken; beim Ändern beider konsistent halten.
 - **cutscene_system.md vs. Visual_Novel_Dialog_und_Szenendarstellung.md:** `cutscene_system.md` beschreibt die Architektur der Dynamic Scene Engine (Auslösung, Zustände, Trigger). Das VN-Dokument beschreibt die **Darstellungsregeln für normale Dialoge und VN-Szenen** (Portraits, Expressions, CG) als Erweiterung desselben Architekturrahmens – keine parallele Definition, sondern ergänzende Ebene. Beide Dokumente beim Ändern konsistent halten.
