@@ -7,9 +7,9 @@ use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 
-use crate::combat::CombatState;
 use crate::combat::ability::ActiveCast;
 use crate::combat::effects::Effect;
+use crate::combat::CombatState;
 use crate::protocol::{s2c, Frame};
 
 /// Autoritativer Spieler-State auf dem Server. Felder hp/max_hp/lang
@@ -58,8 +58,10 @@ pub struct Player {
     /// offline bis zu 50 % der aktuellen Level-Anforderung; wird nur durch
     /// Kill-EXP abgerufen (Kill EXP System V1).
     pub rested_pool: i64,
-    /// Geldstand (Loot System V1); wird bei Disconnect persistiert.
-    pub gold: i64,
+    /// Geldstand der kanonischen Spielerwährung (docs/Player_Persistenz.md
+    /// §23): `idia`. Content-Loot vom Typ 'gold' (Loot System V1, Migration
+    /// 017) erhöht diese Währung; der Content-Typ 'gold' bleibt unbenannt.
+    pub idia: i64,
     /// Aktueller Rüstungswert (relevante physische Rüstung).
     pub armor: i32,
     /// Level des relevanten Waffen-/Kampfskills (startet bei 1).
@@ -118,6 +120,13 @@ pub struct Player {
     /// Abschluss des DB-Writes unverändert ist (kein neuerer RAM-Zustand
     /// während des Writes entstanden).
     pub persist_generation: u64,
+    /// Persistenz-Revision (docs/Player_Persistenz.md §29): RAM-Abbild der
+    /// im letzten angewendeten Snapshot persistierten Revision (DB-Spalte
+    /// `characters.persist_revision`). Jeder neu aufgenommene Snapshot
+    /// bekommt `persist_revision + 1`; nach durablem Spool-Erfolg wird der
+    /// Zähler fortgeschrieben (auch wenn `persist_generation` während des
+    /// Writes stieg). Grundlage der idempotenten Drain-/Superseded-Logik.
+    pub persist_revision: i64,
 }
 
 impl Player {
@@ -463,7 +472,7 @@ mod tests {
                 exp: 0,
                 free_attr_points: 0,
                 rested_pool: 0,
-                gold: 0,
+                idia: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -485,6 +494,7 @@ mod tests {
                 quests: Default::default(),
                 dirty: Default::default(),
                 persist_generation: 0,
+                persist_revision: 0,
             },
             rx,
         )

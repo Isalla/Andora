@@ -26,7 +26,9 @@
 use crate::world::Player;
 
 /// Die sieben Grundattribute (ganzzahlige Punkte, §1).
-#[derive(Debug, Clone, Copy, Default)]
+/// Serialize/Deserialize: vollständiger Player-Snapshot der Stufe B
+/// (docs/Player_Persistenz.md §23).
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Attributes {
     pub strength: i32,
     pub constitution: i32,
@@ -141,17 +143,31 @@ mod tests {
     }
 
     fn test_player(
-        hp: i32, max_hp: i32, mana: i32, max_mana: i32,
-        max_hp_base: i32, max_mana_base: i32,
+        hp: i32,
+        max_hp: i32,
+        mana: i32,
+        max_mana: i32,
+        max_hp_base: i32,
+        max_mana_base: i32,
         attrs: Attributes,
     ) -> Player {
         let (tx, _rx) = mpsc::unbounded_channel();
         Player {
-            id: "t".into(), name: "t".into(),
-            x: 0.0, y: 0.0, face: 0.0, ping_ms: 0, zone_id: 0,
-            hp, max_hp, lang: "de".into(),
-            account_id: 0, session_id: String::new(),
-            entities: HashSet::new(), last_activity: std::time::Instant::now(), tx,
+            id: "t".into(),
+            name: "t".into(),
+            x: 0.0,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp,
+            max_hp,
+            lang: "de".into(),
+            account_id: 0,
+            session_id: String::new(),
+            entities: HashSet::new(),
+            last_activity: std::time::Instant::now(),
+            tx,
             char_class: "Adventurer".into(),
             class: crate::class::ClassStatus::Adventurer,
             faction_transition: false,
@@ -159,29 +175,45 @@ mod tests {
             exp: 0,
             free_attr_points: 0,
             rested_pool: 0,
-            gold: 0,
+            idia: 0,
             armor: 0,
-            weapon_skill: 1, combat: None,
-            mana, max_mana,
-            effects: Vec::new(), cooldowns: Default::default(),
-            active_cast: None, learned_abilities: HashSet::new(),
+            weapon_skill: 1,
+            combat: None,
+            mana,
+            max_mana,
+            effects: Vec::new(),
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: HashSet::new(),
             attributes: attrs,
-            max_hp_base, max_mana_base,
+            max_hp_base,
+            max_mana_base,
             sitting: false,
-            hp_regen_bonus: 0.0, mana_regen_bonus: 0.0,
-            hp_regen_carry: 0.0, mana_regen_carry: 0.0,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
             inventory: Default::default(),
             quests: Default::default(),
             dirty: Default::default(),
             persist_generation: 0,
+            persist_revision: 0,
         }
     }
 
     #[test]
     fn constitution_raises_max_hp() {
         let mut p = test_player(
-            100, 100, 50, 50, 100, 50,
-            Attributes { constitution: 15, ..Default::default() },
+            100,
+            100,
+            50,
+            50,
+            100,
+            50,
+            Attributes {
+                constitution: 15,
+                ..Default::default()
+            },
         );
         recompute_max_resources(&mut p);
         assert_eq!(p.max_hp, 250);
@@ -191,8 +223,16 @@ mod tests {
     #[test]
     fn wisdom_raises_max_mana() {
         let mut p = test_player(
-            100, 100, 50, 50, 100, 50,
-            Attributes { wisdom: 12, ..Default::default() },
+            100,
+            100,
+            50,
+            50,
+            100,
+            50,
+            Attributes {
+                wisdom: 12,
+                ..Default::default()
+            },
         );
         recompute_max_resources(&mut p);
         assert_eq!(p.max_mana, 290);
@@ -234,8 +274,17 @@ mod tests {
     #[test]
     fn recompute_clamps_current() {
         let mut p = test_player(
-            300, 100, 200, 50, 100, 50,
-            Attributes { constitution: 1, wisdom: 1, ..Default::default() },
+            300,
+            100,
+            200,
+            50,
+            100,
+            50,
+            Attributes {
+                constitution: 1,
+                wisdom: 1,
+                ..Default::default()
+            },
         );
         recompute_max_resources(&mut p);
         assert_eq!(p.max_hp, 110);

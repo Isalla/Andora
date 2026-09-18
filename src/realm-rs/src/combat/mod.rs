@@ -130,7 +130,8 @@ pub fn resolve_attack(
     damage_permille: u32,
     crit_permille_bonus: u32,
 ) -> (HitResult, i32) {
-    let base = (weapon_damage.max(0) as f64 * (1.0 + damage_permille as f64 / 1000.0)).round() as i32;
+    let base =
+        (weapon_damage.max(0) as f64 * (1.0 + damage_permille as f64 / 1000.0)).round() as i32;
     let mut miss = cfg.hit_miss_permille;
     // Skill-Punkte über 1 verringern die Miss-Chance pro Punkt (vorläufig).
     let skill_bonus = weapon_skill
@@ -271,10 +272,20 @@ pub fn combat_tick(
                 continue; // außer Reichweite: pausieren, Angriff bleibt aktiv.
             }
             let cap = class_cap(cfg, &t.char_class);
-            let effective_armor = crate::attributes::effective_armor(t.armor, t.attributes.endurance);
+            let effective_armor =
+                crate::attributes::effective_armor(t.armor, t.attributes.endurance);
             let damage_permille = crate::attributes::melee_damage_permille(a.attributes.strength);
             let crit_bonus = crate::attributes::crit_bonus_permille(a.attributes.luck);
-            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, effective_armor, cap, damage_permille, crit_bonus);
+            let (result, dmg) = resolve_attack(
+                cfg,
+                rng,
+                cfg.weapon_damage,
+                *skill,
+                effective_armor,
+                cap,
+                damage_permille,
+                crit_bonus,
+            );
             outcomes.push((
                 aid.clone(),
                 tid.clone(),
@@ -300,7 +311,16 @@ pub fn combat_tick(
             let cap = cfg.armor_cap_default;
             let damage_permille = crate::attributes::melee_damage_permille(a.attributes.strength);
             let crit_bonus = crate::attributes::crit_bonus_permille(a.attributes.luck);
-            let (result, dmg) = resolve_attack(cfg, rng, cfg.weapon_damage, *skill, n.armor, cap, damage_permille, crit_bonus);
+            let (result, dmg) = resolve_attack(
+                cfg,
+                rng,
+                cfg.weapon_damage,
+                *skill,
+                n.armor,
+                cap,
+                damage_permille,
+                crit_bonus,
+            );
             outcomes.push((
                 aid.clone(),
                 tid.clone(),
@@ -334,6 +354,9 @@ pub fn combat_tick(
             TargetKind::Player => {
                 if let Some(t) = world.players.get_mut(tid) {
                     t.hp = (t.hp - dmg).max(0);
+                    // §6/§39: HP-Änderung (Schaden) → Komponente `Resources`
+                    // dirty (Stufe B).
+                    t.mark_dirty(crate::persist::PersistComponent::Resources);
                     t.hp == 0
                 } else {
                     false
@@ -374,7 +397,15 @@ pub fn combat_tick(
                             n.respawn_after = Some(wall_now + Duration::from_millis(respawn_ms));
                             // Monster-Tod: Claim ungültig.
                             n.claimed_by = None;
-                            award_monster_exp(world, groups, exp_reward, monster_level, &claim, aid, prog);
+                            award_monster_exp(
+                                world,
+                                groups,
+                                exp_reward,
+                                monster_level,
+                                &claim,
+                                aid,
+                                prog,
+                            );
                             true
                         } else {
                             false
@@ -607,7 +638,7 @@ mod tests {
                 exp: 0,
                 free_attr_points: 0,
                 rested_pool: 0,
-                gold: 0,
+                idia: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -629,6 +660,7 @@ mod tests {
                 quests: Default::default(),
                 dirty: Default::default(),
                 persist_generation: 0,
+                persist_revision: 0,
             },
             rx,
         )
@@ -676,7 +708,16 @@ mod tests {
     fn normal_hit_full_damage_without_armor() {
         let cfg = test_cfg();
         // 0.80 trifft (nach 0..350), Krit-Wurf 0.90 → Normal.
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.90]), 100, 1, 0, 30, 0, 0);
+        let (r, d) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.80, 0.90]),
+            100,
+            1,
+            0,
+            30,
+            0,
+            0,
+        );
         assert_eq!(r, HitResult::Normal);
         assert_eq!(d, 100);
     }
@@ -684,7 +725,16 @@ mod tests {
     #[test]
     fn critical_hit_multiplies() {
         let cfg = test_cfg();
-        let (r, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.80, 0.05]), 100, 1, 0, 30, 0, 0);
+        let (r, d) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.80, 0.05]),
+            100,
+            1,
+            0,
+            30,
+            0,
+            0,
+        );
         assert_eq!(r, HitResult::Critical);
         assert_eq!(d, 150);
     }
@@ -699,7 +749,16 @@ mod tests {
         let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097]), 100, 1, 0, 30, 0, 0);
         assert_eq!(r, HitResult::Miss);
         // Skill 2 → Miss 95, 0.097 trifft (Krit-Wurf 0.9 → Normal).
-        let (r, _) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.097, 0.9]), 100, 2, 0, 30, 0, 0);
+        let (r, _) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.097, 0.9]),
+            100,
+            2,
+            0,
+            30,
+            0,
+            0,
+        );
         assert_eq!(r, HitResult::Normal);
     }
 
@@ -707,13 +766,40 @@ mod tests {
     fn armor_reduction_respects_class_cap() {
         let cfg = test_cfg();
         // Tank: 15 Rüstung → 30 % Reduktion (2 %/Pkt), ca. 70.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 15, 50, 0, 0);
+        let (_, d) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            100,
+            1,
+            15,
+            50,
+            0,
+            0,
+        );
         assert_eq!(d, 70);
         // Tank: viel Rüstung → Cap 50 %.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 50, 0, 0);
+        let (_, d) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            100,
+            1,
+            999,
+            50,
+            0,
+            0,
+        );
         assert_eq!(d, 50);
         // Magier: 999 Rüstung → Cap 20 %.
-        let (_, d) = resolve_attack(&cfg, &mut ScriptedRng::from(&[0.8, 0.9]), 100, 1, 999, 20, 0, 0);
+        let (_, d) = resolve_attack(
+            &cfg,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            100,
+            1,
+            999,
+            20,
+            0,
+            0,
+        );
         assert_eq!(d, 80);
     }
 
@@ -750,9 +836,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -770,9 +854,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -791,9 +873,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -820,9 +900,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -849,9 +927,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -874,9 +950,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -907,9 +981,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
@@ -960,9 +1032,7 @@ mod tests {
         combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),

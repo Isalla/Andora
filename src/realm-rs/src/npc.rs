@@ -392,7 +392,7 @@ pub fn npc_tick(
                 n.return_started_at = None;
                 n.claimed_by = None; // Claim vollständig gelöscht (§3.5)
                 n.last_attack = now; // vollständiger Cooldown-Reset (§20)
-                // Combat V3: vollständiger Reset (Effekte, Cooldowns) (§20).
+                                     // Combat V3: vollständiger Reset (Effekte, Cooldowns) (§20).
                 crate::combat::effects::clear_all(&mut n.effects);
                 crate::combat::cooldowns::reset_all(&mut n.cooldowns);
                 n.active_cast = None;
@@ -507,7 +507,8 @@ pub fn npc_tick(
                     let (res, dmg) = {
                         let t = world.players.get(&tid).unwrap();
                         let cap = class_cap(cfg, &t.char_class);
-                        let effective_armor = crate::attributes::effective_armor(t.armor, t.attributes.endurance);
+                        let effective_armor =
+                            crate::attributes::effective_armor(t.armor, t.attributes.endurance);
                         resolve_attack(cfg, rng, dmg_weapon, skill, effective_armor, cap, 0, 0)
                     };
                     outcomes.push((id.clone(), tid, ax, ay, res, dmg));
@@ -748,7 +749,7 @@ mod tests {
                 exp: 0,
                 free_attr_points: 0,
                 rested_pool: 0,
-                gold: 0,
+                idia: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -770,6 +771,7 @@ mod tests {
                 quests: Default::default(),
                 dirty: Default::default(),
                 persist_generation: 0,
+                persist_revision: 0,
             },
             rx,
         )
@@ -849,9 +851,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -936,9 +936,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
@@ -959,9 +957,7 @@ mod tests {
         crate::combat::combat_tick(
             &mut w,
             &cfg,
-
             &crate::config::LootCfg::default(),
-
             &crate::progression::ProgressionCfg::default(),
             &groups(),
             &mut ScriptedRng::from(&[0.8, 0.9]),

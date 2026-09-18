@@ -52,15 +52,19 @@ pub fn select_targets(
 ) -> AoeResult {
     let caster = match world.players.get(caster_id) {
         Some(p) => p,
-        None => return AoeResult { targets: Vec::new(), center_x: 0.0, center_y: 0.0 },
+        None => {
+            return AoeResult {
+                targets: Vec::new(),
+                center_x: 0.0,
+                center_y: 0.0,
+            }
+        }
     };
 
     match aoe_type {
         AoeType::Single => {
             // Einzelziel: Target muss separat validiert sein
-            let targets = target_id
-                .map(|t| vec![t.to_string()])
-                .unwrap_or_default();
+            let targets = target_id.map(|t| vec![t.to_string()]).unwrap_or_default();
             AoeResult {
                 targets,
                 center_x: caster.x,
@@ -70,14 +74,28 @@ pub fn select_targets(
 
         AoeType::TargetRadius => {
             // Zentrum = Zielposition; alle gültigen Ziele im Radius
-            let (cx, cy) = match target_id.and_then(|t| world.npcs.get(t).map(|n| (n.x, n.y))
-                .or_else(|| world.players.get(t).map(|p| (p.x, p.y))))
-            {
+            let (cx, cy) = match target_id.and_then(|t| {
+                world
+                    .npcs
+                    .get(t)
+                    .map(|n| (n.x, n.y))
+                    .or_else(|| world.players.get(t).map(|p| (p.x, p.y)))
+            }) {
                 Some(pos) => pos,
-                None => return AoeResult { targets: Vec::new(), center_x: caster.x, center_y: caster.y },
+                None => {
+                    return AoeResult {
+                        targets: Vec::new(),
+                        center_x: caster.x,
+                        center_y: caster.y,
+                    }
+                }
             };
             let targets = collect_in_radius(world, caster_id, cx, cy, radius, host_effect);
-            AoeResult { targets, center_x: cx, center_y: cy }
+            AoeResult {
+                targets,
+                center_x: cx,
+                center_y: cy,
+            }
         }
 
         AoeType::CasterRadius => {
@@ -85,7 +103,11 @@ pub fn select_targets(
             let cx = caster.x;
             let cy = caster.y;
             let targets = collect_in_radius(world, caster_id, cx, cy, radius, host_effect);
-            AoeResult { targets, center_x: cx, center_y: cy }
+            AoeResult {
+                targets,
+                center_x: cx,
+                center_y: cy,
+            }
         }
 
         AoeType::Ground => {
@@ -93,7 +115,11 @@ pub fn select_targets(
             let cy = ground_y.unwrap_or(caster.y);
             // Reichweitenprüfung muss außerhalb erfolgen
             let targets = collect_in_radius(world, caster_id, cx, cy, radius, host_effect);
-            AoeResult { targets, center_x: cx, center_y: cy }
+            AoeResult {
+                targets,
+                center_x: cx,
+                center_y: cy,
+            }
         }
     }
 }
@@ -164,11 +190,21 @@ mod tests {
         let mut w = World::new();
         let (tx, _rx) = mpsc::unbounded_channel();
         let a = Player {
-            id: "a".into(), name: "a".into(),
-            x: 0.0, y: 0.0, face: 0.0, ping_ms: 0, zone_id: 0,
-            hp: 100, max_hp: 100, lang: "de".into(),
-            account_id: 0, session_id: String::new(),
-            entities: HashSet::new(), last_activity: Instant::now(), tx,
+            id: "a".into(),
+            name: "a".into(),
+            x: 0.0,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 100,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 0,
+            session_id: String::new(),
+            entities: HashSet::new(),
+            last_activity: Instant::now(),
+            tx,
             char_class: "Adventurer".into(),
             class: crate::class::ClassStatus::Adventurer,
             faction_transition: false,
@@ -176,11 +212,14 @@ mod tests {
             exp: 0,
             free_attr_points: 0,
             rested_pool: 0,
-            gold: 0,
+            idia: 0,
             armor: 0,
-            weapon_skill: 1, combat: None,
-            mana: 50, max_mana: 50,
-            effects: Vec::new(), cooldowns: std::collections::BTreeMap::new(),
+            weapon_skill: 1,
+            combat: None,
+            mana: 50,
+            max_mana: 50,
+            effects: Vec::new(),
+            cooldowns: std::collections::BTreeMap::new(),
             active_cast: None,
             learned_abilities: HashSet::new(),
             sitting: false,
@@ -195,28 +234,47 @@ mod tests {
             quests: Default::default(),
             dirty: Default::default(),
             persist_generation: 0,
+            persist_revision: 0,
         };
         w.players.insert("a".into(), a);
 
         // NPC in Reichweite
         use crate::npc::{Npc, NpcStatus};
         let n = Npc {
-            id: "npc_1".into(), spawn_id: 1, name: "Wolf".into(),
+            id: "npc_1".into(),
+            spawn_id: 1,
+            name: "Wolf".into(),
             kind: "normal".into(),
-            attackable: true, aggressive: true,
-            aggro_range: 8.0, attack_range: 1.5, attack_duration_ms: 1500,
-            weapon_damage: 10, weapon_skill: 1, armor: 0,
+            attackable: true,
+            aggressive: true,
+            aggro_range: 8.0,
+            attack_range: 1.5,
+            attack_duration_ms: 1500,
+            weapon_damage: 10,
+            weapon_skill: 1,
+            armor: 0,
             exp_reward: 0,
             level: 1,
             loot_table_id: None,
-            max_hp: 100, move_speed: 4.0, respawn_ms: 300000,
-            faction: None, pack_id: None,
-            home_x: 5.0, home_y: 0.0, home_radius: 5.0, leash_radius: 15.0,
-            status: NpcStatus::Alive, hp: 100,
-            x: 5.0, y: 0.0,
-            target_id: None, last_attack: Instant::now(),
-            no_link_since: None, return_started_at: None,
-            respawn_after: None, claimed_by: None,
+            max_hp: 100,
+            move_speed: 4.0,
+            respawn_ms: 300000,
+            faction: None,
+            pack_id: None,
+            home_x: 5.0,
+            home_y: 0.0,
+            home_radius: 5.0,
+            leash_radius: 15.0,
+            status: NpcStatus::Alive,
+            hp: 100,
+            x: 5.0,
+            y: 0.0,
+            target_id: None,
+            last_attack: Instant::now(),
+            no_link_since: None,
+            return_started_at: None,
+            respawn_after: None,
+            claimed_by: None,
             override_ctx: None,
             effects: Vec::new(),
             cooldowns: std::collections::BTreeMap::new(),
@@ -229,7 +287,16 @@ mod tests {
     #[test]
     fn single_target() {
         let w = make_world();
-        let r = select_targets(&w, "a", AoeType::Single, Some("npc_1"), None, None, 0.0, true);
+        let r = select_targets(
+            &w,
+            "a",
+            AoeType::Single,
+            Some("npc_1"),
+            None,
+            None,
+            0.0,
+            true,
+        );
         assert_eq!(r.targets, vec!["npc_1"]);
     }
 
@@ -237,7 +304,16 @@ mod tests {
     fn target_radius_hits_nearby() {
         let w = make_world();
         // npc_1 bei (5,0), Radius 10
-        let r = select_targets(&w, "a", AoeType::TargetRadius, Some("npc_1"), None, None, 10.0, true);
+        let r = select_targets(
+            &w,
+            "a",
+            AoeType::TargetRadius,
+            Some("npc_1"),
+            None,
+            None,
+            10.0,
+            true,
+        );
         assert!(r.targets.contains(&"npc_1".to_string()));
         assert_eq!(r.center_x, 5.0);
     }
@@ -252,7 +328,16 @@ mod tests {
     #[test]
     fn ground_target() {
         let w = make_world();
-        let r = select_targets(&w, "a", AoeType::Ground, None, Some(5.0), Some(0.0), 10.0, true);
+        let r = select_targets(
+            &w,
+            "a",
+            AoeType::Ground,
+            None,
+            Some(5.0),
+            Some(0.0),
+            10.0,
+            true,
+        );
         assert!(r.targets.contains(&"npc_1".to_string()));
         assert_eq!(r.center_x, 5.0);
     }
@@ -260,7 +345,16 @@ mod tests {
     #[test]
     fn caster_excluded() {
         let w = make_world();
-        let r = select_targets(&w, "a", AoeType::CasterRadius, None, None, None, 100.0, true);
+        let r = select_targets(
+            &w,
+            "a",
+            AoeType::CasterRadius,
+            None,
+            None,
+            None,
+            100.0,
+            true,
+        );
         assert!(!r.targets.contains(&"a".to_string()));
     }
 }

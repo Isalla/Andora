@@ -13,13 +13,13 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::protocol::{s2c, Frame};
-use crate::world::World;
+use super::aoe::{self, AoeType};
 use super::cooldowns;
 use super::effects::{self, Effect, EffectKind, SourceKind};
 use super::events::{self, AbilityOutcome, CombatEvent};
 use super::targeting;
-use super::aoe::{self, AoeType};
+use crate::protocol::{s2c, Frame};
+use crate::world::World;
 
 /// Content-Definition einer Fähigkeit (aus ability_definitions, Migration 010).
 #[derive(Debug, Clone)]
@@ -27,7 +27,7 @@ pub struct AbilityDef {
     pub id: String,
     #[allow(dead_code)] // Content-Feld: Client-Anzeige/Balancing (noch ungenutzt)
     pub name: String,
-    pub exec_type: String,       // instant | cast | channel
+    pub exec_type: String, // instant | cast | channel
     #[allow(dead_code)] // Content-Feld: semantische Einordnung (noch ungenutzt)
     pub semantic_category: String,
     pub mana_cost: u32,
@@ -38,7 +38,7 @@ pub struct AbilityDef {
     pub range: f64,
     pub aoe_type: String,
     pub aoe_radius: f64,
-    pub host_effect: bool,       // true = feindlich
+    pub host_effect: bool, // true = feindlich
     pub effect_kind: String,
     pub effect_value: f64,
     pub duration_ms: u64,
@@ -65,7 +65,11 @@ pub struct AbilityRegistry {
 }
 
 impl AbilityRegistry {
-    pub fn new() -> Self { Self { defs: HashMap::new() } }
+    pub fn new() -> Self {
+        Self {
+            defs: HashMap::new(),
+        }
+    }
 
     pub fn get(&self, id: &str) -> Option<&AbilityDef> {
         self.defs.get(id)
@@ -164,7 +168,9 @@ pub fn start_ability(
     };
 
     // 3) Caster hat diese Fähigkeit gelernt?
-    let has_ability = world.players.get(caster_id)
+    let has_ability = world
+        .players
+        .get(caster_id)
         .map(|p| p.learned_abilities.contains(ability_id))
         .unwrap_or(false);
     if !has_ability {
@@ -179,7 +185,9 @@ pub fn start_ability(
     }
 
     // 4) Mana prüfen
-    let has_mana = world.players.get(caster_id)
+    let has_mana = world
+        .players
+        .get(caster_id)
         .map(|p| p.mana >= def.mana_cost as i32)
         .unwrap_or(false);
     if !has_mana {
@@ -194,7 +202,9 @@ pub fn start_ability(
     }
 
     // 5) Cooldown prüfen
-    let cooldowns_ready = world.players.get(caster_id)
+    let cooldowns_ready = world
+        .players
+        .get(caster_id)
         .map(|p| cooldowns::is_ready(&p.cooldowns, ability_id, wall_now))
         .unwrap_or(true);
     if !cooldowns_ready {
@@ -213,7 +223,12 @@ pub fn start_ability(
         let validation = if def.host_effect {
             targeting::validate_single_hostile(world, caster_id, target_id.unwrap_or(""), def.range)
         } else {
-            targeting::validate_single_friendly(world, caster_id, target_id.unwrap_or(""), def.range)
+            targeting::validate_single_friendly(
+                world,
+                caster_id,
+                target_id.unwrap_or(""),
+                def.range,
+            )
         };
         if !validation.valid {
             events.push(CombatEvent::AbilityResult {
@@ -227,8 +242,10 @@ pub fn start_ability(
         }
     } else if def.aoe_type == "ground" {
         let validation = targeting::validate_ground_position(
-            world, caster_id,
-            ground_x.unwrap_or(0.0), ground_y.unwrap_or(0.0),
+            world,
+            caster_id,
+            ground_x.unwrap_or(0.0),
+            ground_y.unwrap_or(0.0),
             def.range,
         );
         if !validation.valid {
@@ -246,6 +263,9 @@ pub fn start_ability(
     // 7) Mana abziehen
     if let Some(player) = world.players.get_mut(caster_id) {
         player.mana -= def.mana_cost as i32;
+        // §6/§39: Mana-Verbrauch ändert persistierbare Ressourcen → die
+        // Komponente `Resources` dirty markieren (Stufe B).
+        player.mark_dirty(crate::persist::PersistComponent::Resources);
     }
 
     let caster_x = world.players.get(caster_id).map(|p| p.x).unwrap_or(0.0);
@@ -253,7 +273,20 @@ pub fn start_ability(
 
     // 8) Sofortfähigkeiten direkt ausführen
     if def.exec_type == "instant" {
-        execute_instant(world, registry, caster_id, caster_x, caster_y, &def, target_id, ground_x, ground_y, now, wall_now, &mut events);
+        execute_instant(
+            world,
+            registry,
+            caster_id,
+            caster_x,
+            caster_y,
+            &def,
+            target_id,
+            ground_x,
+            ground_y,
+            now,
+            wall_now,
+            &mut events,
+        );
         return events;
     }
 
@@ -301,13 +334,24 @@ fn execute_instant(
     // AoE-Ziele bestimmen
     let aoe_t = AoeType::from_str(&def.aoe_type);
     let aoe_result = aoe::select_targets(
-        world, caster_id, aoe_t, target_id, ground_x, ground_y,
-        def.aoe_radius, def.host_effect,
+        world,
+        caster_id,
+        aoe_t,
+        target_id,
+        ground_x,
+        ground_y,
+        def.aoe_radius,
+        def.host_effect,
     );
 
     // Cooldown starten
     if let Some(player) = world.players.get_mut(caster_id) {
-        cooldowns::start(&mut player.cooldowns, def.id.clone(), def.cooldown_ms, wall_now);
+        cooldowns::start(
+            &mut player.cooldowns,
+            def.id.clone(),
+            def.cooldown_ms,
+            wall_now,
+        );
     }
 
     // Effekte auf Ziele anwenden
@@ -337,7 +381,9 @@ fn apply_ability_effect(
 
     // Direktschaden (ohne Effekt-Tick) — skaliert mit Intelligenz (§11).
     if def.effect_kind == "damage" && def.duration_ms == 0 {
-        let mult = world.players.get(caster_id)
+        let mult = world
+            .players
+            .get(caster_id)
             .map(|p| crate::attributes::magic_damage_multiplier(p.attributes.intelligence))
             .unwrap_or(1.0);
         let amount = (def.effect_value * mult).round() as i32;
@@ -356,7 +402,9 @@ fn apply_ability_effect(
     // Magischer Schaden wird hier skaliert (§11): effektiver Wert wird
     // in den Effect geschrieben, damit die Ticks den Skalierungswert nutzen.
     let mult = if kind == EffectKind::Dot {
-        world.players.get(caster_id)
+        world
+            .players
+            .get(caster_id)
             .map(|p| crate::attributes::magic_damage_multiplier(p.attributes.intelligence))
             .unwrap_or(1.0)
     } else {
@@ -379,7 +427,8 @@ fn apply_ability_effect(
         duration_ms: def.duration_ms,
         tick_ms: def.tick_ms,
         next_tick_at: if def.tick_ms > 0 && kind.tickable() {
-            now.checked_add(Duration::from_millis(def.tick_ms)).or(Some(now))
+            now.checked_add(Duration::from_millis(def.tick_ms))
+                .or(Some(now))
         } else {
             None
         },
@@ -435,6 +484,8 @@ fn apply_damage(
 ) {
     let killed = if let Some(player) = world.players.get_mut(target_id) {
         player.hp = (player.hp - amount).max(0);
+        // §6/§39: HP-Änderung (Schaden) → Komponente `Resources` dirty (Stufe B).
+        player.mark_dirty(crate::persist::PersistComponent::Resources);
         // Durch Schaden unterbrochene Effekte (Root, Sleep)
         let removed = effects::on_damage_taken(&mut player.effects, amount);
         for r in &removed {
@@ -503,6 +554,8 @@ fn apply_heal(
     let healed = if let Some(player) = world.players.get_mut(target_id) {
         let before = player.hp;
         player.hp = (player.hp + amount).min(player.max_hp);
+        // §6/§39: HP-Änderung (Heilung) → Komponente `Resources` dirty (Stufe B).
+        player.mark_dirty(crate::persist::PersistComponent::Resources);
         player.hp - before
     } else if let Some(npc) = world.npcs.get_mut(target_id) {
         if npc.status == crate::npc::NpcStatus::Alive {
@@ -572,7 +625,11 @@ pub fn ability_tick(
             };
             if caster_moved {
                 if let Some(event) = interrupt_cast(world, pid) {
-                    let (px, py) = world.players.get(pid).map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
+                    let (px, py) = world
+                        .players
+                        .get(pid)
+                        .map(|p| (p.x, p.y))
+                        .unwrap_or((0.0, 0.0));
                     broadcast_combat_event(world, px, py, aofb, &event);
                 }
             }
@@ -602,7 +659,9 @@ pub fn ability_tick(
         };
 
         // Bewegungsprüfung
-        let caster_moved = world.players.get(&caster_id)
+        let caster_moved = world
+            .players
+            .get(&caster_id)
             .map(|p| {
                 let dx = p.x - cast.start_x;
                 let dy = p.y - cast.start_y;
@@ -615,8 +674,11 @@ pub fn ability_tick(
                 player.active_cast = None;
             }
             let frame = events::ability_frame(
-                &caster_id, &cast.ability_id, AbilityOutcome::Interrupted,
-                Some("movement"), cast.target_id.as_deref(),
+                &caster_id,
+                &cast.ability_id,
+                AbilityOutcome::Interrupted,
+                Some("movement"),
+                cast.target_id.as_deref(),
             );
             events::broadcast_all(world, &frame);
             continue;
@@ -635,8 +697,11 @@ pub fn ability_tick(
                     player.active_cast = None;
                 }
                 let frame = events::ability_frame(
-                    &caster_id, &cast.ability_id, AbilityOutcome::Interrupted,
-                    validation.reason.as_deref(), cast.target_id.as_deref(),
+                    &caster_id,
+                    &cast.ability_id,
+                    AbilityOutcome::Interrupted,
+                    validation.reason.as_deref(),
+                    cast.target_id.as_deref(),
                 );
                 events::broadcast_all(world, &frame);
                 continue;
@@ -647,7 +712,12 @@ pub fn ability_tick(
         if let Some(player) = world.players.get_mut(&caster_id) {
             player.active_cast = None;
             // Cooldown starten
-            cooldowns::start(&mut player.cooldowns, def.id.clone(), def.cooldown_ms, wall_now);
+            cooldowns::start(
+                &mut player.cooldowns,
+                def.id.clone(),
+                def.cooldown_ms,
+                wall_now,
+            );
         }
 
         let caster_x = world.players.get(&caster_id).map(|p| p.x).unwrap_or(0.0);
@@ -655,9 +725,14 @@ pub fn ability_tick(
 
         let aoe_t = AoeType::from_str(&def.aoe_type);
         let aoe_result = aoe::select_targets(
-            world, &caster_id, aoe_t,
-            cast.target_id.as_deref(), cast.ground_x, cast.ground_y,
-            def.aoe_radius, def.host_effect,
+            world,
+            &caster_id,
+            aoe_t,
+            cast.target_id.as_deref(),
+            cast.ground_x,
+            cast.ground_y,
+            def.aoe_radius,
+            def.host_effect,
         );
 
         for target_id in &aoe_result.targets {
@@ -669,8 +744,11 @@ pub fn ability_tick(
         }
 
         let frame = events::ability_frame(
-            &caster_id, &def.id, AbilityOutcome::Succeeded,
-            None, cast.target_id.as_deref(),
+            &caster_id,
+            &def.id,
+            AbilityOutcome::Succeeded,
+            None,
+            cast.target_id.as_deref(),
         );
         events::broadcast_all(world, &frame);
     }
@@ -696,7 +774,11 @@ fn process_effect_ticks(world: &mut World, _registry: &AbilityRegistry, now: Ins
                 }
             }
         }
-        let (player_x, player_y) = world.players.get(&pid).map(|p| (p.x, p.y)).unwrap_or((0.0, 0.0));
+        let (player_x, player_y) = world
+            .players
+            .get(&pid)
+            .map(|p| (p.x, p.y))
+            .unwrap_or((0.0, 0.0));
         for result in tick_results {
             let amount = result.value;
             let mut tick_events = Vec::new();
@@ -722,7 +804,11 @@ fn process_effect_ticks(world: &mut World, _registry: &AbilityRegistry, now: Ins
                 }
             }
         }
-        let (npc_x, npc_y) = world.npcs.get(&nid).map(|n| (n.x, n.y)).unwrap_or((0.0, 0.0));
+        let (npc_x, npc_y) = world
+            .npcs
+            .get(&nid)
+            .map(|n| (n.x, n.y))
+            .unwrap_or((0.0, 0.0));
         for result in tick_results {
             let amount = result.value;
             let mut tick_events = Vec::new();
@@ -778,36 +864,94 @@ fn process_expired_effects(world: &mut World, now: Instant, aofb: f64) {
 }
 
 /// Broadcastet ein CombatEvent als S2C-Frame.
-pub(crate) fn broadcast_combat_event(world: &World, x: f64, y: f64, aofb: f64, event: &CombatEvent) {
+pub(crate) fn broadcast_combat_event(
+    world: &World,
+    x: f64,
+    y: f64,
+    aofb: f64,
+    event: &CombatEvent,
+) {
     match event {
-        CombatEvent::DamageApplied { target_id, amount, from_id } => {
-            let frame = Frame::new(0, s2c::DAMAGE, serde_json::json!({
-                "id": target_id, "amount": amount, "from_id": from_id, "hit": "normal"
-            }));
+        CombatEvent::DamageApplied {
+            target_id,
+            amount,
+            from_id,
+        } => {
+            let frame = Frame::new(
+                0,
+                s2c::DAMAGE,
+                serde_json::json!({
+                    "id": target_id, "amount": amount, "from_id": from_id, "hit": "normal"
+                }),
+            );
             events::broadcast_aofb(world, x, y, aofb, &frame);
         }
-        CombatEvent::HealApplied { target_id, amount, from_id } => {
-            let frame = Frame::new(0, s2c::STATE, serde_json::json!({
-                "id": target_id, "amount": amount, "from_id": from_id, "heal": true
-            }));
+        CombatEvent::HealApplied {
+            target_id,
+            amount,
+            from_id,
+        } => {
+            let frame = Frame::new(
+                0,
+                s2c::STATE,
+                serde_json::json!({
+                    "id": target_id, "amount": amount, "from_id": from_id, "heal": true
+                }),
+            );
             events::broadcast_aofb(world, x, y, aofb, &frame);
         }
-        CombatEvent::EffectApplied { entity_id, effect_id, group, kind, duration_left_ms } => {
-            let frame = events::effect_frame(entity_id, "applied", effect_id, group, kind, *duration_left_ms);
+        CombatEvent::EffectApplied {
+            entity_id,
+            effect_id,
+            group,
+            kind,
+            duration_left_ms,
+        } => {
+            let frame = events::effect_frame(
+                entity_id,
+                "applied",
+                effect_id,
+                group,
+                kind,
+                *duration_left_ms,
+            );
             events::broadcast_aofb(world, x, y, aofb, &frame);
         }
-        CombatEvent::EffectRemoved { entity_id, effect_id, group } => {
+        CombatEvent::EffectRemoved {
+            entity_id,
+            effect_id,
+            group,
+        } => {
             let frame = events::effect_frame(entity_id, "removed", effect_id, group, "", 0);
             events::broadcast_aofb(world, x, y, aofb, &frame);
         }
-        CombatEvent::TargetDied { target_id, killer_id } => {
-            let frame = Frame::new(0, s2c::KILL, serde_json::json!({
-                "id": target_id, "killer_id": killer_id
-            }));
+        CombatEvent::TargetDied {
+            target_id,
+            killer_id,
+        } => {
+            let frame = Frame::new(
+                0,
+                s2c::KILL,
+                serde_json::json!({
+                    "id": target_id, "killer_id": killer_id
+                }),
+            );
             events::broadcast_all(world, &frame);
         }
-        CombatEvent::AbilityResult { caster_id, ability_id, outcome, reason, target_id } => {
-            let frame = events::ability_frame(caster_id, ability_id, *outcome, reason.as_deref(), target_id.as_deref());
+        CombatEvent::AbilityResult {
+            caster_id,
+            ability_id,
+            outcome,
+            reason,
+            target_id,
+        } => {
+            let frame = events::ability_frame(
+                caster_id,
+                ability_id,
+                *outcome,
+                reason.as_deref(),
+                target_id.as_deref(),
+            );
             events::broadcast_all(world, &frame);
         }
     }
@@ -837,19 +981,29 @@ pub fn on_death(world: &mut World, entity_id: &str, is_player: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::Player;
     use crate::npc::{Npc, NpcStatus};
+    use crate::world::Player;
     use std::collections::{BTreeMap, HashSet};
     use tokio::sync::mpsc;
 
     fn make_player(id: &str, hp: i32, mana: i32) -> Player {
         let (tx, _rx) = mpsc::unbounded_channel();
         Player {
-            id: id.into(), name: id.into(),
-            x: 0.0, y: 0.0, face: 0.0, ping_ms: 0, zone_id: 0,
-            hp, max_hp: hp, lang: "de".into(),
-            account_id: 0, session_id: String::new(),
-            entities: HashSet::new(), last_activity: Instant::now(), tx,
+            id: id.into(),
+            name: id.into(),
+            x: 0.0,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp,
+            max_hp: hp,
+            lang: "de".into(),
+            account_id: 0,
+            session_id: String::new(),
+            entities: HashSet::new(),
+            last_activity: Instant::now(),
+            tx,
             char_class: "Adventurer".into(),
             class: crate::class::ClassStatus::Adventurer,
             faction_transition: false,
@@ -857,11 +1011,14 @@ mod tests {
             exp: 0,
             free_attr_points: 0,
             rested_pool: 0,
-            gold: 0,
+            idia: 0,
             armor: 0,
-            weapon_skill: 1, combat: None,
-            mana, max_mana: mana,
-            effects: Vec::new(), cooldowns: BTreeMap::new(),
+            weapon_skill: 1,
+            combat: None,
+            mana,
+            max_mana: mana,
+            effects: Vec::new(),
+            cooldowns: BTreeMap::new(),
             active_cast: None,
             learned_abilities: HashSet::new(),
             sitting: false,
@@ -876,81 +1033,137 @@ mod tests {
             quests: Default::default(),
             dirty: Default::default(),
             persist_generation: 0,
+            persist_revision: 0,
         }
     }
 
     fn make_npc(id: &str, hp: i32, x: f64, y: f64) -> Npc {
         Npc {
-            id: id.into(), spawn_id: 1, name: "Wolf".into(),
+            id: id.into(),
+            spawn_id: 1,
+            name: "Wolf".into(),
             kind: "normal".into(),
-            attackable: true, aggressive: true,
-            aggro_range: 8.0, attack_range: 1.5, attack_duration_ms: 1500,
-            weapon_damage: 10, weapon_skill: 1, armor: 0,
+            attackable: true,
+            aggressive: true,
+            aggro_range: 8.0,
+            attack_range: 1.5,
+            attack_duration_ms: 1500,
+            weapon_damage: 10,
+            weapon_skill: 1,
+            armor: 0,
             exp_reward: 0,
             level: 1,
             loot_table_id: None,
-            max_hp: hp, move_speed: 4.0, respawn_ms: 300000,
-            faction: None, pack_id: None,
-            home_x: x, home_y: y, home_radius: 5.0, leash_radius: 15.0,
-            status: NpcStatus::Alive, hp,
-            x, y,
-            target_id: None, last_attack: Instant::now(),
-            no_link_since: None, return_started_at: None,
-            respawn_after: None, claimed_by: None,
+            max_hp: hp,
+            move_speed: 4.0,
+            respawn_ms: 300000,
+            faction: None,
+            pack_id: None,
+            home_x: x,
+            home_y: y,
+            home_radius: 5.0,
+            leash_radius: 15.0,
+            status: NpcStatus::Alive,
+            hp,
+            x,
+            y,
+            target_id: None,
+            last_attack: Instant::now(),
+            no_link_since: None,
+            return_started_at: None,
+            respawn_after: None,
+            claimed_by: None,
             override_ctx: None,
-            effects: Vec::new(), cooldowns: BTreeMap::new(),
+            effects: Vec::new(),
+            cooldowns: BTreeMap::new(),
             active_cast: None,
         }
     }
 
     fn fire_bolt_def() -> AbilityDef {
         AbilityDef {
-            id: "fire_bolt".into(), name: "Feuerblitz".into(),
-            exec_type: "instant".into(), semantic_category: "single_target_damage".into(),
-            mana_cost: 8, cooldown_ms: 2000, cooldown_persistent: false,
-            cast_time_ms: 0, range: 12.0,
-            aoe_type: "single".into(), aoe_radius: 0.0,
-            host_effect: true, effect_kind: "damage".into(),
-            effect_value: 35.0, duration_ms: 0, tick_ms: 0,
+            id: "fire_bolt".into(),
+            name: "Feuerblitz".into(),
+            exec_type: "instant".into(),
+            semantic_category: "single_target_damage".into(),
+            mana_cost: 8,
+            cooldown_ms: 2000,
+            cooldown_persistent: false,
+            cast_time_ms: 0,
+            range: 12.0,
+            aoe_type: "single".into(),
+            aoe_radius: 0.0,
+            host_effect: true,
+            effect_kind: "damage".into(),
+            effect_value: 35.0,
+            duration_ms: 0,
+            tick_ms: 0,
             effect_group: None,
         }
     }
 
     fn soul_rend_def() -> AbilityDef {
         AbilityDef {
-            id: "soul_rend".into(), name: "Seelenriss".into(),
-            exec_type: "instant".into(), semantic_category: "debuff".into(),
-            mana_cost: 10, cooldown_ms: 4000, cooldown_persistent: false,
-            cast_time_ms: 0, range: 12.0,
-            aoe_type: "single".into(), aoe_radius: 0.0,
-            host_effect: true, effect_kind: "debuff".into(),
-            effect_value: 8.0, duration_ms: 9000, tick_ms: 3000,
+            id: "soul_rend".into(),
+            name: "Seelenriss".into(),
+            exec_type: "instant".into(),
+            semantic_category: "debuff".into(),
+            mana_cost: 10,
+            cooldown_ms: 4000,
+            cooldown_persistent: false,
+            cast_time_ms: 0,
+            range: 12.0,
+            aoe_type: "single".into(),
+            aoe_radius: 0.0,
+            host_effect: true,
+            effect_kind: "debuff".into(),
+            effect_value: 8.0,
+            duration_ms: 9000,
+            tick_ms: 3000,
             effect_group: Some("doom".into()),
         }
     }
 
     fn healing_light_def() -> AbilityDef {
         AbilityDef {
-            id: "healing_light".into(), name: "Heilendes Licht".into(),
-            exec_type: "instant".into(), semantic_category: "heal".into(),
-            mana_cost: 12, cooldown_ms: 3000, cooldown_persistent: false,
-            cast_time_ms: 0, range: 15.0,
-            aoe_type: "single".into(), aoe_radius: 0.0,
-            host_effect: false, effect_kind: "heal".into(),
-            effect_value: 40.0, duration_ms: 0, tick_ms: 0,
+            id: "healing_light".into(),
+            name: "Heilendes Licht".into(),
+            exec_type: "instant".into(),
+            semantic_category: "heal".into(),
+            mana_cost: 12,
+            cooldown_ms: 3000,
+            cooldown_persistent: false,
+            cast_time_ms: 0,
+            range: 15.0,
+            aoe_type: "single".into(),
+            aoe_radius: 0.0,
+            host_effect: false,
+            effect_kind: "heal".into(),
+            effect_value: 40.0,
+            duration_ms: 0,
+            tick_ms: 0,
             effect_group: None,
         }
     }
 
     fn frost_nova_def() -> AbilityDef {
         AbilityDef {
-            id: "frost_nova".into(), name: "Frost Nova".into(),
-            exec_type: "cast".into(), semantic_category: "aoe_damage".into(),
-            mana_cost: 20, cooldown_ms: 8000, cooldown_persistent: false,
-            cast_time_ms: 2000, range: 10.0,
-            aoe_type: "target_radius".into(), aoe_radius: 5.0,
-            host_effect: true, effect_kind: "damage".into(),
-            effect_value: 50.0, duration_ms: 0, tick_ms: 0,
+            id: "frost_nova".into(),
+            name: "Frost Nova".into(),
+            exec_type: "cast".into(),
+            semantic_category: "aoe_damage".into(),
+            mana_cost: 20,
+            cooldown_ms: 8000,
+            cooldown_persistent: false,
+            cast_time_ms: 2000,
+            range: 10.0,
+            aoe_type: "target_radius".into(),
+            aoe_radius: 5.0,
+            host_effect: true,
+            effect_kind: "damage".into(),
+            effect_value: 50.0,
+            duration_ms: 0,
+            tick_ms: 0,
             effect_group: None,
         }
     }
@@ -960,7 +1173,8 @@ mod tests {
         let mut caster = make_player("a", 100, 50);
         caster.learned_abilities.insert(def.id.clone());
         w.players.insert("a".into(), caster);
-        w.npcs.insert("npc_1".into(), make_npc("npc_1", 100, 5.0, 0.0));
+        w.npcs
+            .insert("npc_1".into(), make_npc("npc_1", 100, 5.0, 0.0));
 
         let mut reg = AbilityRegistry::new();
         reg.register(def);
@@ -973,9 +1187,27 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
-        assert!(events.iter().any(|e| matches!(e, CombatEvent::AbilityResult { outcome: AbilityOutcome::Succeeded, .. })));
-        assert!(events.iter().any(|e| matches!(e, CombatEvent::DamageApplied { amount: 35, .. })));
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CombatEvent::AbilityResult {
+                outcome: AbilityOutcome::Succeeded,
+                ..
+            }
+        )));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::DamageApplied { amount: 35, .. })));
         assert_eq!(w.npcs["npc_1"].hp, 65);
         assert_eq!(w.players["a"].mana, 42); // 50 - 8
     }
@@ -987,7 +1219,17 @@ mod tests {
         w.players.get_mut("a").unwrap().mana = 5;
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(events.iter().any(|e| {
             if let CombatEvent::AbilityResult {
                 outcome: AbilityOutcome::Failed,
@@ -1008,8 +1250,28 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
-        let events2 = start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
+        let events2 = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(events2.iter().any(|e| {
             if let CombatEvent::AbilityResult {
                 outcome: AbilityOutcome::Failed,
@@ -1034,8 +1296,20 @@ mod tests {
         w.players.insert("b".into(), target);
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "healing_light", Some("b"), None, None, now, wall);
-        assert!(events.iter().any(|e| matches!(e, CombatEvent::HealApplied { amount: 20, .. }))); // 80 + 40 = 120, capped at 100
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "healing_light",
+            Some("b"),
+            None,
+            None,
+            now,
+            wall,
+        );
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, CombatEvent::HealApplied { amount: 20, .. }))); // 80 + 40 = 120, capped at 100
         assert_eq!(w.players["b"].hp, 100);
     }
 
@@ -1045,10 +1319,24 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "soul_rend", Some("npc_1"), None, None, now, wall);
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "soul_rend",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(events
             .iter()
-            .any(|e| if let CombatEvent::EffectApplied { kind, .. } = e { kind == "debuff" } else { false }));
+            .any(|e| if let CombatEvent::EffectApplied { kind, .. } = e {
+                kind == "debuff"
+            } else {
+                false
+            }));
         assert!(!w.npcs["npc_1"].effects.is_empty());
     }
 
@@ -1058,10 +1346,34 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        start_ability(&mut w, &reg, "a", "soul_rend", Some("npc_1"), None, None, now, wall);
-        start_ability(&mut w, &reg, "a", "soul_rend", Some("npc_1"), None, None, now, wall);
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "soul_rend",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "soul_rend",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         // Nur ein Effekt pro Gruppe
-        let doom: Vec<_> = w.npcs["npc_1"].effects.iter().filter(|e| e.group == "doom").collect();
+        let doom: Vec<_> = w.npcs["npc_1"]
+            .effects
+            .iter()
+            .filter(|e| e.group == "doom")
+            .collect();
         assert_eq!(doom.len(), 1);
     }
 
@@ -1071,8 +1383,24 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "frost_nova", Some("npc_1"), None, None, now, wall);
-        assert!(events.iter().any(|e| matches!(e, CombatEvent::AbilityResult { outcome: AbilityOutcome::Started, .. })));
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "frost_nova",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            CombatEvent::AbilityResult {
+                outcome: AbilityOutcome::Started,
+                ..
+            }
+        )));
         assert!(w.players["a"].active_cast.is_some());
 
         // Tick nach cast_time_ms
@@ -1089,7 +1417,17 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        start_ability(&mut w, &reg, "a", "frost_nova", Some("npc_1"), None, None, now, wall);
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "frost_nova",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
 
         // Spieler bewegt sich
         w.players.get_mut("a").unwrap().x = 10.0;
@@ -1107,7 +1445,17 @@ mod tests {
         let (mut w, reg) = make_world_with_ability(def);
         let now = Instant::now();
         let wall = SystemTime::now();
-        start_ability(&mut w, &reg, "a", "soul_rend", Some("npc_1"), None, None, now, wall);
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "soul_rend",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(!w.npcs["npc_1"].effects.is_empty());
         on_death(&mut w, "npc_1", false);
         assert!(w.npcs["npc_1"].effects.is_empty());
@@ -1120,7 +1468,17 @@ mod tests {
         w.npcs.get_mut("npc_1").unwrap().x = 100.0;
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(events.iter().any(|e| {
             if let CombatEvent::AbilityResult {
                 outcome: AbilityOutcome::Failed,
@@ -1140,17 +1498,33 @@ mod tests {
         let def = fire_bolt_def();
         let (mut w, reg) = make_world_with_ability(def);
         w.players.get_mut("a").unwrap().effects.push(Effect {
-            id: "stun1".into(), effect_id: "stun".into(),
-            group: "crowd".into(), source_entity: "b".into(),
+            id: "stun1".into(),
+            effect_id: "stun".into(),
+            group: "crowd".into(),
+            source_entity: "b".into(),
             source_kind: SourceKind::Ability,
             target_entity: "a".into(),
             kind: EffectKind::Stun,
-            started_at: Instant::now(), duration_ms: 3000,
-            tick_ms: 0, next_tick_at: None, value: 0.0, interrupts_on_damage: false,
+            started_at: Instant::now(),
+            duration_ms: 3000,
+            tick_ms: 0,
+            next_tick_at: None,
+            value: 0.0,
+            interrupts_on_damage: false,
         });
         let now = Instant::now();
         let wall = SystemTime::now();
-        let events = start_ability(&mut w, &reg, "a", "fire_bolt", Some("npc_1"), None, None, now, wall);
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "fire_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            now,
+            wall,
+        );
         assert!(events.iter().any(|e| {
             if let CombatEvent::AbilityResult {
                 outcome: AbilityOutcome::Failed,

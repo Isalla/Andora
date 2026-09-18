@@ -515,8 +515,8 @@ pub fn attempt_pickup(
             for (pid, amt) in recipients.iter().zip(&amounts) {
                 if let Some(p) = world.players.get_mut(pid) {
                     if *amt > 0 {
-                        p.gold += *amt;
-                        p.mark_dirty(crate::persist::PersistComponent::Gold);
+                        p.idia += *amt;
+                        p.mark_dirty(crate::persist::PersistComponent::Idia);
                     }
                 }
             }
@@ -610,7 +610,7 @@ mod tests {
                 exp: 0,
                 free_attr_points: 0,
                 rested_pool: 0,
-                gold: 0,
+                idia: 0,
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
@@ -632,6 +632,7 @@ mod tests {
                 quests: Default::default(),
                 dirty: Default::default(),
                 persist_generation: 0,
+                persist_revision: 0,
             },
             rx,
         )
@@ -824,7 +825,7 @@ mod tests {
             &LootCfg::default(),
         );
         assert_eq!(r, PickupResult::PickedUp);
-        assert_eq!(w.players["alice"].gold, 50);
+        assert_eq!(w.players["alice"].idia, 50);
         assert!(!w.loot_drops.contains_key(&id), "Gold-Drop entfernt");
     }
 
@@ -854,8 +855,8 @@ mod tests {
             &LootCfg::default(),
         );
         assert_eq!(r, PickupResult::PickedUp);
-        assert_eq!(w.players["alice"].gold, 50);
-        assert_eq!(w.players["bob"].gold, 50);
+        assert_eq!(w.players["alice"].idia, 50);
+        assert_eq!(w.players["bob"].idia, 50);
         assert!(!w.loot_drops.contains_key(&id));
     }
 
@@ -882,9 +883,9 @@ mod tests {
             PickupResult::PickedUp
         );
         // 10 über 3 Empfänger → [4,3,3] in stabiler (BTreeMap-)Reihenfolge.
-        assert_eq!(w.players["alice"].gold, 4);
-        assert_eq!(w.players["bob"].gold, 3);
-        assert_eq!(w.players["carol"].gold, 3);
+        assert_eq!(w.players["alice"].idia, 4);
+        assert_eq!(w.players["bob"].idia, 3);
+        assert_eq!(w.players["carol"].idia, 3);
     }
 
     // ── Pickup: Claim ────────────────────────────────────────────────
@@ -906,7 +907,7 @@ mod tests {
             &LootCfg::default(),
         );
         assert_eq!(r, PickupResult::NotClaimed);
-        assert_eq!(w.players["mallory"].gold, 0);
+        assert_eq!(w.players["mallory"].idia, 0);
         assert!(w.loot_drops.contains_key(&id), "Loot bleibt liegen");
     }
 
@@ -1054,8 +1055,8 @@ mod tests {
         );
         assert_eq!(r, PickupResult::PickedUp);
         let p = &w.players["alice"];
-        assert_eq!(p.gold, 50);
-        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Gold));
+        assert_eq!(p.idia, 50);
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Idia));
         assert_eq!(p.persist_generation, 1);
     }
 
@@ -1076,10 +1077,9 @@ mod tests {
         assert_eq!(r, PickupResult::PickedUp);
         let p = &w.players["alice"];
         assert_eq!(p.inventory.count_of("wolf_hide"), 3);
-        assert!(
-            p.dirty
-                .is_dirty(crate::persist::PersistComponent::Inventory)
-        );
+        assert!(p
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Inventory));
     }
 
     #[test]

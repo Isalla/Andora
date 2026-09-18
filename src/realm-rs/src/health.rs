@@ -180,6 +180,11 @@ mod tests {
             allow_destructive: false,
             combat: crate::config::combat_config(&Default::default()),
             npc: crate::config::npc_config(&Default::default()),
+            persist: crate::config::PersistCfg {
+                player_persist_interval_ms: 900_000,
+                drain_interval_ms: 500,
+                persistence_dir: String::from("/tmp/realm-rs-persist-health"),
+            },
             group: crate::group::GroupCfg::default(),
             inventory: Default::default(),
             loot: Default::default(),

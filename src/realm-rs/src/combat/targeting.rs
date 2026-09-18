@@ -13,8 +13,18 @@ pub struct TargetValidation {
 }
 
 impl TargetValidation {
-    fn ok() -> Self { Self { valid: true, reason: None } }
-    fn fail(reason: &str) -> Self { Self { valid: false, reason: Some(reason.to_string()) } }
+    fn ok() -> Self {
+        Self {
+            valid: true,
+            reason: None,
+        }
+    }
+    fn fail(reason: &str) -> Self {
+        Self {
+            valid: false,
+            reason: Some(reason.to_string()),
+        }
+    }
 }
 
 /// Validiert ein einzelnes Ziel für eine feindliche Fähigkeit.
@@ -169,8 +179,8 @@ pub fn line_of_sight(_world: &World, _from_x: f64, _from_y: f64, _to_x: f64, _to
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::combat::effects::EffectKind;
     use crate::combat::effects::Effect;
+    use crate::combat::effects::EffectKind;
     use crate::world::Player;
     use std::collections::HashSet;
     use std::time::Instant;
@@ -181,11 +191,13 @@ mod tests {
         Player {
             id: id.into(),
             name: id.into(),
-            x, y,
+            x,
+            y,
             face: 0.0,
             ping_ms: 0,
             zone_id: 0,
-            hp, max_hp: hp,
+            hp,
+            max_hp: hp,
             lang: "de".into(),
             account_id: 0,
             session_id: String::new(),
@@ -199,7 +211,7 @@ mod tests {
             exp: 0,
             free_attr_points: 0,
             rested_pool: 0,
-            gold: 0,
+            idia: 0,
             armor: 0,
             weapon_skill: 1,
             combat: None,
@@ -221,6 +233,7 @@ mod tests {
             quests: Default::default(),
             dirty: Default::default(),
             persist_generation: 0,
+            persist_revision: 0,
         }
     }
 

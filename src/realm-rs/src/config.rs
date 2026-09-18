@@ -177,6 +177,22 @@ pub struct NpcCfg {
     pub persist_interval_ms: u64,
 }
 
+/// Spieler-Persistenz Stufe B (docs/Player_Persistenz.md §33/§34/§37):
+/// Timing des periodischen Player-Flushes und des DB-Drains sowie das
+/// Basisverzeichnis der Durable-Spool-Dateien.
+#[derive(Debug, Clone)]
+pub struct PersistCfg {
+    /// Intervall (ms), in dem der zentrale Pfad ALLE online Spieler mit
+    /// Dirty-State als vollständige Spool-Batches sichert (§33/§37).
+    pub player_persist_interval_ms: u64,
+    /// Intervall (ms), in dem der Drain die älteste Spool-Batch auf die DB
+    /// anwendet (sequenziell, §36).
+    pub drain_interval_ms: u64,
+    /// Basisverzeichnis der Spool-Struktur (entsteht automatisch):
+    /// spool/ (anzuwendende Batches), superseded/, quarantine/open|archive/.
+    pub persistence_dir: String,
+}
+
 /// Vorläufige Loot-V1-Mechanikwerte (docs/Lootsystem.md). Alle Werte sind
 /// per config.env übersteuerbar — keine Architekturwerte.
 #[derive(Debug, Clone)]
@@ -323,6 +339,19 @@ pub fn loot_config(env: &HashMap<String, String>) -> LootCfg {
     }
 }
 
+pub fn persist_config(env: &HashMap<String, String>) -> PersistCfg {
+    let dir = env.get("PERSISTENCE_DIR").cloned().unwrap_or_default();
+    PersistCfg {
+        player_persist_interval_ms: num1(env, "PLAYER_PERSIST_INTERVAL_MS", 900_000),
+        drain_interval_ms: num1(env, "PERSIST_DRAIN_INTERVAL_MS", 8_000),
+        persistence_dir: if dir.is_empty() {
+            "spool-data".to_string()
+        } else {
+            dir
+        },
+    }
+}
+
 pub fn inventory_config(env: &HashMap<String, String>) -> InventoryCfg {
     let base = num1(env, "INVENTORY_BASE_SLOTS", 8) as u16;
     let max_bags = env
@@ -377,6 +406,8 @@ pub struct Config {
     pub loot: LootCfg,
     /// Progressionssystem V1 (docs/Erfahrung_und_Progressionssystem.md).
     pub progression: ProgressionCfg,
+    /// Spieler-Persistenz Stufe B (docs/Player_Persistenz.md).
+    pub persist: PersistCfg,
 }
 
 pub fn load_env(path: &std::path::Path) -> HashMap<String, String> {
@@ -495,6 +526,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         inventory: inventory_config(&env),
         loot: loot_config(&env),
         progression: progression_config(&env),
+        persist: persist_config(&env),
     })
 }
 

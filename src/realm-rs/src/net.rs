@@ -28,6 +28,7 @@ pub async fn serve(
     shared: Shared,
     parental: SharedParental,
     groups: SharedGroups,
+    persist: Arc<crate::spool::PersistRuntime>,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
     // Ability-Registry aus Content-Schicht laden (Migration 010).
@@ -47,6 +48,7 @@ pub async fn serve(
         registry,
         groups,
         quest: crate::quest::QuestService::new(),
+        persist,
     });
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -140,53 +142,36 @@ async fn handle_conn(ctx: Arc<Ctx>, sock: tokio::net::TcpStream) -> Result<(), S
         dispatch(&ctx, &tx, conn_id, frame).await;
     }
 
-    // Disconnect: Parental-State abräumen, Position + EXP speichern,
-    // DESPAWN-Broadcast, Registry putzen, Gruppenzustand (§9) aktualisieren.
+    // Disconnect: Parental-State abräumen, finaler Persistenz-Flush
+    // (Stufe B: vollständiger Durable-Spool-Batch via zentralem Pfad),
+    // logout_at für die einmalige Rested-Berechnung (§12), DESPAWN-
+    // Broadcast, Registry putzen, Gruppenzustand (§9) aktualisieren.
     let pid: Option<String> = {
         let mut world = ctx.shared.lock().await;
         world.closers.remove(&conn_id);
         let pid = world.by_conn.get(&conn_id).cloned();
         if let Some(ref pid) = pid {
-            if let Some(me) = world.players.get(pid) {
-                let (id, x, y, level, exp, free_attr_points, rested_pool, gold) = (
-                    me.id.clone(),
-                    me.x,
-                    me.y,
-                    me.level,
-                    me.exp,
-                    me.free_attr_points,
-                    me.rested_pool,
-                    me.gold,
-                );
-                let mut inventory = me.inventory.clone();
-                drop(world);
-                // Rested-EXP §12: Logout-Zeitpunkt (Epoch-Sekunden) für die
-                // einmalige Rested-Berechnung beim nächsten Login festhalten.
+            if world.players.contains_key(pid) {
+                // Logout-Zeitpunkt (Epoch-Sekunden) für die einmalige
+                // Rested-Berechnung beim nächsten Login festhalten (§12).
                 let logout_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
-                db::save_position(&ctx.db, &id, x, y).await;
-                db::save_progression(
-                    &ctx.db,
-                    &id,
-                    level,
-                    exp,
-                    free_attr_points,
-                    rested_pool,
-                    Some(logout_at),
-                )
-                .await;
-                // Loot System V1: Goldstand persistieren (Fehler nur loggen).
-                db::save_gold(&ctx.db, &id, gold).await;
-                // Inventory V1: Grundinventar/Rucksäcke/Equipment persistieren.
-                // Der Sicherheits-Puffer (temporär) verfällt beim Logout
-                // (docs/inventory_system.md §11); er wird nie persistiert,
-                // daher sind hier keine DB-Aufträumungen nötig.
-                if let Err(e) = db::save_inventory(&ctx.db, &id, &inventory).await {
-                    log::error!("disconnect saveInventory {id}: {e}");
+                drop(world);
+                // finaler Disconnect-Save über den zentralen
+                // Player-Persistenzpfad (force): vollständiger Snapshot als
+                // Durable-Spool-Batch. Der Inventar-Sicherheits-Puffer ist
+                // temporär und wird nie persistiert (build_snapshot); der
+                // Spieler verlässt den RAM mit dem Disconnect.
+                if let Err(e) = ctx.persist.persist_player(&ctx.shared, pid, true).await {
+                    log::error!("disconnect persist {pid}: {e}");
                 }
-                inventory.drop_buffer();
+                // logout_at wird NICHT über den Drain geschrieben (gehört
+                // zum finalen Disconnect-Save, docs §23), sondern direkt.
+                if let Err(e) = db::write_logout_at(&ctx.db, pid, logout_at).await {
+                    log::error!("disconnect saveLogoutAt {pid}: {e}");
+                }
                 let mut world = ctx.shared.lock().await;
                 disconnect_player(&mut world, pid);
             }

@@ -27,6 +27,7 @@ mod regen;
 mod parental;
 mod persist;
 mod protocol;
+mod spool;
 mod world;
 
 use std::path::PathBuf;
@@ -77,6 +78,37 @@ async fn async_main() -> Result<(), String> {
     let parental = parental::new_shared(auth.clone());
     let groups = group::new_shared_groups(cfg.group.clone());
 
+    // Spieler-Persistenz Stufe B: Spool-Runtime (Durable-Batches) inkl.
+    // Status (Recovering → Ready/Degraded, docs/Player_Persistenz.md
+    // §34/§36). Verzeichnisse werden automatisch angelegt.
+    let persist = Arc::new(crate::spool::PersistRuntime::new(
+        std::path::Path::new(&cfg.persist.persistence_dir),
+        &cfg.combat.weapon_skill_id,
+    )?);
+    // Startup-Recovery (§34) NACH den Migrationen und VOR `net::serve`:
+    // im Spool liegende Batches (Crash/Wartung) werden auf die DB angewendet.
+    // Ein DB-Fehler bricht den Start NICHT ab — der Realm startet dann im
+    // Status DEGRADED (Login weiter möglich, Drain retryt periodisch).
+    match persist.recover(&pool).await {
+        Ok(report) => {
+            if report.batches_processed > 0 || report.batches_quarantined > 0 {
+                log::info!(
+                    "Recovery-Drain: {} Batches, {} angewendet, {} übersprungen, {} superseded, {} quarantäniert",
+                    report.batches_processed,
+                    report.entries_applied,
+                    report.entries_skipped,
+                    report.entries_superseded,
+                    report.batches_quarantined
+                );
+            }
+            persist.set_status(crate::spool::PersistStatus::Ready);
+        }
+        Err(e) => {
+            log::error!("Recovery-Drain fehlgeschlagen: {e} — Realm startet als DEGRADED");
+            persist.set_status(crate::spool::PersistStatus::Degraded);
+        }
+    }
+
     let health_task = {
         let (cfg, shared) = (cfg.clone(), shared.clone());
         tokio::spawn(async move {
@@ -86,9 +118,22 @@ async fn async_main() -> Result<(), String> {
         })
     };
     let ws_task = {
-        let (cfg, shared, parental, groups) =
-            (cfg.clone(), shared.clone(), parental.clone(), groups.clone());
-        tokio::spawn(net::serve(cfg, pool.clone(), auth, shared, parental, groups))
+        let (cfg, shared, parental, groups, persist) = (
+            cfg.clone(),
+            shared.clone(),
+            parental.clone(),
+            groups.clone(),
+            persist.clone(),
+        );
+        tokio::spawn(net::serve(
+            cfg,
+            pool.clone(),
+            auth,
+            shared,
+            parental,
+            groups,
+            persist,
+        ))
     };
     let poller = parental::start_poller(parental.clone(), shared.clone());
     let tick_shared = shared.clone();
@@ -264,6 +309,81 @@ async fn async_main() -> Result<(), String> {
         }
     });
 
+    // Stufe B: periodischer Player-Persist (alle online Spieler mit
+    // Dirty-State werden als vollständige Durable-Spool-Batches gesichert,
+    // docs/Player_Persistenz.md §33/§37).
+    let player_persist_ms = cfg.persist.player_persist_interval_ms.max(1);
+    let persist_player_shared = shared.clone();
+    let persist_for_players = persist.clone();
+    let player_persister = tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_millis(player_persist_ms));
+        interval.tick().await; // ersten Tick überspringen (Start-Reihenfolge)
+        loop {
+            interval.tick().await;
+            let ids: Vec<String> = {
+                let world = persist_player_shared.lock().await;
+                world
+                    .players
+                    .values()
+                    .filter(|p| p.dirty.any())
+                    .map(|p| p.id.clone())
+                    .collect()
+            };
+            for id in &ids {
+                if let Err(e) = persist_for_players
+                    .persist_player(&persist_player_shared, id, false)
+                    .await
+                {
+                    log::error!("periodic persist {id}: {e}");
+                }
+            }
+        }
+    });
+
+    // Stufe B: periodischer DB-Drain (älteste Spool-Batch auf die DB, §36)
+    // + tägliche Retention der superseded-/Archiv-Dateien (§32).
+    let drain_ms = cfg.persist.drain_interval_ms.max(1);
+    let retention_every = (86_400_000_u64 / drain_ms).max(1);
+    let drain_pool = pool.clone();
+    let drain_runtime = persist.clone();
+    let drainer = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(drain_ms));
+        interval.tick().await; // ersten Tick überspringen
+        let mut ticks = 0_u64;
+        loop {
+            interval.tick().await;
+            ticks += 1;
+            match drain_runtime.drain_one(&drain_pool).await {
+                Ok(Some(report)) => {
+                    if report.batches_processed > 0 || report.batches_quarantined > 0 {
+                        log::info!(
+                            "Drain: {} Batches, {} angewendet, {} übersprungen, {} superseded, {} quarantäniert",
+                            report.batches_processed,
+                            report.entries_applied,
+                            report.entries_skipped,
+                            report.entries_superseded,
+                            report.batches_quarantined
+                        );
+                    }
+                    drain_runtime.set_status(crate::spool::PersistStatus::Ready);
+                }
+                Ok(None) => {
+                    drain_runtime.set_status(crate::spool::PersistStatus::Ready);
+                }
+                Err(e) => {
+                    log::error!("Drain fehlgeschlagen: {e}");
+                    drain_runtime.set_status(crate::spool::PersistStatus::Degraded);
+                }
+            }
+            if ticks % retention_every == 0 {
+                if let Err(e) = drain_runtime.run_retention() {
+                    log::error!("Spool-Retention: {e}");
+                }
+            }
+        }
+    });
+
     log::info!(
         "realm {} started (tick {tick_ms}ms, AOFB {aofb}m, db {})",
         cfg.realm_id,
@@ -278,7 +398,34 @@ async fn async_main() -> Result<(), String> {
     ticker.abort();
     poller.abort();
     ws_task.abort();
+    player_persister.abort();
+    drainer.abort();
     health_task.abort();
+    // Shutdown-Flush (docs/Player_Persistenz.md §23/§38): alle noch online
+    // Spieler final als vollständige Spool-Batches sichern (force) und den
+    // Logout-Zeitpunkt direkt setzen; danach ein letzter Drain.
+    let online: Vec<String> = {
+        let world = shared.lock().await;
+        world.players.keys().cloned().collect()
+    };
+    if !online.is_empty() {
+        log::info!("Shutdown-Flush für {} Spieler", online.len());
+    }
+    for id in &online {
+        if let Err(e) = persist.persist_player(&shared, id, true).await {
+            log::error!("shutdown persist {id}: {e}");
+        }
+        let logout_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = db::write_logout_at(&pool, id, logout_at).await {
+            log::error!("shutdown logout_at {id}: {e}");
+        }
+    }
+    if let Err(e) = persist.drain_one(&pool).await {
+        log::error!("final drain: {e}");
+    }
     pool.close().await;
     Ok(())
 }

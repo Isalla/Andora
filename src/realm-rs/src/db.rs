@@ -26,7 +26,13 @@ pub struct Character {
     pub rested_pool: i64,
     /// Epoch-Sekunden des letzten Ausloggens (None = kein Zeitstempel).
     pub logout_at: Option<i64>,
-    pub gold: i64,
+    /// Kanonische Spielerwährung (docs/Player_Persistenz.md §23) — Spalte
+    /// `idia`; Content-Loot-Typ 'gold' erhöht diese Währung.
+    pub idia: i64,
+    /// Persistenz-Revision (docs/Player_Persistenz.md §29): Revisionsnummer
+    /// des zuletzt angewendeten Player-Snapshots (Rename-/Superseded-/Quarantäne-
+    /// Logik des Spools; Stufe B).
+    pub persist_revision: i64,
     pub hp: i32,
     pub char_class: String,
     /// Typsichere Klassenbasis (docs/Klassensystem.md); aus
@@ -86,7 +92,7 @@ pub async fn open_pool(prefix: &str, cfg: &DbConfig) -> Result<Pool<MySql>, Stri
     Ok(pool)
 }
 
-/// DB-Zeile für `load_character` (19 Spalten; sqlx-Tupel-Limit ist 16,
+/// DB-Zeile für `load_character` (26 Spalten; sqlx-Tupel-Limit ist 16,
 /// daher strukturbasierte Zeile wie `NpcStateRow`).
 #[derive(Debug, Clone)]
 struct CharacterRow {
@@ -97,7 +103,8 @@ struct CharacterRow {
     free_attr_points: i32,
     rested_pool: i64,
     logout_at: Option<i64>,
-    gold: i64,
+    idia: i64,
+    persist_revision: i64,
     hp: i32,
     char_class: String,
     faction_transition: i8,
@@ -127,7 +134,8 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
             free_attr_points: row.try_get("free_attr_points")?,
             rested_pool: row.try_get("rested_pool")?,
             logout_at: row.try_get("logout_at")?,
-            gold: row.try_get("gold")?,
+            idia: row.try_get("idia")?,
+            persist_revision: row.try_get("persist_revision")?,
             hp: row.try_get("hp")?,
             char_class: row.try_get("char_class")?,
             faction_transition: row.try_get("faction_transition")?,
@@ -153,7 +161,7 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
 /// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
 pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
-        "SELECT id, name, level, exp, free_attr_points, rested_pool, logout_at, gold, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
+        "SELECT id, name, level, exp, free_attr_points, rested_pool, logout_at, idia, persist_revision, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
          endurance FROM characters WHERE id = ?",
     )
@@ -173,7 +181,8 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
             free_attr_points: row.free_attr_points.max(0) as u32,
             rested_pool: row.rested_pool.max(0),
             logout_at: row.logout_at,
-            gold: row.gold.max(0),
+            idia: row.idia.max(0),
+            persist_revision: row.persist_revision,
             hp: row.hp,
             char_class: row.char_class,
             class,
@@ -210,7 +219,8 @@ pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Charact
         free_attr_points: 0,
         rested_pool: 0,
         logout_at: None,
-        gold: 0,
+        idia: 0,
+        persist_revision: 0,
         hp: 100,
         char_class: class.canonical_db_name().to_string(),
         class,
@@ -257,7 +267,7 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
 
 /// Interne Transaktionshilfe: Position in eine laufende sqlx-/MariaDB-
 /// Transaktion schreiben. Spiegel-Baustein zu `write_progression`/
-/// `write_gold`/`write_inventory`/`write_quest_state`, damit der zentrale
+/// `write_idia`/`write_inventory`/`write_quest_state`, damit der zentrale
 /// Player-Persistenzpfad (docs/Player_Persistenz.md §15) die Position
 /// zusammen mit den anderen dirty Komponenten in EINEM Transaktionskontext
 /// schreiben kann. Der bisherige Einzelaufrufer `save_position` bleibt
@@ -293,15 +303,39 @@ pub(crate) async fn write_progression(
     rested_pool: i64,
     logout_at: Option<i64>,
 ) -> Result<(), String> {
+    write_progression_fields(tx, char_id, level, exp, free_attr_points, rested_pool).await?;
+    sqlx::query("UPDATE characters SET logout_at = ? WHERE id = ?")
+        .bind(logout_at)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveProgression {char_id} (logout_at): {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: Progressionsstand OHNE `logout_at` in eine
+/// laufende Transaktion schreiben (level/exp/free_attr_points/rested_pool).
+/// Der Spool-Drain der Stufe B nutzt diesen Baustein statt `write_progression`,
+/// damit angewendete Snapshots den (ausschließlich vom finalen Disconnect-
+/// Save gesetzten) Logout-Zeitpunkt NIE überschreiben (docs/Player_Persistenz.md
+/// §23/§30: logout_at gehört nicht in den Snapshot).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_progression_fields(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    level: u32,
+    exp: i64,
+    free_attr_points: u32,
+    rested_pool: i64,
+) -> Result<(), String> {
     sqlx::query(
-        "UPDATE characters SET level = ?, exp = ?, free_attr_points = ?, rested_pool = ?, \
-         logout_at = ? WHERE id = ?",
+        "UPDATE characters SET level = ?, exp = ?, free_attr_points = ?, rested_pool = ? \
+         WHERE id = ?",
     )
     .bind(level as i32)
     .bind(exp)
     .bind(free_attr_points as i32)
     .bind(rested_pool)
-    .bind(logout_at)
     .bind(char_id)
     .execute(&mut **tx)
     .await
@@ -350,39 +384,195 @@ pub async fn save_progression(
     }
 }
 
-/// Interne Transaktionshilfe: Goldstand in eine laufende Transaktion
-/// schreiben. Wird vom bisherigen Einzel-Save (`save_gold`) und vom
-/// atomaren Questabschluss genutzt (Quest V1.2a.2).
-pub(crate) async fn write_gold(
-    tx: &mut sqlx::Transaction<'_, MySql>,
+/// Schreibt `logout_at` direkt (finaler Disconnect-Save, docs/
+/// Player_Persistenz.md §23): Der Logout-Zeitpunkt ist NICHT Teil des
+/// vollständigen Snapshots/Drains (sonst würde ein später angewendeter
+/// Batch ihn überschreiben). Fehler nur loggen (wie save_position).
+pub(crate) async fn write_logout_at(
+    pool: &Pool<MySql>,
     char_id: &str,
-    gold: i64,
+    logout_at: i64,
 ) -> Result<(), String> {
-    sqlx::query("UPDATE characters SET gold = ? WHERE id = ?")
-        .bind(gold)
+    sqlx::query("UPDATE characters SET logout_at = ? WHERE id = ?")
+        .bind(logout_at)
         .bind(char_id)
-        .execute(&mut **tx)
+        .execute(pool)
         .await
-        .map_err(|e| format!("saveGold {char_id}: {e}"))?;
+        .map_err(|e| format!("saveLogoutAt {char_id}: {e}"))?;
     Ok(())
 }
 
-/// Speichert den Goldstand (Fehler nur loggen — kein Crash).
-pub async fn save_gold(pool: &Pool<MySql>, char_id: &str, gold: i64) {
+/// Interne Transaktionshilfe: Geldstand (idia) in eine laufende Transaktion
+/// schreiben. Wird vom bisherigen Einzel-Save (`save_idia`) und vom
+/// Spool-Drain der Stufe B (docs/Player_Persistenz.md §30) genutzt.
+pub(crate) async fn write_idia(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    idia: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET idia = ? WHERE id = ?")
+        .bind(idia)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveIdia {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Speichert den Geldstand (idia; Fehler nur loggen — kein Crash).
+pub async fn save_idia(pool: &Pool<MySql>, char_id: &str, idia: i64) {
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            log::error!("saveGold {char_id}: {e}");
+            log::error!("saveIdia {char_id}: {e}");
             return;
         }
     };
-    if let Err(e) = write_gold(&mut tx, char_id, gold).await {
-        log::error!("saveGold {char_id}: {e}");
+    if let Err(e) = write_idia(&mut tx, char_id, idia).await {
+        log::error!("saveIdia {char_id}: {e}");
         return;
     }
     if let Err(e) = tx.commit().await {
-        log::error!("saveGold {char_id}: {e}");
+        log::error!("saveIdia {char_id}: {e}");
     }
+}
+
+/// Interne Transaktionshilfe: aktuelle HP/Mana in eine laufende Transaktion
+/// schreiben (docs/Player_Persistenz.md §23, Stufe B Full Snapshot).
+pub(crate) async fn write_resources(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    hp: i32,
+    mana: i32,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET hp = ?, mana = ? WHERE id = ?")
+        .bind(hp)
+        .bind(mana)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveResources {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: die sieben Grundattribute in eine laufende
+/// Transaktion schreiben (docs/Attribute_und_Regeneration.md §11).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_attributes(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    attrs: &crate::attributes::Attributes,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE characters SET strength = ?, agility = ?, intelligence = ?, \
+         constitution = ?, wisdom = ?, luck = ?, endurance = ? WHERE id = ?",
+    )
+    .bind(attrs.strength)
+    .bind(attrs.dexterity)
+    .bind(attrs.intelligence)
+    .bind(attrs.constitution)
+    .bind(attrs.wisdom)
+    .bind(attrs.luck)
+    .bind(attrs.endurance)
+    .bind(char_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("saveAttributes {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: permanente Klassenwahl + Fraktions-Übergang
+/// in eine laufende Transaktion schreiben (docs/Klassensystem.md).
+pub(crate) async fn write_character_class(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    class: crate::class::ClassStatus,
+    faction_transition: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET char_class = ?, faction_transition = ? WHERE id = ?")
+        .bind(class.canonical_db_name())
+        .bind(faction_transition)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveCharacterClass {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: Level des Waffen-/Kampfskills (skills-Tabelle,
+/// docs/Kampfsystem.md §4) in eine laufende Transaktion schreiben.
+pub(crate) async fn write_weapon_skill(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    weapon_skill_id: &str,
+    lvl: u32,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO skills (char_id, skill_id, lvl) VALUES (?, ?, ?) \
+         ON DUPLICATE KEY UPDATE lvl = VALUES(lvl)",
+    )
+    .bind(char_id)
+    .bind(weapon_skill_id)
+    .bind(lvl as i32)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("saveWeaponSkill {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: gelernte Fähigkeiten als VOLLERSATZ in eine
+/// laufende Transaktion schreiben (character_abilities, docs/Ability-System.md
+/// §9). Delete + Insert in derselben Transaktion — abwesende Fähigkeiten
+/// gelten als nicht gelernt.
+pub(crate) async fn write_character_abilities(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    abilities: &[String],
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM character_abilities WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveAbilities {char_id} (delete): {e}"))?;
+    for ability_id in abilities {
+        sqlx::query("INSERT INTO character_abilities (char_id, ability_id) VALUES (?, ?)")
+            .bind(char_id)
+            .bind(ability_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("saveAbilities {char_id} (insert {ability_id}): {e}"))?;
+    }
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: persistierte Persistenz-Revision eines
+/// Charakters in einer laufenden Transaktion setzen (docs §29).
+pub(crate) async fn write_persist_revision(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    revision: i64,
+) -> Result<(), String> {
+    sqlx::query("UPDATE characters SET persist_revision = ? WHERE id = ?")
+        .bind(revision)
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("writePersistRevision {char_id}: {e}"))?;
+    Ok(())
+}
+
+/// Persistierte Persistenz-Revision eines Charakters lesen
+/// (docs/Player_Persistenz.md §29). `None` = kein Charakter-Datensatz
+/// (der Drain quarantäniert solche Batches, statt den Drain zu blockieren).
+pub(crate) async fn load_persist_revision(
+    pool: &Pool<MySql>,
+    char_id: &str,
+) -> Result<Option<i64>, String> {
+    sqlx::query_scalar("SELECT persist_revision FROM characters WHERE id = ?")
+        .bind(char_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("persist_revision lesen {char_id}: {e}"))
 }
 
 /// Content-Definition eines Monsters (monster_definitions, Migration 009).
@@ -722,14 +912,13 @@ pub async fn save_character_class(
     class: crate::class::ClassStatus,
     faction_transition: bool,
 ) {
-    if let Err(e) = sqlx::query(
-        "UPDATE characters SET char_class = ?, faction_transition = ? WHERE id = ?",
-    )
-    .bind(class.canonical_db_name())
-    .bind(faction_transition)
-    .bind(char_id)
-    .execute(pool)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE characters SET char_class = ?, faction_transition = ? WHERE id = ?")
+            .bind(class.canonical_db_name())
+            .bind(faction_transition)
+            .bind(char_id)
+            .execute(pool)
+            .await
     {
         log::error!("saveCharacterClass {char_id}: {e}");
     }
@@ -744,19 +933,40 @@ pub async fn save_character_class(
 
 /// Lädt alle statischen Item-Definitionen inkl. Klassen/Attributen/
 /// Resistenzen (Content-Schicht der Realm-Inhaltsversion).
-pub async fn load_item_definitions(pool: &Pool<MySql>) -> Result<Vec<crate::item::ItemDefinition>, String> {
+pub async fn load_item_definitions(
+    pool: &Pool<MySql>,
+) -> Result<Vec<crate::item::ItemDefinition>, String> {
     use crate::item::{BindingRule, ItemCategory, ItemDefinition, Rarity};
 
-    let rows =
-        sqlx::query_as::<_, (String, String, Option<String>, String, String, i32, f64, i64, f64, Option<f64>, Option<i64>, Option<f64>, Option<String>, Option<f64>, Option<i32>, String)>(
-            "SELECT id, name, description, category, rarity, item_level, base_quality, \
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            i32,
+            f64,
+            i64,
+            f64,
+            Option<f64>,
+            Option<i64>,
+            Option<f64>,
+            Option<String>,
+            Option<f64>,
+            Option<i32>,
+            String,
+        ),
+    >(
+        "SELECT id, name, description, category, rarity, item_level, base_quality, \
              max_stack, weight, base_damage, duration_ms, range, weapon_type, armor_value, \
              min_level, binding_rule FROM item_definitions",
-        )
-        .persistent(false)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Item-Definitionen laden: {e}"))?;
+    )
+    .persistent(false)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Item-Definitionen laden: {e}"))?;
 
     let mut defs = Vec::new();
     for (
@@ -814,18 +1024,20 @@ pub async fn load_item_definitions(pool: &Pool<MySql>) -> Result<Vec<crate::item
             .collect();
 
         // Attributboni und Resistenzen.
-        let attrs: Vec<(String, f64)> =
-            sqlx::query_as("SELECT attribute, bonus FROM item_definition_attributes WHERE item_id = ?")
-                .bind(&id)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("Item-Attribute laden ({id}): {e}"))?;
-        let resists: Vec<(String, f64)> =
-            sqlx::query_as("SELECT resistance, bonus FROM item_definition_resistances WHERE item_id = ?")
-                .bind(&id)
-                .fetch_all(pool)
-                .await
-                .map_err(|e| format!("Item-Resistenzen laden ({id}): {e}"))?;
+        let attrs: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT attribute, bonus FROM item_definition_attributes WHERE item_id = ?",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Item-Attribute laden ({id}): {e}"))?;
+        let resists: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT resistance, bonus FROM item_definition_resistances WHERE item_id = ?",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Item-Resistenzen laden ({id}): {e}"))?;
 
         let def = ItemDefinition {
             item_id: id,
@@ -1093,10 +1305,7 @@ async fn write_item_instance(
 
 /// Hilfsfunktion: Item-Instanz laden oder None (verschwundene
 /// FK-Zeilen → leerer Slot).
-async fn load_instance_opt(
-    pool: &Pool<MySql>,
-    uuid: &str,
-) -> Option<crate::item::ItemInstance> {
+async fn load_instance_opt(pool: &Pool<MySql>, uuid: &str) -> Option<crate::item::ItemInstance> {
     match load_item_instance(pool, uuid).await {
         Ok(Some(i)) => Some(i),
         _ => None,
@@ -1117,12 +1326,13 @@ pub async fn load_inventory(
     let mut state = InventoryState::new(base_slots);
 
     // --- Grundinventar (Basis-Slots) ---
-    let rows: Vec<(i64, Option<String>)> =
-        sqlx::query_as("SELECT slot, item_uuid FROM character_inventory WHERE char_id = ? ORDER BY slot")
-            .bind(char_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Inventar laden: {e}"))?;
+    let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT slot, item_uuid FROM character_inventory WHERE char_id = ? ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Inventar laden: {e}"))?;
     for (slot, uuid) in rows {
         if slot < 0 || slot as usize >= state.base_slots.len() {
             log::warn!(
@@ -1136,12 +1346,13 @@ pub async fn load_inventory(
     }
 
     // --- Rucksäcke (Definitionen) ---
-    let bag_rows: Vec<(i64, String, i64)> =
-        sqlx::query_as("SELECT bag_id, name, slot_count FROM character_bags WHERE char_id = ? ORDER BY bag_id")
-            .bind(char_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Rucksäcke laden: {e}"))?;
+    let bag_rows: Vec<(i64, String, i64)> = sqlx::query_as(
+        "SELECT bag_id, name, slot_count FROM character_bags WHERE char_id = ? ORDER BY bag_id",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Rucksäcke laden: {e}"))?;
     for (bag_id, name, slot_count) in bag_rows {
         let n = slot_count.max(0) as usize;
         if n == 0 {
@@ -1154,14 +1365,13 @@ pub async fn load_inventory(
         });
     }
     // --- Bag-Slots (Inhalt) ---
-    let slot_rows: Vec<(i64, i64, Option<String>)> =
-        sqlx::query_as(
-            "SELECT bag_id, slot, item_uuid FROM bag_slots WHERE char_id = ? ORDER BY bag_id, slot",
-        )
-        .bind(char_id)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| format!("Rucksack-Slots laden: {e}"))?;
+    let slot_rows: Vec<(i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT bag_id, slot, item_uuid FROM bag_slots WHERE char_id = ? ORDER BY bag_id, slot",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Rucksack-Slots laden: {e}"))?;
     for (bag_id, slot, uuid) in slot_rows {
         if let Some(b) = state.bags.iter_mut().find(|b| b.bag_id == bag_id as u64) {
             if slot >= 0 && (slot as usize) < b.slots.len() {
@@ -1188,12 +1398,13 @@ pub async fn load_inventory(
     }
 
     // --- Sicherheits-Puffer (temporär) ---
-    let buf_rows: Vec<(i64, Option<String>)> =
-        sqlx::query_as("SELECT slot, item_uuid FROM inventory_buffer WHERE char_id = ? ORDER BY slot")
-            .bind(char_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Puffer laden: {e}"))?;
+    let buf_rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT slot, item_uuid FROM inventory_buffer WHERE char_id = ? ORDER BY slot",
+    )
+    .bind(char_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Puffer laden: {e}"))?;
     for (slot, uuid) in buf_rows {
         if slot < 0 {
             continue;
@@ -1302,15 +1513,13 @@ pub(crate) async fn write_inventory(
     }
     // Equipment-Slots.
     for (slot, inst) in &state.equipped {
-        sqlx::query(
-            "INSERT INTO character_equipment (char_id, slot, item_uuid) VALUES (?, ?, ?)",
-        )
-        .bind(char_id)
-        .bind(slot.as_db())
-        .bind(&inst.item_uuid)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| format!("Equipment speichern: {e}"))?;
+        sqlx::query("INSERT INTO character_equipment (char_id, slot, item_uuid) VALUES (?, ?, ?)")
+            .bind(char_id)
+            .bind(slot.as_db())
+            .bind(&inst.item_uuid)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("Equipment speichern: {e}"))?;
     }
     // Puffer: in V1 nicht persistiert (temporär; §11). Zeilen werden
     // beim Logout gelöscht (wipe_logout_buffer) und niemals geschrieben.
@@ -1444,15 +1653,11 @@ pub async fn save_quest_state(
     data: &str,
 ) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| {
-        format!(
-            "Questzustand (char {char_id}, quest {quest_id}) — Transaktion beginnen: {e}"
-        )
+        format!("Questzustand (char {char_id}, quest {quest_id}) — Transaktion beginnen: {e}")
     })?;
     write_quest_state(&mut tx, char_id, quest_id, state, data).await?;
     tx.commit().await.map_err(|e| {
-        format!(
-            "Questzustand (char {char_id}, quest {quest_id}) — Transaktion commit: {e}"
-        )
+        format!("Questzustand (char {char_id}, quest {quest_id}) — Transaktion commit: {e}")
     })?;
     Ok(())
 }

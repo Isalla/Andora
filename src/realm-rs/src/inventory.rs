@@ -54,7 +54,11 @@ impl Default for InventoryCfg {
 
 /// Die 21 Equipment-/Funktionsslots von Inventory V1
 /// (docs/inventory_system.md §7, Tabelle 1–21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Serialize/Deserialize: vollständiger Player-Snapshot der Stufe B; die
+/// Serde-Variantennamen ("Chest", "MainHand", …) dienen als JSON-Schlüssel.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum EquipSlot {
     Head,
     Earring1,
@@ -161,7 +165,8 @@ pub const EQUIP_SLOTS: [EquipSlot; 21] = [
 ];
 
 /// Ein Rucksack / eine Tasche als eigener, benannter Inventarbereich.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Serialize/Deserialize: Teil des vollständigen Player-Snapshots (Stufe B).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Bag {
     /// Lokaler Bag-Index des Charakters (>= 1; PK-Teil char_id+bag_id).
     pub bag_id: u64,
@@ -195,7 +200,11 @@ pub struct AddOutcome {
 
 /// Zustand eines Spieler-Inventars (docs/inventory_system.md):
 /// Grundinventar, Rucksäcke, Equipment und temporärer Sicherheits-Puffer.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// Serialize/Deserialize: vollständiger Player-Snapshot der Stufe B
+/// (docs/Player_Persistenz.md §23). Der Sicherheits-Puffer wird bewusst
+/// NIE serialisiert (`#[serde(skip)]`) — er ist flüchtiger Runtime-State
+/// (docs/inventory_system.md §11) und verfällt beim Logout.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InventoryState {
     /// Basis-Slots des Grundinventars (len = Anzahl, Config).
     pub base_slots: Vec<Option<ItemInstance>>,
@@ -204,6 +213,7 @@ pub struct InventoryState {
     /// Equipment-/Funktionsslots (21, docs §7).
     pub equipped: BTreeMap<EquipSlot, ItemInstance>,
     /// Temporärer Sicherheits-Puffer (serverseitiger Ausnahmefall, §11).
+    #[serde(skip)]
     pub buffer: Vec<Option<ItemInstance>>,
 }
 
@@ -600,13 +610,8 @@ impl InventoryState {
         if self.equipped.contains_key(&slot) {
             return Err(InventoryError::SlotOccupied);
         }
-        let loc = self
-            .slot_of(uuid)
-            .ok_or(InventoryError::NotInInventory)?;
-        if !matches!(
-            loc,
-            ItemLoc::Base(_) | ItemLoc::Bag(_, _)
-        ) {
+        let loc = self.slot_of(uuid).ok_or(InventoryError::NotInInventory)?;
+        if !matches!(loc, ItemLoc::Base(_) | ItemLoc::Bag(_, _)) {
             return Err(InventoryError::NotInInventory);
         }
         if !matches!(
@@ -620,7 +625,9 @@ impl InventoryState {
         if !def.can_equip(level, class) {
             return Err(InventoryError::CannotEquip);
         }
-        let inst = self.instance_of(uuid).ok_or(InventoryError::NotInInventory)?;
+        let inst = self
+            .instance_of(uuid)
+            .ok_or(InventoryError::NotInInventory)?;
         if inst.item_id != def.item_id {
             return Err(InventoryError::NotInInventory);
         }
@@ -708,9 +715,7 @@ impl InventoryState {
         def: &ItemDefinition,
         uuid: &str,
     ) -> Result<(), InventoryError> {
-        let loc = self
-            .slot_of(uuid)
-            .ok_or(InventoryError::NotInInventory)?;
+        let loc = self.slot_of(uuid).ok_or(InventoryError::NotInInventory)?;
         let ItemLoc::Buffer(i) = loc else {
             return Err(InventoryError::NotInInventory);
         };
@@ -731,11 +736,7 @@ impl InventoryState {
     /// Puffer beim Logout leeren (docs §11): Items verfallen. Liefert die
     /// verfallenen Instanzen (für DB-Cleanup der item_instances-Zeilen).
     pub fn drop_buffer(&mut self) -> Vec<ItemInstance> {
-        let items: Vec<ItemInstance> = self
-            .buffer
-            .iter_mut()
-            .filter_map(|s| s.take())
-            .collect();
+        let items: Vec<ItemInstance> = self.buffer.iter_mut().filter_map(|s| s.take()).collect();
         self.buffer.clear();
         items
     }
@@ -779,7 +780,11 @@ impl InventoryState {
         if name.is_empty() {
             return Err(InventoryError::InvalidBagName);
         }
-        if self.bags.iter().any(|b| b.bag_id != bag_id && b.name == name) {
+        if self
+            .bags
+            .iter()
+            .any(|b| b.bag_id != bag_id && b.name == name)
+        {
             return Err(InventoryError::InvalidBagName);
         }
         let b = self
@@ -891,13 +896,20 @@ mod tests {
         let def = potion();
         inv.try_add(&def, 10);
         // Instanz mit individuellem Modifier (gecraftet) — darf nichts füllen.
-        let mut crafted = ItemInstance::new("c1", "hp_potion", ItemModifiers {
-            quality_modifier: 5.0,
-            ..Default::default()
-        });
+        let mut crafted = ItemInstance::new(
+            "c1",
+            "hp_potion",
+            ItemModifiers {
+                quality_modifier: 5.0,
+                ..Default::default()
+            },
+        );
         crafted.count = 1;
         assert!(!plain_copy(&crafted));
-        assert!(!mergeable_into(inv.base_slots[0].as_ref().unwrap(), &crafted));
+        assert!(!mergeable_into(
+            inv.base_slots[0].as_ref().unwrap(),
+            &crafted
+        ));
         let ok = inv.put_instance(&def, &crafted);
         assert!(ok);
         // Neue Zeile, keine Stack-Verschmelzung.
@@ -959,11 +971,23 @@ mod tests {
         );
         // Slot bereits belegt.
         assert_eq!(
-            inv.try_equip(&def, &uuid, EquipSlot::MainHand, 10, ClassStatus::Adventurer),
+            inv.try_equip(
+                &def,
+                &uuid,
+                EquipSlot::MainHand,
+                10,
+                ClassStatus::Adventurer
+            ),
             Ok(())
         );
         assert_eq!(
-            inv.try_equip(&def, &uuid, EquipSlot::MainHand, 10, ClassStatus::Adventurer),
+            inv.try_equip(
+                &def,
+                &uuid,
+                EquipSlot::MainHand,
+                10,
+                ClassStatus::Adventurer
+            ),
             Err(InventoryError::SlotOccupied)
         );
         // Ausgerüstet → nicht mehr im normalen Inventar.
@@ -1003,7 +1027,13 @@ mod tests {
         inv.base_slots[0].as_mut().unwrap().durability_max = Some(100);
         let uuid = inv.base_slots[0].as_ref().unwrap().item_uuid.clone();
         assert_eq!(
-            inv.try_equip(&def, &uuid, EquipSlot::MainHand, 10, ClassStatus::Adventurer),
+            inv.try_equip(
+                &def,
+                &uuid,
+                EquipSlot::MainHand,
+                10,
+                ClassStatus::Adventurer
+            ),
             Err(InventoryError::BrokenItem)
         );
     }
@@ -1058,14 +1088,13 @@ mod tests {
         broken.durability_max = Some(100);
         inv.equipped.insert(EquipSlot::MainHand, broken);
         let defs: std::collections::HashMap<String, ItemDefinition> =
-            [("eisenschwert".to_string(), def.clone())].into_iter().collect();
+            [("eisenschwert".to_string(), def.clone())]
+                .into_iter()
+                .collect();
         assert_eq!(inv.remove_broken_equipment(&defs), 1);
         assert!(inv.equipped.is_empty());
         assert_eq!(inv.buffer_len(), 0);
-        assert_eq!(
-            inv.base_slots.iter().filter(|s| s.is_some()).count(),
-            1
-        );
+        assert_eq!(inv.base_slots.iter().filter(|s| s.is_some()).count(), 1);
 
         // Fall 2: kein Platz → Sicherheits-Puffer (serverseitiger Ausnahmefall).
         let mut inv = InventoryState::new(0);
@@ -1082,7 +1111,9 @@ mod tests {
     fn buffer_requires_explicit_move_with_capacity_check() {
         let mut inv = InventoryState::new(0);
         let def = potion();
-        inv.buffer.push(Some(ItemInstance::new("pb1", "hp_potion", ItemModifiers::default()).with_ct(3)));
+        inv.buffer.push(Some(
+            ItemInstance::new("pb1", "hp_potion", ItemModifiers::default()).with_ct(3),
+        ));
         // Kein Platz → Fehler, Item bleibt im Puffer.
         assert_eq!(
             inv.try_buffer_to_inventory(&def, "pb1"),
@@ -1091,7 +1122,9 @@ mod tests {
         assert_eq!(inv.buffer_len(), 1);
         // Platz schaffen → bewusste Übertragung klappt.
         inv = InventoryState::new(4);
-        inv.buffer.push(Some(ItemInstance::new("pb1", "hp_potion", ItemModifiers::default()).with_ct(3)));
+        inv.buffer.push(Some(
+            ItemInstance::new("pb1", "hp_potion", ItemModifiers::default()).with_ct(3),
+        ));
         inv.try_add(&def, 2);
         inv.try_buffer_to_inventory(&def, "pb1").unwrap();
         assert_eq!(inv.buffer_len(), 0);
@@ -1103,8 +1136,14 @@ mod tests {
     #[test]
     fn drop_buffer_loses_items_on_logout() {
         let mut inv = InventoryState::new(4);
-        inv.buffer.push(Some(ItemInstance::new("x1", "hp_potion", ItemModifiers::default()).with_ct(2)));
-        inv.buffer.push(Some(ItemInstance::new("x2", "eisenschwert", ItemModifiers::default())));
+        inv.buffer.push(Some(
+            ItemInstance::new("x1", "hp_potion", ItemModifiers::default()).with_ct(2),
+        ));
+        inv.buffer.push(Some(ItemInstance::new(
+            "x2",
+            "eisenschwert",
+            ItemModifiers::default(),
+        )));
         let lost = inv.drop_buffer();
         assert_eq!(lost.len(), 2);
         assert_eq!(inv.buffer_len(), 0);
@@ -1242,7 +1281,7 @@ mod tests {
         inv.try_add(&def, 20); // Basis: voller Stack
         let bag_id = inv.create_bag(&c, "Tränke", 2).unwrap();
         inv.try_add(&def, 10); // Bag: 1 Stack à 10
-        // Basis zuerst (20), dann Bag (10) → 30 insgesamt entfernbar.
+                               // Basis zuerst (20), dann Bag (10) → 30 insgesamt entfernbar.
         assert_eq!(inv.try_remove("hp_potion", 25).unwrap(), 25);
         // Basis leer, Bag-Rest 5.
         assert_eq!(inv.count_of("hp_potion"), 5);

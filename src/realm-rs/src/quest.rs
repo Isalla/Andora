@@ -794,7 +794,7 @@ impl QuestService {
             .map_err(QuestCompletionError::Persistence)?;
         // Belohnungen EXP/Gold: V1.2a-Definitionen tragen keine Belohnungen —
         // es werden keine künstlichen Quest-EXP/-Gold-Rewards erzeugt. Die
-        // transaktionskomponierbaren Pfade `write_progression`/`write_gold`
+        // transaktionskomponierbaren Pfade `write_progression`/`write_idia`
         // stehen für künftige Belohnungsdefinitionen bereit.
 
         // §27.26 Schritt 5 + Doppelabschluss-Schutz: DB-Guard für den

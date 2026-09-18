@@ -126,6 +126,9 @@ pub fn apply_regen(player: &mut Player, tick_ms: u64) {
         if whole > 0 {
             let new_hp = (player.hp + whole).min(player.max_hp);
             player.hp = new_hp;
+            // §6/§39: HP-Regeneration ändert persistierbare Ressourcen →
+            // Komponente `Resources` dirty markieren (Stufe B).
+            player.mark_dirty(crate::persist::PersistComponent::Resources);
             if new_hp == player.max_hp {
                 player.hp_regen_carry = 0.0; // voller Pool: kein Carry aufbauen
             }
@@ -175,7 +178,7 @@ mod tests {
             exp: 0,
             free_attr_points: 0,
             rested_pool: 0,
-            gold: 0,
+            idia: 0,
             armor: 0,
             weapon_skill: 1,
             combat: None,
@@ -193,6 +196,7 @@ mod tests {
             quests: Default::default(),
             dirty: Default::default(),
             persist_generation: 0,
+            persist_revision: 0,
             effects: Vec::new(),
             cooldowns: Default::default(),
             active_cast: None,
@@ -261,37 +265,67 @@ mod tests {
     #[test]
     fn level_scaling() {
         // Kämpfer Level 50: (6 + 9,8) = 15,8 HP/s; Mana 3 + 9,8 = 12,8 Mana/s.
-        assert!(approx(effective_regen_per_sec("Kämpfer", 50, 0.0, false, false), 15.8));
-        assert!(approx(effective_mana_regen_per_sec("Kämpfer", 50, 0.0, false, false), 12.8));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 50, 0.0, false, false),
+            15.8
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kämpfer", 50, 0.0, false, false),
+            12.8
+        ));
         // Level 1: kein Zuwachs.
         assert_eq!(
             effective_regen_per_sec("Kämpfer", 1, 0.0, false, false),
             ClassRegen::FIGHTER.hp
         );
         // Level 11: +10 × 0,2 = +2,0.
-        assert!(approx(effective_regen_per_sec("Kämpfer", 11, 0.0, false, false), 8.0));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 11, 0.0, false, false),
+            8.0
+        ));
     }
 
     // 5: im Kampf 15 % (sitzend oder stehend — identisch).
     #[test]
     fn combat_multiplier_15_pct() {
-        assert!(approx(effective_regen_per_sec("Kämpfer", 1, 0.0, true, false), 0.9));
-        assert!(approx(effective_mana_regen_per_sec("Kämpfer", 1, 0.0, true, false), 0.45));
-        assert!(approx(effective_regen_per_sec("Kämpfer", 1, 0.0, true, true), 0.9));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 1, 0.0, true, false),
+            0.9
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kämpfer", 1, 0.0, true, false),
+            0.45
+        ));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 1, 0.0, true, true),
+            0.9
+        ));
     }
 
     // 3: sitzend außerhalb des Kampfes 125 %.
     #[test]
     fn sitting_outside_combat_125_pct() {
-        assert!(approx(effective_regen_per_sec("Kämpfer", 1, 0.0, false, true), 7.5));
-        assert!(approx(effective_mana_regen_per_sec("Kämpfer", 1, 0.0, false, true), 3.75));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 1, 0.0, false, true),
+            7.5
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kämpfer", 1, 0.0, false, true),
+            3.75
+        ));
     }
 
     // 4: im Kampf sitzend bleibt bei 15 % (kein Sitzbonus).
     #[test]
     fn sitting_in_combat_stays_15_pct() {
-        assert!(approx(effective_regen_per_sec("Kämpfer", 1, 0.0, true, true), 0.9));
-        assert!(approx(effective_mana_regen_per_sec("Kämpfer", 1, 0.0, true, true), 0.45));
+        assert!(approx(
+            effective_regen_per_sec("Kämpfer", 1, 0.0, true, true),
+            0.9
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kämpfer", 1, 0.0, true, true),
+            0.45
+        ));
     }
 
     // 6: additive Boni werden VOR dem Multiplikator addiert
@@ -302,9 +336,18 @@ mod tests {
         let base = effective_mana_regen_per_sec("Kundschafter", 41, 0.0, false, false);
         assert!(approx(base, 12.0));
         // Mit +4,0 Mana/s: 16,0 normal / 20,0 sitzend / 2,4 im Kampf.
-        assert!(approx(effective_mana_regen_per_sec("Kundschafter", 41, 4.0, false, false), 16.0));
-        assert!(approx(effective_mana_regen_per_sec("Kundschafter", 41, 4.0, false, true), 20.0));
-        assert!(approx(effective_mana_regen_per_sec("Kundschafter", 41, 4.0, true, false), 2.4));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kundschafter", 41, 4.0, false, false),
+            16.0
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kundschafter", 41, 4.0, false, true),
+            20.0
+        ));
+        assert!(approx(
+            effective_mana_regen_per_sec("Kundschafter", 41, 4.0, true, false),
+            2.4
+        ));
         // Algebra direkt: (12,0 + 4,0) × Zustandsmultiplikator.
         let r_normal = (12.0 + 4.0) * REGEN_MULT_NORMAL;
         let r_sitting = (12.0 + 4.0) * REGEN_MULT_SITTING;

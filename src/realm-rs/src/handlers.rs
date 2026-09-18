@@ -32,6 +32,10 @@ pub struct Ctx {
     /// Quest-Komponente. Registerspieldefinitionen (internes V1.1-Format);
     /// Spielerzustand wird aus der Tabelle `quests` geladen/persistiert.
     pub quest: crate::quest::QuestService,
+    /// Stufe-B-Persistenz: Spool + Status (Recovery/Ready/Degraded). Wird im
+    /// HELLO-Guard (Recovering → Login blockiert) und beim finalen
+    /// Disconnect-Save genutzt.
+    pub persist: std::sync::Arc<crate::spool::PersistRuntime>,
 }
 
 fn get_str(data: &serde_json::Value, key: &str) -> String {
@@ -100,6 +104,22 @@ pub async fn handle_hello(
     let char_id = get_str(data, "char_id");
     if char_id.is_empty() {
         return Err("missing char_id".into());
+    }
+    // Stufe B Login-Guard (docs/Player_Persistenz.md §34/§36/§37): Solange
+    // der Realm im Startup-Recovery ist (Recovering), wird der HELLO-Einstieg
+    // VERWEIGERT (Login blockiert — kein Spieler betritt einen Realm, dessen
+    // Spool noch nicht vollständig auf die DB gedrained ist). Bei `Degraded`
+    // ist der Einstieg erlaubt (Realm läuft, Drain retryt periodisch).
+    if ctx.persist.status() == crate::spool::PersistStatus::Recovering {
+        return Err("realm still recovering (Spool-Recovery) — retry later".into());
+    }
+    // Stufe B Login-Guard (docs/Player_Persistenz.md §34/§36): Solange der
+    // Startup-Recovery nicht abgeschlossen ist (Spool-Batches werden auf die
+    // DB angewendet), wird der Einstieg verweigert — kein Login auf evtl.
+    // inkonsistentem DB-Stand (Recovering). DEGRADED lässt Logins zu
+    // (Drain retryt periodisch, Realm bleibt spielbar).
+    if ctx.persist.status() == crate::spool::PersistStatus::Recovering {
+        return Err("realm still recovering".into());
     }
     let lang = {
         let l = get_str(data, "lang");
@@ -212,7 +232,7 @@ pub async fn handle_hello(
         exp: c.exp,
         free_attr_points: c.free_attr_points,
         rested_pool: rested_pool,
-        gold: c.gold,
+        idia: c.idia,
         weapon_skill,
         combat: None,
         effects: Vec::new(),
@@ -239,6 +259,7 @@ pub async fn handle_hello(
         quests,
         dirty: Default::default(),
         persist_generation: 0,
+        persist_revision: c.persist_revision,
     };
     let mut me = me;
     attributes::recompute_max_resources(&mut me);
@@ -1133,7 +1154,7 @@ mod tests {
                     exp: 0,
                     free_attr_points: 0,
                     rested_pool: 0,
-                    gold: 0,
+                    idia: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1155,6 +1176,7 @@ mod tests {
                     quests: Default::default(),
                     dirty: Default::default(),
                     persist_generation: 0,
+                    persist_revision: 0,
                 },
             );
             w.players.insert(
@@ -1182,7 +1204,7 @@ mod tests {
                     exp: 0,
                     free_attr_points: 0,
                     rested_pool: 0,
-                    gold: 0,
+                    idia: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1204,6 +1226,7 @@ mod tests {
                     quests: Default::default(),
                     dirty: Default::default(),
                     persist_generation: 0,
+                    persist_revision: 0,
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1291,7 +1314,7 @@ mod tests {
                     exp: 0,
                     free_attr_points: 0,
                     rested_pool: 0,
-                    gold: 0,
+                    idia: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1313,6 +1336,7 @@ mod tests {
                     quests: Default::default(),
                     dirty: Default::default(),
                     persist_generation: 0,
+                    persist_revision: 0,
                 },
             );
             w.players.insert(
@@ -1340,7 +1364,7 @@ mod tests {
                     exp: 0,
                     free_attr_points: 0,
                     rested_pool: 0,
-                    gold: 0,
+                    idia: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1362,6 +1386,7 @@ mod tests {
                     quests: Default::default(),
                     dirty: Default::default(),
                     persist_generation: 0,
+                    persist_revision: 0,
                 },
             );
             w.by_conn.insert(7, "a".into());
@@ -1409,7 +1434,7 @@ mod tests {
                     exp: 0,
                     free_attr_points: 0,
                     rested_pool: 0,
-                    gold: 0,
+                    idia: 0,
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
@@ -1431,6 +1456,7 @@ mod tests {
                     quests: Default::default(),
                     dirty: Default::default(),
                     persist_generation: 0,
+                    persist_revision: 0,
                 },
             );
             w.by_conn.insert(7, "a".into());
