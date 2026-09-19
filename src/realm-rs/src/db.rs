@@ -156,16 +156,24 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
     }
 }
 
-/// Lädt einen Charakter; erzeugt ihn bei Bedarf (Übergangs-Prototyp-
-/// verhalten aus src/realm, Zone 0, Spawn 0,0). Kämpft damit mit
-/// geladener Klasse, Level, HP, Mana und Rüstung ein (Combat V1/V3).
-pub async fn load_character(pool: &Pool<MySql>, char_id: &str) -> Result<Character, String> {
+/// Lädt einen Charakter AUSSCHLIESSLICH bei nachgewiesener Ownership:
+/// `char_id` muss der mit dem Handoff authentifizierten `account_id`
+/// gehören (characters.account_id). Unbekannte char_id, fremde Charaktere
+/// oder DB-Fehler werden fail-closed abgelehnt — es wird NIEMALS ein
+/// Charakter angelegt (docs/Player_Persistenz.md, Sicherheits-Blocker
+/// Charakter-Ownership V1; kein impliziter Create im Login-/Lookup-Pfad).
+pub async fn load_character(
+    pool: &Pool<MySql>,
+    account_id: u32,
+    char_id: &str,
+) -> Result<Character, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
         "SELECT id, name, level, exp, free_attr_points, rested_pool, logout_at, idia, persist_revision, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
-         endurance FROM characters WHERE id = ?",
+         endurance FROM characters WHERE id = ? AND account_id = ?",
     )
     .bind(char_id)
+    .bind(account_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Charakter laden: {e}"))?;

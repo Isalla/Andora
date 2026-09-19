@@ -138,7 +138,7 @@ pub async fn handle_hello(
     // wird dabei verbraucht (einmalig).
     let account_id = verify_entry(&ctx.auth, ctx.cfg.realm_id, &handoff, &session_id).await?;
 
-    let c = db::load_character(&ctx.db, &char_id).await.map_err(|e| {
+    let c = db::load_character(&ctx.db, account_id, &char_id).await.map_err(|e| {
         log::error!("HELLO load character: {e}");
         "character unavailable".to_string()
     })?;
