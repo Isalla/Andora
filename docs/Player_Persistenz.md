@@ -4,7 +4,7 @@
 
 **Player-Persistenz Stufe A (Dirty-State, periodischer Player-Save, Disconnect-/Shutdown-Flush) ist implementiert und abgeschlossen.**
 
-**Die Spool-/Recovery-Architektur (Stufe B) ist in dieser Datei dokumentiert, aber noch nicht implementiert.**
+**Die Spool-/Recovery-Architektur (Stufe B) ist implementiert und in der Datei dokumentiert.**
 
 Diese Datei definiert die allgemeine Persistenzstrategie für laufende Spielerzustände des Realm-Servers (`src/realm-rs`).
 
@@ -428,7 +428,7 @@ Zusätzlich für Stufe B (Spool-/Recovery-Architektur) bewusst offen gelassene P
 
 ## 21. Stufe B – Spool-/Recovery-Architektur (Grundarchitektur)
 
-**Status:** Architektur dokumentiert; Implementierung in einem separaten Coding-Auftrag.
+**Status:** Architektur dokumentiert und implementiert.
 
 Die bisherige direkte Vorstellung
 

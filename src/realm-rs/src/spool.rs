@@ -109,13 +109,22 @@ impl PersistRuntime {
     }
 
     /// Zentraler Player-Persistenzpfad (durable; siehe persist::persist_player).
+    /// Fehlgeschlagener Spool-Write (docs §40): Realm läuft weiter, der
+    /// Persistence-Zustand wird DEGRADED; Dirty-/Revision-Schutz bleibt in
+    /// persist_dirty_into erhalten (keine künstliche Revisionslücke).
     pub async fn persist_player(
         &self,
         shared: &crate::world::Shared,
         player_id: &str,
         force: bool,
     ) -> Result<(), String> {
-        crate::persist::persist_player(&self.spool, shared, player_id, force).await
+        match crate::persist::persist_player(&self.spool, shared, player_id, force).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.set_status(PersistStatus::Degraded);
+                Err(e)
+            }
+        }
     }
 
     /// Verarbeitet genau eine (die älteste) Batch-Datei. `None` = nichts zu
@@ -496,7 +505,9 @@ fn prune_older_than(dir: &Path, now_secs: u64) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::inventory::InventoryState;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::collections::{BTreeMap, HashSet};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use tokio::sync::mpsc;
 
     fn temp_dir(tag: &str) -> PathBuf {
         let stamp = SystemTime::now()
@@ -668,6 +679,109 @@ mod tests {
         // Idempotenz: zweites Auftreten desselben superseded-Stands → vorhandene
         // Ziel-State gilt, kein Überschreiben.
         assert!(dst.exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Test-Spieler mit definiertem Dirty-State und Revision (P-20-Test).
+    fn dirty_test_player(id: &str) -> (crate::world::Player, mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut p = crate::world::Player {
+            id: id.into(),
+            name: id.into(),
+            x: 10.0,
+            y: 20.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 100,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 0,
+            session_id: String::new(),
+            entities: HashSet::new(),
+            last_activity: Instant::now(),
+            tx,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 5,
+            exp: 1234,
+            free_attr_points: 2,
+            rested_pool: 50,
+            idia: 77,
+            armor: 0,
+            weapon_skill: 3,
+            combat: None,
+            mana: 50,
+            max_mana: 50,
+            effects: Vec::new(),
+            cooldowns: BTreeMap::new(),
+            active_cast: None,
+            learned_abilities: HashSet::new(),
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 50,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: InventoryState::new(8),
+            quests: BTreeMap::new(),
+            dirty: crate::persist::PersistDirty::default(),
+            persist_generation: 0,
+            persist_revision: 5,
+        };
+        p.mark_dirty(crate::persist::PersistComponent::Position);
+        (p, rx)
+    }
+
+    #[tokio::test]
+    async fn failed_spool_write_sets_degraded_and_keeps_dirty_and_revision() {
+        // docs/Player_Persistenz.md §40 (P-20): fehlgeschlagener Spool-Write →
+        // Persistence-Zustand DEGRADED, Dirty-Bits NICHT bereinigt, geplante
+        // persist_revision NICHT verbraucht.
+        let base = temp_dir("fail");
+        // `ensure_dirs` wird bewusst NICHT aufgerufen: Das Verzeichnis `spool/`
+        // existiert nicht, wodurch der Durable-Write (Temp-Datei in `spool/`)
+        // determiniert fehlschlägt.
+        let runtime = PersistRuntime {
+            spool: Spool {
+                base_dir: base.clone(),
+                in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            },
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+        let shared = crate::world::new_shared();
+        let (p, _rx) = dirty_test_player("p");
+        {
+            let mut world = shared.lock().await;
+            world.players.insert(p.id.clone(), p);
+        }
+        let res = runtime.persist_player(&shared, "p", false).await;
+        assert!(res.is_err(), "Spool-Write muss fehlschlagen");
+        assert_eq!(
+            runtime.status(),
+            PersistStatus::Degraded,
+            "fehlgeschlagener Spool-Write setzt den Realm auf DEGRADED"
+        );
+        let world = shared.lock().await;
+        let player = world.players.get("p").unwrap();
+        assert!(
+            player.dirty.is_dirty(crate::persist::PersistComponent::Position),
+            "Dirty-Bits werden bei Spool-Write-Fehler nicht bereinigt"
+        );
+        assert_eq!(
+            player.persist_revision, 5,
+            "geplante Revision (6) wird nicht verbraucht (keine Revisionslücke)"
+        );
+        // Kein gültiger (dauerhafter) Batch entsteht durch den fehlgeschlagenen
+        // Versuch; bereits dauerhaft geschriebene Dateien bleiben erhalten.
+        assert!(
+            !base.join("spool").exists(),
+            "kein Spool-Verzeichnis/keine Batch-Datei durch fehlgeschlagenen Write"
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
