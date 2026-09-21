@@ -759,6 +759,30 @@ Die Verantwortlichkeiten bleiben strikt getrennt:
 * erzeugt dynamische KI-Antworten und Vorschläge
 * besitzt keine Autorität über den Spielzustand
 
+**realm_id als expliziter Realm-Identifikator**
+
+* Pflichtfeld in jedem eingereichten Job, jeder Zustellung und jeder Fehlermeldung des Coordinators (dieses Dokument, Abschnitt 14)
+* Pflichtfeld jeder Lua-Event-/Request-Übergabe im gemeinsamen Worker-Pool (`Lua-Scripting-System.md`, Abschnitt 10)
+* Pflichtfeld aller von Realms ausgehenden Handoff-, Server-, Realm- und Realm-State-Angaben (`Login_Realm_Architektur.md`, Abschnitte 6, 7 und 15)
+
 Grundsatz:
 
 **Der Coordinator verarbeitet KI. Der Realm verwaltet das Spiel.**
+
+---
+
+## 30. realm_id in gemeinsam genutzten Diensten
+
+Jeder gemeinsame Dienst, der Zustände, Jobs, Meldungen oder Fehler mehrerer unabhängiger Realms verarbeitet, überträgt und speichert die `realm_id` jeder beteiligten Entität **explizit mit**. Die `realm_id` ist dabei das verbindliche, eindeutige Zuordnungsfeld des Ursprungs-Realms und darf in jedem gemeinsamen Dienst weder weggelassen noch als unzuordenbar behandelt werden. Sie wird von dem jeweiligen Realm mitgegeben bzw. aus seiner registrierten Identität abgeleitet und ist nie aus einem Dateinamen oder einer Herkunft ohne Weiteres ableitbar.
+
+**Verbindlich:**
+
+1. **Realm-Zuordnung ist Pflichtfeld.** Jeder beim Coordinator eingereichte Job, jede Zustellung, jeder Status und jede Fehlermeldung, sowie jede Lua-Event- und Lua-Request-Übergabe im gemeinsamen Worker-Pool tragen die `realm_id` des Ursprungs-Realms als Bestandteil ihrer Daten. Eine Entität ohne zugeordnete `realm_id` ist ungültig und wird abgelehnt oder isoliert.
+2. **Kollisionstrennschicht.** Die `realm_id` bildet zusammen mit der typspezifischen ID (z. B. Job-ID, Event-ID) die eindeutige Identität einer Entität innerhalb eines gemeinsamen Diensts. Gleiche ID-Werte aus verschiedenen Realms sind zulässig und dürfen nicht kollidieren oder dieselbe Entität überschreiben.
+3. **Realm-Isolation bleibt unverändert.** Die `realm_id` ersetzt die vollständige Realm-Isolation der Datenbank-, Zustands- und Authentifizierungsebenen nicht. Sie ist ausschließlich die Zuordnungsschicht der gemeinsam genutzten Dienste und begründet keine gemeinsamen Zustände, keine geteilten Credentials und keinen Realm-Datenbankzugriff über die `realm_id` hinweg.
+
+**Abgrenzung zur Stage-B-Persistenz:**
+
+Der normale Stage-B-Spool-Batch und der normale Player-Snapshot tragen **keine** redundante `realm_id`: Jeder Realm besitzt seine eigene Realm-Datenbank und seinen eigenen Persistence-Spool, die Zuordnung zum Realm ist dadurch bereits eindeutig (`Player_Persistenz.md`, Abschnitt 35). Diese Regel gilt ausschließlich für die normalen Persistenzdaten eines einzelnen, eindeutig zugeordneten Realms. Sie stellt **kein allgemeines Verbot** dar, `realm_id` in gemeinsamen, mehreren Realms dienenden Diensten mitzuführen – dort ist sie ausdrücklich erforderlich.
+
+Die bestehende Verzeichnis- und Datentrennung der Realm-Isolation (`Datenbank_Architektur.md`, Abschnitt 10) bleibt durch diese Regel unverändert gültig.

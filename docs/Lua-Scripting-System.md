@@ -408,6 +408,7 @@ Regeln:
 * Falsch geroutete Events für einen anderen `context_id` werden **abgelehnt und geloggt**.
 * Es existiert **kein VM-lokaler Zustand**, der zwischen zwei unterschiedlichen Dedicated Contexts überleben darf.
 * Die Context-Isolation gilt explizit auch zwischen Raids untereinander: Fehler in einem Raid dürfen einen anderen Raid nicht über eine gemeinsame VM beschädigen.
+* Jeder Event bzw. Request trägt verbindlich die `realm_id` des Ursprungs-Realms als Zuordnungsfeld (`Coordinator.md`, Abschnitt 30). Mehrere Realms, die denselben Worker-Pool oder dieselben Queues durchlaufen, sind nur über `realm_id` eindeutig unterscheidbar; die Context-Isolation (§10) bleibt davon unberührt.
 
 ### Technische Mindestregel: Context-Mismatch vor der Zustellung
 

@@ -245,6 +245,7 @@ gilt er als getrennt (Position speichern, DESPAWN, Registry putzen).
 
 Der Realm-Server meldet zusätzlich seinen Betriebszustand über
 `GET /health` und `GET /status` (Spielerzahl, Uptime, Tick-Statistiken).
+Diese Heartbeat-/Statusmeldungen tragen die `realm_id` des Realms als verbindliches Zuordnungsfeld (`Coordinator.md`, Abschnitt 30), damit Realms bei gemeinsamen Diensten und der Administration eindeutig unterscheidbar bleiben.
 Bleibt ein Realm unerreichbar, vermittelt der Login dorthin keine
 neuen Spieler mehr (deaktivierte/nicht gelistete Realms lehnt bereits
 `/handoff` ab).
