@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::auth_api::{AuthApi, ParentalStatus};
 use crate::protocol::{s2c, Frame};
-use crate::world::{disconnect_player, Shared};
+use crate::world::Shared;
 
 /// Realm-seitiger Elternkontroll-State eines Spielers (Sitzungsspeicher).
 #[derive(Debug, Clone)]
@@ -307,14 +307,21 @@ pub async fn poll_once(parental: &SharedParental, shared: &Shared) {
         }
     }
     if !kicks.is_empty() {
-        let mut world = shared.lock().await;
-        let mut states = parental.states.lock().await;
-        for pid in kicks {
-            if let Some(conn) = crate::world::conn_of(&world, &pid) {
-                crate::world::close_conn(&mut world, conn);
-            }
-            disconnect_player(&mut world, &pid);
-            states.remove(&pid);
+        kick_owner_connections(shared, &kicks).await;
+    }
+}
+
+/// Force-Logout (AUTH-03): Schließt gezielt die aktuelle Eigentümer-Verbindung
+/// des Kick-Spielers. KEIN vorzeitiges charakterweites Cleanup — der zentrale
+/// Disconnect-Pfad dieser Verbindung (finaler Persistenz-Flush, `logout_at`,
+/// verbindungsspezifischer Registry-Cleanup, `detach`, Gruppenstatus) läuft
+/// regulär in net.rs, sobald das Ende der Verbindung dort aufläuft.
+pub async fn kick_owner_connections(shared: &Shared, kicks: &[String]) {
+    let mut world = shared.lock().await;
+    for pid in kicks {
+        match crate::world::conn_of(&world, pid) {
+            Some(conn) => crate::world::close_conn(&mut world, conn),
+            None => log::info!("parental kick {pid}: keine Eigentümer-Verbindung"),
         }
     }
 }
@@ -354,5 +361,83 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&f.encode()).unwrap();
         assert_eq!(v["data"]["remaining_seconds"], 3600);
         assert_eq!(v["data"]["chat_allowed"], true);
+    }
+
+    /// AUTH-03: Der Force-Logout schließt ausschließlich die aktuelle
+    /// Eigentümer-Verbindung und führt KEIN vorzeitiges charakterweites
+    /// Cleanup aus: Player und `by_conn`-Zuordnung bleiben bestehen, bis der
+    /// zentrale Disconnect-Pfad dieser Verbindung in net.rs gelaufen ist.
+    #[tokio::test]
+    async fn force_logout_closes_owner_without_premature_cleanup() {
+        let shared = crate::world::new_shared();
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel::<()>();
+        {
+            let mut world = shared.lock().await;
+            let (tx, _player_rx) = mpsc::unbounded_channel();
+            let p = crate::world::Player {
+                id: "hero".into(),
+                name: "hero".into(),
+                x: 0.0,
+                y: 0.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 100,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 7,
+                session_id: "sess-1".into(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            };
+            world.players.insert("hero".into(), p);
+            world.by_conn.insert(42, "hero".into());
+            world.closers.insert(42, close_tx);
+        }
+        kick_owner_connections(&shared, &["hero".to_string()]).await;
+        // Closer der Eigentümer-Verbindung wurde signalisiert …
+        assert!(
+            close_rx.await.is_ok(),
+            "Owner-Verbindung wurde nicht geschlossen"
+        );
+        // … aber es gab KEIN vorzeitiges charakterweites Cleanup.
+        let world = shared.lock().await;
+        assert!(world.players.contains_key("hero"), "Player entfernt");
+        assert!(
+            crate::world::is_owner(&world, 42, "hero"),
+            "Eigentümer entfernt"
+        );
+        assert_eq!(world.by_conn.len(), 1);
     }
 }

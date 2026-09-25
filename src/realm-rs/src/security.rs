@@ -122,32 +122,69 @@ pub struct RejectInfo {
     pub detail: String,
 }
 
-/// Einfaches Ablehnungs-Logging (docs-Vorgabe: Zeitpunkt, Session/Charakter,
+/// Einfaches Ablehnungs-Logging (docs-Vorgabe: Zeitpunkt, Charakter,
 /// Request-Typ, Ablehnungsgrund, Wiederholungsanzahl, relevanter
 /// Serverzustand). Keine großen Datenmengen; Basis für eine spätere
 /// GM-/Anti-Cheat-Auswertung.
-pub fn log_reject(
+///
+/// Zugangsdaten werden bewusst NICHT ausgegeben: Die vollständige Session-ID
+/// wird nicht protokolliert (AUTH-05; docs/Security.md §4.5), ebenso keine
+/// Handoff-Tokens oder Passwörter. Für den Test wird nur die Zeile gebaut,
+/// nicht geschrieben.
+pub fn reject_log_line(
     player: Option<&Player>,
     conn_id: u64,
     info: &RejectInfo,
     violations: u32,
-) {
-    let (char_id, session, server_state) = match player {
+) -> String {
+    let (char_id, server_state) = match player {
         Some(p) => (
             p.id.as_str(),
-            p.session_id.as_str(),
             format!(
                 "hp={} level={} exp={} idia={} free_attr={}",
                 p.hp, p.level, p.exp, p.idia, p.free_attr_points
             ),
         ),
-        None => ("-", "-", "-".to_string()),
+        None => ("-", "-".to_string()),
     };
-    log::warn!(
-        "sec-reject conn={conn_id} char={char_id} session={session} type={} reason={} violations={violations} state=[{server_state}] {detail}",
+    format!(
+        "sec-reject conn={conn_id} char={char_id} type={} reason={} violations={violations} state=[{server_state}] {}",
         info.msg_type,
         info.reason,
-        detail = info.detail,
+        info.detail,
+    )
+}
+
+pub fn log_reject(player: Option<&Player>, conn_id: u64, info: &RejectInfo, violations: u32) {
+    log::warn!("{}", reject_log_line(player, conn_id, info, violations));
+}
+
+/// Zeile des Takeover-Ereignisses (docs/Security.md AUTH-03;
+/// docs/datenschutz_zugang.md „Connection-Takeover-Logs“).
+///
+/// Ausgegeben werden ausschließlich Ereignisname, Account-ID, Charakter-ID,
+/// alte und neue `conn_id` sowie der Zustand der verdrängten Verbindung.
+/// Roh-IP-Adressen sind hier bewusst NICHT enthalten: deren dauerhafte
+/// Protokollierung mit 14-Tage-Löschung ist ein eigener Auftrag (AUTH-03B)
+/// und benötigt einen freigegebenen Log-Sink.
+pub fn takeover_log_line(
+    account_id: u32,
+    player_id: &str,
+    old_conn_id: u64,
+    new_conn_id: u64,
+) -> String {
+    format!(
+        "authenticated_connection_takeover account_id={account_id} char_id={player_id} \
+         old_conn_id={old_conn_id} new_conn_id={new_conn_id} old_state=authenticated"
+    )
+}
+
+/// Ein einzelner Takeover ist ein normales INFO-Ereignis; es erfolgt weder
+/// eine Warnung noch eine automatische Sanktion (docs/Security.md AUTH-03).
+pub fn log_takeover(account_id: u32, player_id: &str, old_conn_id: u64, new_conn_id: u64) {
+    log::info!(
+        "{}",
+        takeover_log_line(account_id, player_id, old_conn_id, new_conn_id)
     );
 }
 
@@ -236,10 +273,26 @@ pub fn is_known_c2s(msg_type: i64) -> bool {
     use crate::protocol::c2s::*;
     matches!(
         msg_type,
-        HELLO | MOVE | ATTACK | PICKUP | CHAT | NPC_TALK | AUCTION_LIST | AUCTION_BID
-            | AUCTION_BUY | HEARTBEAT | PARENTAL | ABILITY | GROUP_INVITE
-            | GROUP_INVITE_REACT | GROUP_SUGGEST | GROUP_SUGGEST_DECIDE | GROUP_LEAVE
-            | GROUP_KICK | GROUP_TRANSFER | SPEND_ATTRIBUTE
+        HELLO
+            | MOVE
+            | ATTACK
+            | PICKUP
+            | CHAT
+            | NPC_TALK
+            | AUCTION_LIST
+            | AUCTION_BID
+            | AUCTION_BUY
+            | HEARTBEAT
+            | PARENTAL
+            | ABILITY
+            | GROUP_INVITE
+            | GROUP_INVITE_REACT
+            | GROUP_SUGGEST
+            | GROUP_SUGGEST_DECIDE
+            | GROUP_LEAVE
+            | GROUP_KICK
+            | GROUP_TRANSFER
+            | SPEND_ATTRIBUTE
     )
 }
 
@@ -659,6 +712,49 @@ mod tests {
         let cfg = SecurityCfg::default();
         assert!(frame_too_large(&cfg, cfg.max_frame_bytes + 1));
         assert!(!frame_too_large(&cfg, cfg.max_frame_bytes));
+    }
+
+    // 9) AUTH-05: Die Ablehnungszeile enthält die vollständige Session-ID
+    //    NICHT (auch nicht als Teilstring) — nur Charakter und Serverzustand.
+    #[test]
+    fn reject_log_line_contains_no_session_id() {
+        let p = test_player(); // session_id == "sess-1"
+        let info = RejectInfo {
+            reason: "rate_limited".into(),
+            msg_type: crate::protocol::c2s::MOVE,
+            detail: String::new(),
+        };
+        let line = reject_log_line(Some(&p), 7, &info, 3);
+        assert!(line.contains("sec-reject conn=7"), "{line}");
+        assert!(line.contains("char=hero"), "{line}");
+        assert!(!line.contains("sess-1"), "Session-ID im Log: {line}");
+        assert!(!line.contains("session="), "Session-Feld im Log: {line}");
+        // Auch ohne Player (unauthentifiziert) wird nichts ausgegeben.
+        let line = reject_log_line(None, 8, &info, 1);
+        assert!(line.contains("char=-"), "{line}");
+        assert!(!line.to_lowercase().contains("session"), "{line}");
+    }
+
+    // 10) AUTH-03: Die Takeover-Zeile führt genau die zulässigen Felder und
+    //     keine Zugangsdaten; eine Roh-IP wird nicht ausgegeben.
+    #[test]
+    fn takeover_log_line_has_only_allowed_fields() {
+        let line = takeover_log_line(7, "hero", 11, 12);
+        assert!(
+            line.starts_with("authenticated_connection_takeover "),
+            "{line}"
+        );
+        assert!(line.contains("account_id=7"), "{line}");
+        assert!(line.contains("char_id=hero"), "{line}");
+        assert!(line.contains("old_conn_id=11"), "{line}");
+        assert!(line.contains("new_conn_id=12"), "{line}");
+        assert!(line.contains("old_state=authenticated"), "{line}");
+        for forbidden in ["session", "token", "password", "ip=", "peer"] {
+            assert!(
+                !line.contains(forbidden),
+                "unzulässiges Feld {forbidden}: {line}"
+            );
+        }
     }
 
     // Sequenz: Duplikat/Lag ist kein Cheat — nur Vermerk, keine Ablehnung.

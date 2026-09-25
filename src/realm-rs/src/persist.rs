@@ -253,12 +253,7 @@ pub async fn persist_player(
     player_id: &str,
     force: bool,
 ) -> Result<(), String> {
-    let gate = {
-        let mut map = spool.in_flight.lock().await;
-        map.entry(player_id.to_string())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    };
+    let gate = spool.player_gate(player_id).await;
     let _guard = gate.lock().await;
     let spool = spool.clone();
     persist_dirty_into(shared, player_id, force, move |snapshot| {

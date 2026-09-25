@@ -67,11 +67,39 @@ pub struct DrainReport {
 }
 
 /// Durable-Snapshot-Spool. `in_flight` serialisiert pro Spieler (verhindert
-/// konkurrierende Snapshots derselben Revisions-Baseline).
+/// konkurrierende Snapshots derselben Revisions-Baseline und serialisiert
+/// zusätzlich den Eigentümer-/Logout-Übergang pro `player_id` — siehe
+/// `player_gate`).
 #[derive(Clone)]
 pub struct Spool {
     pub base_dir: PathBuf,
-    pub(crate) in_flight: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    in_flight: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+impl Spool {
+    /// Bestehende per-player-Serialisierung. Schützt zwei Vorgänge derselben
+    /// `player_id` gegeneinander:
+    ///
+    /// 1. den finalen Disconnect-Save (Snapshot mit `force`) gegen den
+    ///    periodischen Spieler-Flush — konkurrierende Snapshots derselben
+    ///    Revisions-Baseline (Last-Writer-Loses) sind so ausgeschlossen,
+    /// 2. den Logout-Commit der alten Verbindung (`logout_at`-Write) gegen den
+    ///    Login-/Takeover-Pfad derselben `player_id` (docs/Security.md
+    ///    AUTH-03): der Eigentümerwechsel kann erst abschließen, wenn der alte
+    ///    Logout-Write beendet ist, und wird danach nicht mehr von ihm
+    ///    markiert.
+    ///
+    /// Das Gate ist pro `player_id`; verschiedene Spieler blockieren sich
+    /// nicht. Aufrufer MÜSSEN es vor jeder World-Sperre holen (Reihenfolge
+    /// Gate → World → Elternkontrolle/Gruppen), niemals umgekehrt.
+    pub async fn player_gate(&self, player_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.in_flight
+            .lock()
+            .await
+            .entry(player_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
 }
 
 /// Laufzeit-Objekt der Stufe B: Spool + Status + Drian-Zugriff.
@@ -100,6 +128,20 @@ impl PersistRuntime {
         &self.spool
     }
 
+    /// Per-player-Serialisierung (Gate → World, nie umgekehrt): durable
+    /// Schreibvorgänge und Eigentümer-/Logout-Übergänge derselben
+    /// `player_id`. Siehe `Spool::player_gate`.
+    pub async fn player_gate(&self, player_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.spool.player_gate(player_id).await
+    }
+
+    /// Offene, noch nicht gedrainete Revision im Spool (siehe
+    /// `Spool::pending_revision`). Fail-closed-Auswertung im Login-Pfad über
+    /// `crate::world::db_row_is_stale`.
+    pub fn pending_revision(&self, player_id: &str) -> Result<Option<i64>, String> {
+        self.spool.pending_revision(player_id)
+    }
+
     pub fn status(&self) -> PersistStatus {
         *self.status.lock().unwrap()
     }
@@ -119,6 +161,33 @@ impl PersistRuntime {
         force: bool,
     ) -> Result<(), String> {
         match crate::persist::persist_player(&self.spool, shared, player_id, force).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.set_status(PersistStatus::Degraded);
+                Err(e)
+            }
+        }
+    }
+
+    /// Zentraler Player-Persistenzpfad für Aufrufer, die das per-player-Gate
+    /// BEREITS halten (Logout-Commit in net.rs, der die Reihenfolge
+    /// Gate → World einhält). Das Gate ist nicht reentrant; ein Aufruf von
+    /// `persist_player` unter bereits gehaltenem Gate würde sich sonst selbst
+    /// verriegeln. Semantik, Snapshot-/Revision-/Dirty-Regeln und
+    /// Degraded-Verhalten sind identisch zu `persist_player` — nur die
+    /// Sperre wird nicht erneut genommen.
+    pub async fn persist_player_gate_held(
+        &self,
+        shared: &crate::world::Shared,
+        player_id: &str,
+        force: bool,
+    ) -> Result<(), String> {
+        match crate::persist::persist_dirty_into(shared, player_id, force, |snapshot| {
+            let spool = self.spool.clone();
+            async move { spool.write_batch(&snapshot) }
+        })
+        .await
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.set_status(PersistStatus::Degraded);
@@ -201,6 +270,34 @@ impl Spool {
     /// Anzahl der offenen Batch-Dateien.
     pub fn count_batches(&self) -> Result<usize, String> {
         Ok(list_json_files(&self.spool_dir())?.len())
+    }
+
+    /// Höchste Persistenz-Revision, die für `player_id` noch OFFEN im Spool
+    /// liegt, also noch nicht per Drain auf die DB angewendet wurde.
+    /// `Ok(None)` = kein offener Batch für diesen Spieler.
+    ///
+    /// `Err` = Spool-Verzeichnis nicht lesbar; der Aufrufer MUSS dann
+    /// fail-closed behandeln (der persistierte Zustand ist ungeprüft).
+    pub fn pending_revision(&self, player_id: &str) -> Result<Option<i64>, String> {
+        let mut max: Option<i64> = None;
+        for path in list_json_files(&self.spool_dir())? {
+            // Nicht lesbare/zerschnittene Dateien werden übergangen — der Drain
+            // quarantänisiert sie; für die Vorabprüfung ist das unkritisch,
+            // weil sie ohnehin nicht angewendet werden.
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(entry) = serde_json::from_str::<SpoolEntry>(&raw) else {
+                continue;
+            };
+            if entry.snapshot.player_id == player_id {
+                let rev = entry.snapshot.persist_revision;
+                if max.is_none_or(|m| rev > m) {
+                    max = Some(rev);
+                }
+            }
+        }
+        Ok(max)
     }
 
     /// Durable-Write eines vollständigen Player-Snapshots: JSON in eine

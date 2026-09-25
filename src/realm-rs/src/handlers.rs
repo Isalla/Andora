@@ -17,7 +17,7 @@ use crate::group::{self, GroupManager, SharedGroups};
 use crate::npc::aggro_trigger;
 use crate::parental::{self, SharedParental};
 use crate::protocol::{s2c, Frame};
-use crate::world::{apply_move, ensure_visible, truncate_chat, Player, Shared, World};
+use crate::world::{apply_move, close_conn, ensure_visible, truncate_chat, Player, Shared, World};
 use crate::attributes;
 
 pub struct Ctx {
@@ -92,8 +92,15 @@ pub async fn verify_entry(
 }
 
 /// HELLO: Einstieg mit Handoff-Token (Zielkette), Charakter laden,
-/// registrieren, Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
-/// Gibt bei Ablehnung Err(reason) zurück (Verbindung schließen).
+/// Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
+///
+/// Reihenfolge (AUTH-03, docs/Login_Realm_Architektur.md „Verbindungs-
+/// Einzigkeit und Takeover“): ALLE falliblen Schritte laufen VOR dem Commit.
+/// Erst danach verändert `world::commit_login` die Verbindungszuordnung:
+/// Erstlogin registriert den Player, ein zweiter Login übernimmt den
+/// bestehenden RAM-Zustand (kein Überschreiben durch einen älteren
+/// DB-Snapshot), entmachtet die alte `conn_id` und signalisiert erst danach
+/// deren Closer. Gibt bei Ablehnung Err(reason) zurück (Verbindung schließen).
 pub async fn handle_hello(
     ctx: &Ctx,
     tx: &mpsc::UnboundedSender<String>,
@@ -113,14 +120,6 @@ pub async fn handle_hello(
     if ctx.persist.status() == crate::spool::PersistStatus::Recovering {
         return Err("realm still recovering (Spool-Recovery) — retry later".into());
     }
-    // Stufe B Login-Guard (docs/Player_Persistenz.md §34/§36): Solange der
-    // Startup-Recovery nicht abgeschlossen ist (Spool-Batches werden auf die
-    // DB angewendet), wird der Einstieg verweigert — kein Login auf evtl.
-    // inkonsistentem DB-Stand (Recovering). DEGRADED lässt Logins zu
-    // (Drain retryt periodisch, Realm bleibt spielbar).
-    if ctx.persist.status() == crate::spool::PersistStatus::Recovering {
-        return Err("realm still recovering".into());
-    }
     let lang = {
         let l = get_str(data, "lang");
         if l.is_empty() {
@@ -138,13 +137,57 @@ pub async fn handle_hello(
     // wird dabei verbraucht (einmalig).
     let account_id = verify_entry(&ctx.auth, ctx.cfg.realm_id, &handoff, &session_id).await?;
 
-    let c = db::load_character(&ctx.db, account_id, &char_id).await.map_err(|e| {
-        log::error!("HELLO load character: {e}");
-        "character unavailable".to_string()
-    })?;
+    // AUTH-03: Serialisierungsgrenze gegen den Logout-Commit einer ALTEN
+    // Verbindung derselben `char_id`. Bestehendes per-player-Gate (identisch
+    // zum Persistenz-Gate, `Spool::player_gate`), geholt VOR der ersten
+    // World-Sperre und VOR dem ersten DB-Zugriff und gehalten bis über den
+    // Commit. Damit ist die Reihenfolge garantiert:
+    //   alter Logout-Write  <  save_progression(logout_at = NULL)  <  Commit
+    // Der Login wartet also auf einen laufenden Logout-Write, berechnet die
+    // Rested-Zeit aus dem echten Logout-Zeitpunkt der beendeten Sitzung und
+    // setzt die Spalte danach selbst zurück — ein verspäteter Logout-Write der
+    // alten Sitzung kann die aktive Sitzung nicht mehr markieren.
+    let gate = ctx.persist.player_gate(&char_id).await;
+    let _logout_gate = gate.lock_owned().await;
+
+    // AUTH-03 (Takeover): Die neue Verbindung darf erst übernehmen, wenn
+    // ALLE falliblen Vorprüfungen erfolgreich waren. Der Ownership-Nachweis
+    // gegen einen bereits aktiven RAM-Player wird deshalb VOR jedem
+    // DB-Zugriff geprüft (fail-closed): ein fremder Account darf den
+    // Charakter nicht einmal laden.
+    {
+        let world = ctx.shared.lock().await;
+        crate::world::ensure_takeover_allowed(&world, &char_id, account_id)?;
+    }
+
+    let c = db::load_character(&ctx.db, account_id, &char_id)
+        .await
+        .map_err(|e| {
+            log::error!("HELLO load character: {e}");
+            "character unavailable".to_string()
+        })?;
+
+    // AUTH-03 (Restzustand nach Disconnect): Liegt im Spool ein NEUERER
+    // Snapshot als die gerade geladene DB-Zeile, ist der DB-Stand veraltet
+    // (der Spool-Batch ist noch nicht gedraint). Dann darf KEIN aus der
+    // DB-Zeile gebauter Player registriert werden — sonst würde der zuletzt
+    // autoritative Zustand überschrieben. Fail-closed: Login abweisen, der
+    // periodische Drain zieht nach, ein späterer Versuch gelingt.
+    let pending = ctx.persist.pending_revision(&c.id);
+    if crate::world::db_row_is_stale(c.persist_revision, pending.clone()) {
+        if let Err(ref e) = pending {
+            log::error!("HELLO pending revision {char_id}: {e}");
+        }
+        return Err("character state still in spool — retry later".into());
+    }
+
     let weapon_skill = db::load_weapon_skill(&ctx.db, &c.id, &ctx.cfg.combat.weapon_skill_id).await;
     let learned_abilities: std::collections::HashSet<String> =
-        db::load_character_abilities(&ctx.db, &c.id).await.unwrap_or_default().into_iter().collect();
+        db::load_character_abilities(&ctx.db, &c.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
     // Inventory V1: Inventar + Rucksäcke + Equipment laden; serverseitig
     // defektes Equipment (0 Haltbarkeit) beim Einstieg entfernen
     // (docs/inventory_system.md §10/§12). Fehler am Laden => leeres
@@ -218,7 +261,9 @@ pub async fn handle_hello(
         max_hp: c.hp,
         mana: c.mana,
         max_mana: c.mana_max,
-        lang,
+        // `lang` wird zusätzlich an die ConnectionFields des Commits
+        // übergeben (dort frisch gesetzt) — deshalb hier klonen.
+        lang: lang.clone(),
         account_id,
         session_id: session_id.clone(),
         entities: Default::default(),
@@ -263,14 +308,67 @@ pub async fn handle_hello(
     };
     let mut me = me;
     attributes::recompute_max_resources(&mut me);
-    {
-        let mut world = ctx.shared.lock().await;
-        world.players.insert(me.id.clone(), me);
-        world.by_conn.insert(conn_id, c.id.clone());
+
+    // Elternkontrolle VOR dem Commit: BLOCKED am Login -> Einstieg verweigert.
+    // Wichtig für Takeover: schlägt der Attach fehl, wurde noch NICHTS
+    // übergeben — die bisherige Eigentümer-Verbindung bleibt unangetastet
+    // (fail-closed, keine zwei Eigentümer).
+    if let Err(reason) = parental::attach(&ctx.parental, tx, &c.id, account_id, &session_id).await {
+        parental::detach(&ctx.parental, &c.id).await;
+        return Err(reason);
     }
+
+    // ── Commit (AUTH-03) ────────────────────────────────────────────────
+    // EINZIGER Punkt, der `by_conn` (Berechtigung zur Spiellogik) verändert.
+    // Alle falliblen Schritte (Auth, Charakterprüfung, Questzustand,
+    // Elternkontrolle) liegen davor. Der Aufruf ist unter der World-Sperre
+    // atomar: beim Takeover wird die alte `conn_id` ZUERST entmachtet, dann
+    // die neue eingesetzt; der bestehende RAM-Player bleibt maßgeblich.
+    let outcome = {
+        let mut world = ctx.shared.lock().await;
+        crate::world::commit_login(
+            &mut world,
+            conn_id,
+            me,
+            crate::world::ConnectionFields {
+                tx: tx.clone(),
+                session_id: session_id.clone(),
+                lang: lang.clone(),
+            },
+        )
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(reason) => {
+            // Commit abgelehnt: nur aufräumen, was diese Verbindung selbst
+            // angehängt hat. Ein aktiver Eigentümer behält Player UND
+            // Eltern-State.
+            let has_owner = {
+                let world = ctx.shared.lock().await;
+                crate::world::conn_of(&world, &c.id).is_some()
+            };
+            if !has_owner {
+                parental::detach(&ctx.parental, &c.id).await;
+            }
+            return Err(reason);
+        }
+    };
+    if let crate::world::CommitOutcome::Takeover { old_conn_id } = outcome {
+        // Eigentümerwechsel abgeschlossen: erst JETZT den vorhandenen Closer
+        // der verdrängten Verbindung signalisieren (kein neuer Mechanismus).
+        {
+            let mut world = ctx.shared.lock().await;
+            close_conn(&mut world, old_conn_id);
+        }
+        // Normales INFO-Ereignis, keine Roh-IP (docs/Security.md AUTH-03).
+        crate::security::log_takeover(account_id, &c.id, old_conn_id, conn_id);
+    }
+
     // Serverseitige Entfernung defekten Equipments beim Einstieg persistent
-    // nachschreiben (Fehler nur loggen — kein Login-Abbruch).
-    if broken_moved > 0 {
+    // nachschreiben (Fehler nur loggen — kein Login-Abbruch). Nur beim
+    // Erstlogin: bei einem Takeover ist der RAM-Inventarstand maßgeblich und
+    // darf nicht durch den (älteren) DB-Stand zurückgeschrieben werden.
+    if outcome == crate::world::CommitOutcome::Registered && broken_moved > 0 {
         log::info!("HELLO {char_id}: {broken_moved} defekte Equipment-Items entfernt");
         let inventory = {
             let world = ctx.shared.lock().await;
@@ -283,20 +381,18 @@ pub async fn handle_hello(
         }
     }
 
-    // Elternkontrolle: BLOCKED am Login -> Einstieg verweigert.
-    if let Err(reason) = parental::attach(&ctx.parental, tx, &c.id, account_id, &session_id).await {
-        let mut world = ctx.shared.lock().await;
-        world.players.remove(&c.id);
-        world.by_conn.remove(&conn_id);
-        parental::detach(&ctx.parental, &c.id).await;
-        return Err(reason);
-    }
-
+    // WELCOME aus dem autoritativen RAM-Zustand (nicht aus dem DB-Kandidaten):
+    // beim Takeover ist der RAM-Stand maßgeblich.
+    let (pid, pname, px, py) = {
+        let world = ctx.shared.lock().await;
+        let p = world.players.get(&c.id).ok_or("gone".to_string())?;
+        (p.id.clone(), p.name.clone(), p.x, p.y)
+    };
     tx.send(
         Frame::new(
             seq,
             s2c::WELCOME,
-            serde_json::json!({"you": {"id": c.id, "name": c.name, "x": c.x, "y": c.y}}),
+            serde_json::json!({"you": {"id": pid, "name": pname, "x": px, "y": py}}),
         )
         .encode(),
     )
@@ -1659,5 +1755,159 @@ mod tests {
             assert!(!p.dirty.is_dirty(crate::persist::PersistComponent::Position));
             assert_eq!(p.persist_generation, 1);
         }
+    }
+
+    // AUTH-03: Nach der Entmachtung erreicht kein Frame der alten Verbindung
+    // die Spiellogik mehr — der Player-Zustand bleibt unverändert.
+    #[tokio::test]
+    async fn frames_of_displaced_connection_do_not_change_player_state() {
+        let shared = crate::world::new_shared();
+        {
+            let mut w = shared.lock().await;
+            let (ta, _ra) = mpsc::unbounded_channel();
+            let old = crate::world::Player {
+                id: "hero".into(),
+                name: "hero".into(),
+                x: 1.0,
+                y: 2.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 100,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 7,
+                session_id: "sess-1".into(),
+                entities: Default::default(),
+                last_activity: Instant::now(),
+                tx: ta,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: std::vec::Vec::new(),
+                cooldowns: std::collections::BTreeMap::new(),
+                active_cast: None,
+                learned_abilities: std::collections::HashSet::new(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 3,
+            };
+            w.players.insert("hero".into(), old);
+            w.by_conn.insert(7, "hero".into());
+        }
+        // Takeover durch conn 8 (wie commit_login es im HELLO tut).
+        let (new_tx, _rx) = mpsc::unbounded_channel();
+        {
+            let mut w = shared.lock().await;
+            let outcome = crate::world::commit_login(
+                &mut w,
+                8,
+                crate::world::Player {
+                    id: "hero".into(),
+                    name: "hero".into(),
+                    x: 900.0,
+                    y: 900.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 1,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 7,
+                    session_id: "sess-2".into(),
+                    entities: Default::default(),
+                    last_activity: Instant::now(),
+                    tx: new_tx,
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    idia: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: std::vec::Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                    learned_abilities: std::collections::HashSet::new(),
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    sitting: false,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                    persist_revision: 0,
+                },
+                crate::world::ConnectionFields {
+                    tx: mpsc::unbounded_channel().0,
+                    session_id: "sess-2".into(),
+                    lang: "de".into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                crate::world::CommitOutcome::Takeover { old_conn_id: 7 }
+            );
+        }
+        // Alte Verbindung (7) ist entmachtet: MOVE/ATTACK verändern nichts …
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [1.0, 0.0], "x": 500.0, "y": 500.0}),
+            100,
+        )
+        .await;
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "hero"}),
+            &crate::config::combat_config(&Default::default()),
+            &npc_cfg(),
+        )
+        .await;
+        let w = shared.lock().await;
+        let p = &w.players["hero"];
+        assert_eq!((p.x, p.y), (1.0, 2.0), "RAM-Zustand wurde verändert");
+        assert_eq!(p.hp, 100);
+        assert!(p.combat.is_none());
+        assert!(!p.dirty.any());
+        assert_eq!(p.persist_generation, 0);
+        assert_eq!(p.persist_revision, 3);
+        // … und die neue Verbindung ist die einzige berechtigte.
+        assert!(!w.by_conn.contains_key(&7));
+        assert!(crate::world::is_owner(&w, 8, "hero"));
+        assert_eq!(w.by_conn.len(), 1);
     }
 }

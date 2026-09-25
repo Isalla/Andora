@@ -190,10 +190,18 @@ pub struct World {
     pub loot_drops: HashMap<String, crate::loot::WorldLoot>,
     /// Monoton steigender Zähler für Loot-IDs.
     pub loot_next_id: i64,
-    /// Verbindung (interne Conn-ID) → Spieler-ID.
+    /// Verbindung (interne Conn-ID) → Spieler-ID. Genau EIN Eintrag je
+    /// aktivem Charakter (docs/Login_Realm_Architektur.md „Verbindungs-
+    /// Einzigkeit und Takeover“): der Eintrag ist die Berechtigung zur
+    /// Spiellogik und damit zugleich die Eigentümer-Generation.
     pub by_conn: HashMap<u64, String>,
     /// Schließ-Signale je Verbindung (Socket-Closes laufen über net.rs).
     pub closers: HashMap<u64, tokio::sync::oneshot::Sender<()>>,
+    /// Direkte TCP-Peer-Adresse je Verbindung — AUSSCHLIESSLICH im RAM
+    /// (docs/netzwerk_ip_schutz.md). Bewusst NICHT protokolliert: eine
+    /// dauerhafte IP-Protokollierung mit Löschfrist ist ein eigener
+    /// Auftrag (AUTH-03B) und braucht einen freigegebenen Log-Sink.
+    pub peer_addrs: HashMap<u64, String>,
     pub tick: TickStat,
     pub started: Instant,
 }
@@ -209,6 +217,7 @@ impl World {
             loot_next_id: 1,
             by_conn: HashMap::new(),
             closers: HashMap::new(),
+            peer_addrs: HashMap::new(),
             tick: TickStat::default(),
             started: Instant::now(),
         }
@@ -221,6 +230,179 @@ pub fn conn_of(world: &World, player_id: &str) -> Option<u64> {
         .by_conn
         .iter()
         .find_map(|(c, p)| (p == player_id).then_some(*c))
+}
+
+/// Ist `conn_id` aktueller Eigentümer von `player_id`? Jedes Cleanup, das
+/// Player- oder Persistenzzustand entfernt, MUSS diese Prüfung unter der
+/// World-Sperre treffen (docs/Login_Realm_Architektur.md: Cleanup einer
+/// verdrängten Verbindung entfernt weder Player noch neuen Eigentümer).
+pub fn is_owner(world: &World, conn_id: u64, player_id: &str) -> bool {
+    world.by_conn.get(&conn_id).is_some_and(|p| p == player_id)
+}
+
+/// Verbindungsbezogene Felder, die ein Eigentümerwechsel aktualisiert.
+/// Der übrige RAM-Zustand des Players (Position, HP/Mana, Inventar, Quests,
+/// Effekte, Cooldowns, Kampf, Dirty-State, Persistenzgeneration/-revision)
+/// bleibt unangetastet — der RAM-Player ist maßgeblich und darf nicht von
+/// einem älteren DB-Stand überschrieben werden.
+pub struct ConnectionFields {
+    pub tx: mpsc::UnboundedSender<String>,
+    pub session_id: String,
+    pub lang: String,
+}
+
+fn apply_connection_fields(p: &mut Player, conn: &ConnectionFields) {
+    p.tx = conn.tx.clone();
+    p.session_id = conn.session_id.clone();
+    p.lang = conn.lang.clone();
+    p.last_activity = Instant::now();
+}
+
+/// Ergebnis des atomaren Login-Commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitOutcome {
+    /// Erstlogin: der Kandidat wurde als Player registriert.
+    Registered,
+    /// Erneutes HELLO derselben Verbindung: Eigentümer bleibt, nur die
+    /// verbindungsbezogenen Felder werden aufgefrischt.
+    Refreshed,
+    /// Übernahme eines Players, der nach fehlgeschlagenem Disconnect-Save im
+    /// autoritativen RAM behalten wurde (§16): RAM-Zustand bleibt maßgeblich,
+    /// es gab keinen Vorgänger zu entmachten.
+    Adopted,
+    /// Takeover: `old_conn_id` wurde VOR der Freigabe entmachtet.
+    Takeover { old_conn_id: u64 },
+}
+
+/// Fail-closed-Vorprüfung vor jedem DB-Zugriff im HELLO: Nur der
+/// authentifizierte Account, der den aktiven RAM-Player besitzt, darf den
+/// Charakter übernehmen. Verhindert zusätzlich, dass ein fremder Account den
+/// Charakter über die DB lädt.
+pub fn ensure_takeover_allowed(
+    world: &World,
+    player_id: &str,
+    account_id: u32,
+) -> Result<(), String> {
+    match world.players.get(player_id) {
+        Some(p) if p.account_id != account_id => {
+            Err("character is owned by another account".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// EINZIGER Punkt, der `by_conn` (die Berechtigung zur Spiellogik) verändert.
+/// Wird unter der World-Sperre aufgerufen und ist damit atomar: Auth,
+/// Charakterprüfung und alle weiteren falliblen Schritte (inkl. Elternkontrolle)
+/// müssen VORHER erfolgreich gewesen sein, sonst wird der Aufrufer abgelehnt.
+///
+/// - Erstlogin: Kandidat wird Player, `conn_id` wird Eigentümer.
+/// - Zweiter Login: der bestehende RAM-Player bleibt maßgeblich; die alte
+///   `conn_id` wird zuerst aus `by_conn` entfernt (entmachtet) und erst danach
+///   die neue eingetragen. Beide Verbindungen sind nie gleichzeitig berechtigt.
+/// - Fehler: fail-closed, die Registry bleibt unverändert.
+pub fn commit_login(
+    world: &mut World,
+    conn_id: u64,
+    candidate: Player,
+    conn: ConnectionFields,
+) -> Result<CommitOutcome, String> {
+    let player_id = candidate.id.clone();
+    let account_id = candidate.account_id;
+    let previous_owner = conn_of(world, &player_id);
+    match (world.players.contains_key(&player_id), previous_owner) {
+        (false, None) => {
+            world.players.insert(player_id.clone(), candidate);
+            world.by_conn.insert(conn_id, player_id);
+            Ok(CommitOutcome::Registered)
+        }
+        // Registry-Inkonsistenz (Zuordnung ohne Player): fail-closed, damit
+        // nie zwei Eigentümer entstehen.
+        (false, Some(_)) => Err(format!(
+            "inconsistent connection registry for character {player_id}"
+        )),
+        // Player im RAM, aber keine Eigentümer-Verbindung: der Fall
+        // „Disconnect-Save fehlgeschlagen" (§16, siehe `release_conn`) oder ein
+        // Zwischenstand aus dem Startup. Der RAM-Player ist der zuletzt
+        // autoritative Zustand und wird ÜBERNOMMEN — ein Registrieren aus der
+        // DB-Zeile würde genau diesen Zustand überschreiben.
+        (true, None) => {
+            {
+                let p = world
+                    .players
+                    .get(&player_id)
+                    .expect("player presence checked above");
+                if p.account_id != account_id {
+                    return Err("character is owned by another account".to_string());
+                }
+            }
+            let p = world
+                .players
+                .get_mut(&player_id)
+                .expect("player presence checked above");
+            apply_connection_fields(p, &conn);
+            world.by_conn.insert(conn_id, player_id);
+            Ok(CommitOutcome::Adopted)
+        }
+        (true, Some(old)) if old == conn_id => {
+            let p = world
+                .players
+                .get_mut(&player_id)
+                .expect("player presence checked above");
+            apply_connection_fields(p, &conn);
+            Ok(CommitOutcome::Refreshed)
+        }
+        (true, Some(old)) => {
+            {
+                let p = world
+                    .players
+                    .get(&player_id)
+                    .expect("player presence checked above");
+                if p.account_id != account_id {
+                    return Err("character is owned by another account".to_string());
+                }
+            }
+            let p = world
+                .players
+                .get_mut(&player_id)
+                .expect("player presence checked above");
+            apply_connection_fields(p, &conn);
+            // Atomarer Eigentümerwechsel: alte Zuordnung ZUERST entfernen,
+            // dann die neue setzen. Der RAM-Player wird nicht ersetzt.
+            world.by_conn.remove(&old);
+            world.by_conn.insert(conn_id, player_id);
+            Ok(CommitOutcome::Takeover { old_conn_id: old })
+        }
+    }
+}
+
+/// Ist die geladene DB-Zeile durch einen offenen Spool-Snapshot überholt?
+///
+/// Rein und damit im Test prüfbar. `Ok(None)` (kein offener Batch): die
+/// DB-Zeile ist aktuell. `Ok(Some(rev))`: nur bei `rev > db_revision` ist sie
+/// veraltet. `Err` (Spool nicht lesbar) gilt als veraltet — ungeprüfter
+/// persistenter Zustand ist kein Grund für einen Login
+/// (docs/Player_Persistenz.md §34/§37, docs/Security.md AUTH-03).
+pub fn db_row_is_stale(db_revision: i64, pending: Result<Option<i64>, String>) -> bool {
+    match pending {
+        Err(_) => true,
+        Ok(Some(rev)) => rev > db_revision,
+        Ok(None) => false,
+    }
+}
+
+/// Gibt die Eigentümerschaft einer Verbindung frei, BEHÄLT aber den
+/// serverautoritativen Player im RAM.
+///
+/// docs/Player_Persistenz.md §16: Nach einem fehlgeschlagenen Disconnect-Save
+/// bleibt der Spieler im autoritativen RAM (Dirty-State/Revision unverändert),
+/// damit ein späterer Flush erneut versuchen kann. Würde er entfernt, ginge
+/// der letzte autoritative Zustand verloren. Der nächste Login übernimmt diesen
+/// Player über `commit_login` (`CommitOutcome::Adopted`) und setzt die
+/// Eigentümerschaft neu — es wird zu keinem Zeitpunkt ein veralteter
+/// DB-Stand zur aktiven Instanz.
+pub fn release_conn(world: &mut World, conn_id: u64) -> Option<String> {
+    world.by_conn.remove(&conn_id)
 }
 
 /// Socket einer Verbindung schließen (HELLO-Ablehnung, Force-Logout).
@@ -403,15 +585,19 @@ pub fn world_regen_tick(world: &mut World, tick_ms: u64) {
     }
 }
 
-/// Entfernt einen Spieler und benachrichtigt alle, die ihn sahen
-/// (DESPAWN). Der Socket wird geschlossen, sobald die Kanal-Sender
-/// wegfallen (Forward-Task in net.rs beendet sich dann selbst).
-/// Gibt true zurück, wenn der Spieler existierte.
-pub fn disconnect_player(world: &mut World, player_id: &str) -> bool {
-    let Some(me) = world.players.remove(player_id) else {
-        return false;
-    };
-    world.by_conn.retain(|_, pid| pid != player_id);
+/// Verbindungs-spezifischer Disconnect (AUTH-03): entfernt ausschließlich die
+/// Zuordnung der übergebenen `conn_id` — KEIN charakterweites `retain`, das
+/// einen inzwischen neuen Eigentümer mit entfernen würde. Ist `conn_id` nicht
+/// (mehr) Eigentümer, wird weder sie selbst noch der Player entfernt; der
+/// Aufrufer bekommt `None` und überspringt den Spieler-Cleanup.
+/// Gibt die Spieler-ID zurück, wenn diese Verbindung (und nur sie) Eigentümer
+/// war und der Player samt DESPAWN-Broadcast entfernt wurde.
+/// Der Socket wird geschlossen, sobald der Kanal-Sender wegfällt
+/// (Forward-Task in net.rs beendet sich dann selbst).
+pub fn disconnect_conn(world: &mut World, conn_id: u64) -> Option<String> {
+    let player_id = world.by_conn.get(&conn_id)?.clone();
+    world.by_conn.remove(&conn_id);
+    let me = world.players.remove(&player_id)?;
     let frame = Frame::new(0, s2c::DESPAWN, serde_json::json!({"id": me.id}));
     for q in world.players.values() {
         if q.entities.contains(&me.id) {
@@ -422,7 +608,7 @@ pub fn disconnect_player(world: &mut World, player_id: &str) -> bool {
     for q in world.players.values_mut() {
         q.entities.remove(&me.id);
     }
-    true
+    Some(player_id)
 }
 
 /// MOVE-Anwendung mit Speed-Cap (max 210 m/s, skaliert aufs Tick-
@@ -542,5 +728,298 @@ mod tests {
     fn chat_truncated_to_240_chars() {
         assert_eq!(truncate_chat(&"x".repeat(300)).chars().count(), 240);
         assert_eq!(truncate_chat("hi"), "hi");
+    }
+
+    // ── AUTH-03: Verbindungs-Einzigkeit, Takeover, owner-sicheres Cleanup ──
+
+    /// Frisch aus der DB geladener Login-Kandidat (Werte bewusst
+    /// markant, damit ein Überschreiben des RAM-Zustands sofort auffällt).
+    fn candidate(id: &str, account_id: u32) -> (Player, mpsc::UnboundedReceiver<String>) {
+        let (mut p, rx) = test_player(id, 0.0, 0.0);
+        p.account_id = account_id;
+        p.x = 999.0;
+        p.y = 999.0;
+        p.hp = 1;
+        p.persist_revision = 7;
+        (p, rx)
+    }
+
+    fn conn_fields(session_id: &str) -> (ConnectionFields, mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            ConnectionFields {
+                tx,
+                session_id: session_id.to_string(),
+                lang: "de".to_string(),
+            },
+            rx,
+        )
+    }
+
+    /// Erstlogin: genau EIN Eigentümer, keine Zweitzuordnung.
+    #[test]
+    fn first_login_registers_exactly_one_owner() {
+        let mut w = World::new();
+        let (p, _) = candidate("hero", 7);
+        let (cf, _rx) = conn_fields("sess-1");
+        assert_eq!(
+            commit_login(&mut w, 1, p, cf),
+            Ok(CommitOutcome::Registered)
+        );
+        assert_eq!(conn_of(&w, "hero"), Some(1));
+        assert!(is_owner(&w, 1, "hero"));
+        assert_eq!(w.by_conn.len(), 1);
+        assert_eq!(w.players.len(), 1);
+    }
+
+    /// Takeover: alter Eigentümer wird VOR der Freigabe des neuen entmachtet,
+    /// der RAM-Zustand inkl. Dirty-State und Persistenzrevision bleibt
+    /// erhalten (kein Überschreiben durch den DB-Kandidaten).
+    #[test]
+    fn takeover_keeps_ram_state_and_demotes_old_owner() {
+        let mut w = World::new();
+        let (p1, _rx1) = candidate("hero", 7);
+        let (cf1, _r1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        // Laufzeit-Zustand, der durch keinen DB-Snapshot ersetzt werden darf.
+        {
+            let p = w.players.get_mut("hero").unwrap();
+            p.x = 12.5;
+            p.y = -3.0;
+            p.hp = 88;
+            p.mana = 21;
+            p.effects.push(crate::combat::effects::Effect {
+                id: "e1".into(),
+                effect_id: "heal".into(),
+                group: "heal".into(),
+                source_entity: "hero".into(),
+                source_kind: crate::combat::effects::SourceKind::Ability,
+                target_entity: "hero".into(),
+                kind: crate::combat::effects::EffectKind::Hot,
+                started_at: Instant::now(),
+                duration_ms: 60_000,
+                tick_ms: 1_000,
+                next_tick_at: None,
+                value: 5.0,
+                interrupts_on_damage: false,
+            });
+            p.cooldowns.insert(
+                "fire".to_string(),
+                std::time::SystemTime::now() + std::time::Duration::from_secs(30),
+            );
+            p.mark_dirty(crate::persist::PersistComponent::Position);
+            p.mark_dirty(crate::persist::PersistComponent::Inventory);
+            p.persist_revision = 41;
+        }
+        let (p2, _rx2) = candidate("hero", 7);
+        let (cf2, _r2) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 2, p2, cf2),
+            Ok(CommitOutcome::Takeover { old_conn_id: 1 })
+        );
+        // Genau eine berechtigte Verbindung: alt entmachtet, neu Eigentümer.
+        assert!(!w.by_conn.contains_key(&1));
+        assert!(!is_owner(&w, 1, "hero"));
+        assert!(is_owner(&w, 2, "hero"));
+        assert_eq!(conn_of(&w, "hero"), Some(2));
+        assert_eq!(w.by_conn.len(), 1);
+        // RAM-Zustand maßgeblich — keine DB-Werte (999.0/999.0/hp 1/rev 7).
+        let p = w.players.get("hero").unwrap();
+        assert_eq!((p.x, p.y), (12.5, -3.0));
+        assert_eq!((p.hp, p.mana), (88, 21));
+        assert_eq!(p.effects.len(), 1);
+        assert!(p.cooldowns.contains_key("fire"));
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+        assert!(p
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Inventory));
+        assert_eq!(p.persist_generation, 2);
+        assert_eq!(p.persist_revision, 41);
+        // Nur verbindungsbezogene Felder wurden übernommen.
+        assert_eq!(p.session_id, "sess-2");
+    }
+
+    /// Der neue Eigentümer sendet über seinen eigenen Kanal; Frames der
+    /// verdrängten Verbindung können den Player nicht mehr erreichen.
+    #[test]
+    fn displaced_connection_is_not_authenticated_after_takeover() {
+        let mut w = World::new();
+        let (p1, _cand_rx1) = candidate("hero", 7);
+        let (cf1, mut old_rx) = conn_fields("sess-1");
+        // Kanal der ersten Verbindung behalten, um die Umstellung zu prüfen.
+        let old_tx = cf1.tx.clone();
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        let (p2, _cand_rx2) = candidate("hero", 7);
+        let (cf2, mut new_rx) = conn_fields("sess-2");
+        commit_login(&mut w, 2, p2, cf2).unwrap();
+        // Der Player sendet jetzt über den Kanal des neuen Eigentümers.
+        w.players
+            .get("hero")
+            .unwrap()
+            .send(&Frame::new(0, s2c::STATE, serde_json::json!({})));
+        assert!(new_rx.try_recv().is_ok(), "neuer Kanal ohne Frames");
+        assert!(old_rx.try_recv().is_err(), "alter Kanal erhielt Frames");
+        // Sendet die verdrängte Verbindung, erreicht es den Player nicht mehr.
+        old_tx.send("verdrängt".to_string()).unwrap();
+        assert!(old_rx.try_recv().is_ok());
+        assert!(new_rx.try_recv().is_err());
+    }
+
+    /// Cleanup der verdrängten Verbindung entfernt weder den neuen Owner
+    /// noch den Player.
+    #[test]
+    fn cleanup_of_displaced_connection_keeps_player_and_new_owner() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        let (p2, _r2) = candidate("hero", 7);
+        let (cf2, _rx2) = conn_fields("sess-2");
+        commit_login(&mut w, 2, p2, cf2).unwrap();
+        // Alte Verbindung meldet ihr Ende: kein Eigentümer -> kein Cleanup.
+        assert_eq!(disconnect_conn(&mut w, 1), None);
+        assert!(w.players.contains_key("hero"));
+        assert!(is_owner(&w, 2, "hero"));
+        assert_eq!(w.by_conn.len(), 1);
+    }
+
+    /// Cleanup des aktuellen Owners entfernt weiterhin vollständig.
+    #[test]
+    fn cleanup_of_current_owner_removes_player() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        let (p2, _r2) = candidate("hero", 7);
+        let (cf2, _rx2) = conn_fields("sess-2");
+        commit_login(&mut w, 2, p2, cf2).unwrap();
+        assert_eq!(disconnect_conn(&mut w, 2).as_deref(), Some("hero"));
+        assert!(!w.players.contains_key("hero"));
+        assert!(!w.by_conn.contains_key(&2));
+        assert!(w.by_conn.is_empty());
+    }
+
+    /// Fehlgeschlagener Takeover: fremder Account wird abgelehnt, es entstehen
+    /// NIE zwei Eigentümer, der alte Owner bleibt unangetastet.
+    #[test]
+    fn failed_takeover_never_produces_two_owners() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        let before = w.players.get("hero").unwrap().session_id.clone();
+        let (p2, _r2) = candidate("hero", 8);
+        let (cf2, _rx2) = conn_fields("sess-2");
+        assert!(commit_login(&mut w, 2, p2, cf2).is_err());
+        assert!(ensure_takeover_allowed(&w, "hero", 8).is_err());
+        assert!(ensure_takeover_allowed(&w, "hero", 7).is_ok());
+        assert_eq!(conn_of(&w, "hero"), Some(1));
+        assert!(is_owner(&w, 1, "hero"));
+        assert_eq!(w.by_conn.len(), 1);
+        assert_eq!(w.players["hero"].session_id, before);
+    }
+
+    /// Player im RAM ohne Eigentümer (Fall: Disconnect-Save fehlgeschlagen,
+    /// §16) wird ÜBERNOMMEN: der RAM-Zustand bleibt maßgeblich, es entsteht
+    /// genau ein Eigentümer und kein Player wird aus dem DB-Kandidaten
+    /// aufgebaut. Ein fremder Account wird weiterhin abgelehnt.
+    #[test]
+    fn player_without_owner_is_adopted_from_ram() {
+        let mut w = World::new();
+        let (mut p, _r) = candidate("hero", 7);
+        p.x = 42.0;
+        p.persist_revision = 9;
+        p.mark_dirty(crate::persist::PersistComponent::Position);
+        w.players.insert("hero".into(), p);
+        let gen_before = w.players["hero"].persist_generation;
+        // Der DB-Kandidat ist bewusst ein völlig anderer Stand (x = 999).
+        let (cf, _rx) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 5, candidate("hero", 7).0, cf),
+            Ok(CommitOutcome::Adopted)
+        );
+        assert!(is_owner(&w, 5, "hero"));
+        assert_eq!(w.by_conn.len(), 1);
+        // RAM-Zustand unangetastet, nur die verbindungsbezogenen Felder neu.
+        let p = &w.players["hero"];
+        assert_eq!(p.x, 42.0);
+        assert_eq!(p.persist_revision, 9);
+        assert_eq!(p.persist_generation, gen_before);
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+        assert_eq!(p.session_id, "sess-2");
+        // Fremder Account darf den behaltenen Player nicht übernehmen.
+        let (cf, _rx) = conn_fields("sess-3");
+        assert!(commit_login(&mut w, 6, candidate("hero", 8).0, cf).is_err());
+        assert!(is_owner(&w, 5, "hero"));
+    }
+
+    /// Registry-Inkonsistenz in der anderen Richtung (Zuordnung ohne Player)
+    /// endet fail-closed, statt eine zweite berechtigte Verbindung zu erzeugen.
+    #[test]
+    fn commit_with_owner_entry_but_no_player_fails_closed() {
+        let mut w = World::new();
+        w.by_conn.insert(9, "ghost".into());
+        let (cf, _rx) = conn_fields("sess-1");
+        assert!(commit_login(&mut w, 5, candidate("ghost", 7).0, cf).is_err());
+        assert_eq!(w.by_conn.len(), 1);
+        assert!(w.players.is_empty());
+    }
+
+    /// Nur die Eigentümerschaft freigeben, Player bleibt im RAM (§16).
+    #[test]
+    fn release_conn_keeps_player_in_ram() {
+        let mut w = World::new();
+        let (p, _r) = candidate("hero", 7);
+        w.players.insert("hero".into(), p);
+        w.by_conn.insert(7, "hero".into());
+        assert_eq!(release_conn(&mut w, 7).as_deref(), Some("hero"));
+        assert!(w.by_conn.is_empty());
+        assert!(
+            w.players.contains_key("hero"),
+            "Player darf nicht entfernt werden"
+        );
+        // Der nächste Login adoptiert ihn (siehe Test darüber).
+        let (cf, _rx) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 8, candidate("hero", 7).0, cf),
+            Ok(CommitOutcome::Adopted)
+        );
+    }
+
+    /// Fail-closed-Entscheidung: veraltete DB-Zeile (offener, neuerer
+    /// Snapshot) und unlesbarer Spool blockieren; aktuelle DB-Zeile nicht.
+    #[test]
+    fn db_row_is_stale_is_fail_closed() {
+        assert!(db_row_is_stale(7, Ok(Some(8))), "neuerer Snapshot offen");
+        assert!(
+            !db_row_is_stale(8, Ok(Some(8))),
+            "gleiche Revision ist aktuell"
+        );
+        assert!(
+            !db_row_is_stale(9, Ok(Some(8))),
+            "älterer Snapshot ist harmlos"
+        );
+        assert!(!db_row_is_stale(7, Ok(None)), "kein offener Batch");
+        assert!(db_row_is_stale(7, Err("dir".into())), "Spool unlesbar");
+    }
+
+    /// Erneutes HELLO derselben Verbindung erzeugt keinen zweiten Owner und
+    /// ersetzt den Player nicht.
+    #[test]
+    fn repeated_hello_on_same_connection_keeps_single_owner() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        w.players.get_mut("hero").unwrap().x = 5.0;
+        let (cf2, _rx2) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 1, candidate("hero", 7).0, cf2),
+            Ok(CommitOutcome::Refreshed)
+        );
+        assert_eq!(w.by_conn.len(), 1);
+        assert_eq!(conn_of(&w, "hero"), Some(1));
+        assert_eq!(w.players["hero"].x, 5.0);
+        assert_eq!(w.players["hero"].session_id, "sess-2");
     }
 }
