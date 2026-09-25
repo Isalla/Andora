@@ -234,6 +234,22 @@ wird von keinem Dienst mehr verwendet und bleibt nur kompatibel
 bestehen. Server-Credentials werden nicht unnötig im Klartext in der
 Datenbank gespeichert.)
 
+## Verbindungs-Einzigkeit und Takeover
+
+Für die Zuordnung eines Charakters zu Realm-Verbindungen gilt verbindlich:
+
+* Pro Charakter darf zu jedem Zeitpunkt höchstens eine aktive, zur Spiellogik berechtigte Realm-Verbindung existieren.
+* Baut derselbe Charakter eine neue, vollständig authentifizierte Verbindung auf, übernimmt die neue Verbindung.
+* Die alte Verbindung wird vor der Übergabe entmachtet und anschließend getrennt.
+* Beide Verbindungen dürfen niemals gleichzeitig Spiellogik ausführen.
+* Der aktuelle serverautoritative RAM-Zustand bleibt maßgeblich und darf nicht durch einen älteren Datenbankstand überschrieben werden.
+* Das Cleanup einer verdrängten Verbindung darf weder die neue Verbindung noch den aktuellen Player-Zustand entfernen.
+* Zuordnung und Cleanup müssen verbindungsspezifisch abgesichert werden, beispielsweise durch `conn_id` oder eine Verbindungsgeneration.
+* Bei einem Fehler muss der Vorgang fail-closed enden, ohne zwei aktive Eigentümer derselben Charakterinstanz zu erzeugen.
+* Ein einzelner Takeover ist ein normaler Reconnect-Fall und führt nicht zu Bann oder Bestrafung.
+
+Die Regeln für das zugehörige Sicherheits-Logging und die Einordnung der Quell-IP stehen in `datenschutz_zugang.md` und `netzwerk_ip_schutz.md`.
+
 ---
 
 # 7. Heartbeat

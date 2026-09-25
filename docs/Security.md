@@ -224,14 +224,15 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 
 #### AUTH-03 – Keine Occupancy-/Einzigkeitsprüfung paralleler Verbindungen desselben Charakters
 
-- **Status:** `BESTÄTIGT`
+- **Status:** `BESTÄTIGT` (statischer Codebefund; fachliche Entscheidung getroffen, Implementierung und Tests ausstehend)
 - **Priorität:** `MITTEL`
 - **Betroffener Bereich:** Spielerregistrierung und Verbindungszuordnung (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/world.rs`)
 - **Bekannte Ausgangslage:** Beim HELLO werden Player- und Verbindungszuordnung ohne vorherige Occupancy-/Einzigkeitsprüfung eingefügt. `disconnect_player` entfernt anschließend sämtliche `by_conn`-Zuordnungen desselben Charakters. Der strukturelle Befund ist nur statisch belegt; ein dynamischer Paralleltest wurde nicht durchgeführt. Mögliche Auswirkungen betreffen die Zustandsintegrität und mögliches Duping; eine erfolgreiche Ausnutzung ist nicht bewiesen.
-- **Offene Frage / Entscheidung:** Soll verbindlich höchstens eine aktive Realm-Verbindung pro Charakter zulässig sein, und soll ein weiterer Login abgelehnt oder die bestehende Verbindung verdrängt werden?
+- **Offene Frage / Entscheidung:** Fachlich entschieden: Pro Charakter darf höchstens eine aktive, zur Spiellogik berechtigte Realm-Verbindung existieren. Eine neue vollständig authentifizierte Verbindung übernimmt; die alte Verbindung wird vor der Übergabe entmachtet und anschließend getrennt. Die verbindliche Single-Connection-/Takeover-Semantik steht in `docs/Login_Realm_Architektur.md` (Abschnitt „Verbindungs-Einzigkeit und Takeover“). Die Einordnung der Quell-IPs als Sicherheitssignale steht in `docs/netzwerk_ip_schutz.md`; Zweckbindung, Zugriffsbegrenzung und Löschung der Takeover-IP-Daten stehen in `docs/datenschutz_zugang.md`.
+- **Logging-Anforderung:** Ein einzelner Takeover ist das INFO-Ereignis `authenticated_connection_takeover`; auffällige Wiederholungen dürfen nur einen WARN-/Alarmhinweis ohne automatische Sanktion erzeugen. Vollständige Session-IDs, Handoff-Tokens, Passwörter und andere Zugangsdaten werden nicht geloggt. Roh-IP-Adressen und mit Accounts verknüpfte IP-Daten dieser Ereignisse werden nach 14 Tagen automatisch gelöscht.
 - **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:268` (`world.players.insert` ohne Einzigkeitsprüfung), `src/realm-rs/src/handlers.rs:269` (`world.by_conn.insert`), `src/realm-rs/src/world.rs:410-414` (`disconnect_player` und Bereinigung aller Zuordnungen derselben `player_id`).
-- **Nächster zulässiger Schritt:** Occupancy-Semantik dokumentieren; danach gegebenenfalls Code-/Test-Auftrag. Ein dynamischer Paralleltest benötigt einen eigenen späteren Auftrag.
-- **Abschlussnachweis:** Statischer Codebefund bestätigt; dynamischer Nachweis und fachliche Entscheidung ausstehend.
+- **Nächster zulässiger Schritt:** Implementierung und Tests der beschlossenen Übernahme-, Cleanup- und Logging-Semantik bleiben offen. Ein dynamischer Paralleltest benötigt einen eigenen späteren Auftrag; ein dynamischer Ausnutzungsnachweis wird nicht behauptet.
+- **Abschlussnachweis:** Statischer Codebefund bestätigt und fachliche Entscheidung in den drei zuständigen Fachdokumenten festgehalten; Implementierung, Tests und dynamischer Nachweis ausstehend.
 
 #### AUTH-04 – Leere `AUTHAPI_URL` aktiviert den Dev-Modus ohne Auth
 
@@ -316,6 +317,7 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Priorität:** offen (im Audit-Auftrag nicht vergeben)
 - **Betroffener Bereich:** Protokollierung (`src/realm-rs/src/*.rs`, `docs/chat_system.md`)
 - **Bekannte Ausgangslage:** Protokollierung existiert (z. B. `log::info!`/`log::error!` in `src/realm-rs/src/main.rs:108`, `src/realm-rs/src/main.rs:128-`); Chat-/Voice-Logging ist in `docs/chat_system.md` als Regelbereich dokumentiert; ob Logdaten geheime/sensible Inhalte enthalten oder wie sie geschützt werden, ist noch nicht geprüfter Befund.
+- **Vorhandene Teilregel:** Die beschlossenen Takeover-Logging-Regeln sind bereits in `docs/datenschutz_zugang.md` dokumentiert; der vollständige Logging-Audit wurde dadurch nicht durchgeführt.
 - **Offene Frage / Entscheidung:** Welche Daten in Logs landen, welche davon sensibel sind und ob die Aufzeichnung/Retention datenschutzkonform ist.
 - **Verifizierte Belege:** `src/realm-rs/src/main.rs:108` (Log-Aufruf), `docs/chat_system.md` (Chat-Logging-Regeln laut Inhaltsverzeichnis-Eintrag in `docs/README.md`).
 - **Nächster zulässiger Schritt:** Read-only Code- und Doku-Auswertung im Folgeauftrag; Ergebnis als Befund/Abweichung erfassen.
