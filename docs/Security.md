@@ -180,14 +180,102 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 
 ### 4.1 Authentifizierung und Session-Validierung
 
-- **Status:** `ZU PRÜFEN`
+- **Status:** `ERLEDIGT` (nur der read-only Auditlauf; die unten dokumentierten offenen Befunde und Entscheidungen sind nicht erledigt)
 - **Priorität:** offen (im Audit-Auftrag nicht vergeben)
 - **Betroffener Bereich:** Realm-Auth, Login/HELLO (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/net.rs`, `src/realm-rs/src/security.rs`)
 - **Bekannte Ausgangslage:** Die HELLO-Prüfung blockiert Login im Status `Recovering` (`src/realm-rs/src/handlers.rs:113,121`); nicht authentifizierte Frames werden vor der Spiellogik verworfen (`src/realm-rs/src/security.rs:214-217`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:642`).
-- **Offene Frage / Entscheidung:** Vollständigkeit der Auth-/Session-Prüfung über alle Nachrichtentypen und Verbindungslebenszyklen.
-- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:113-121`, `src/realm-rs/src/security.rs:214-224`, Tests in `src/realm-rs/src/security.rs` (`unauthenticated_requests_dropped_before_logic`).
-- **Nächster zulässiger Schritt:** Read-only Code- und Doku-Prüfung im Folgeauftrag; Ergebnis als Befund oder Abweichung hier erfassen.
+- **Auditergebnis:** Der read-only Auditlauf wurde am 25.09.2026 abgeschlossen. Die bestehenden Rust-Tests ergaben 416 bestandene und 0 fehlgeschlagene Tests; `go test ./...` im Modul `src/api` war für `andora/authapi` erfolgreich. `git status --short` hatte nach dem Audit eine leere Ausgabe; der Arbeitsbaum war sauber. Der Auditlauf ist damit abgeschlossen, die nachfolgenden offenen Befunde und Entscheidungen sind jedoch nicht erledigt.
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:113-121`, `src/realm-rs/src/security.rs:214-224`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:642`; Testläufe `cargo test --manifest-path src/realm-rs/Cargo.toml` (416 bestanden, 0 fehlgeschlagen) und `go test ./...` in `src/api` (`ok andora/authapi`); `git status --short` mit leerer Ausgabe.
+- **Nächster zulässiger Schritt:** Die nachfolgenden Einträge getrennt nach ihrem jeweiligen Status bearbeiten; aus dem abgeschlossenen Auditlauf folgt keine Aussage, dass der geprüfte Bereich insgesamt sicher abgeschlossen ist.
+- **Abschlussnachweis:** Auditlauf am 25.09.2026 abgeschlossen; offene Befunde und Entscheidungen bleiben ausstehend.
+
+#### AUTH-01 – Fail-closed HELLO-Einstieg
+
+- **Status:** `BESTÄTIGT` (Schutzmechanismus; kein Schwachstellenbefund)
+- **Priorität:** keine Risikostufe, da kein Befund
+- **Betroffener Bereich:** Realm-Auth und Charakterladen (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/auth_api.rs`, `src/realm-rs/src/db.rs`, `src/api`)
+- **Bekannte Ausgangslage:** Bei aktivierter Auth-API ist HELLO fail-closed: Der Einstieg erfordert einen one-shot, an den Ziel-Realm gebundenen Handoff sowie eine gültige Session mit identischer `account_id`. Das Charakterladen bindet `char_id` zusätzlich an dieselbe `account_id`.
+- **Offene Frage / Entscheidung:** Keine; der geprüfte Pfad wird als bestätigter Schutzmechanismus und nicht als offene Aufgabe geführt.
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:59-92` (`verify_entry`), Aufruf in `src/realm-rs/src/handlers.rs:139`; `src/realm-rs/src/auth_api.rs:165-172`; `src/api/store.go:655-668`, `src/api/endpoints.go:516-546`, `src/api/store.go:557-574`; Ownership-Filter in `src/realm-rs/src/db.rs:165-179` (`WHERE id = ? AND account_id = ?`).
+- **Nächster zulässiger Schritt:** Keiner; kein offener Befund.
+- **Abschlussnachweis:** Schutzmechanismus durch Code, vorhandene Tests und den Auditlauf vom 25.09.2026 bestätigt.
+
+#### AUTH-02a – Semantik ablaufender Sessions während bereits autorisierter Realm-Verbindungen
+
+- **Status:** `ENTSCHEIDUNG OFFEN`
+- **Priorität:** offen (im Audit-Auftrag nicht vergeben)
+- **Betroffener Bereich:** Session-Lebenszyklus nach erfolgreichem HELLO (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/security.rs`, `src/realm-rs/src/world.rs`, `src/api`)
+- **Bekannte Ausgangslage:** Die Session wird beim HELLO validiert und anschließend als `session_id` am Player gespeichert. Während einer bereits autorisierten Verbindung prüft `gate_frame` nur den Authentifizierungsstatus der Verbindung; auch `handle_heartbeat` validiert die Session nicht erneut. Die Auth-API kennt einen Ablaufzeitpunkt und eine Session-TTL. Daraus wird keine bestätigte Schwachstelle abgeleitet, weil die gewünschte Lebenszyklus-Semantik noch nicht dokumentiert ist.
+- **Offene Frage / Entscheidung:** Soll der reguläre Ablauf einer Session während einer bereits autorisierten Realm-Verbindung die Verbindung beenden, oder gilt die beim HELLO erteilte Autorisierung bis zum Verbindungsende?
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:84` (`validate_session` beim Einstieg), `src/realm-rs/src/handlers.rs:223` und `src/realm-rs/src/world.rs:34` (`session_id` am Player), `src/realm-rs/src/security.rs:205-226` (`gate_frame`), `src/realm-rs/src/handlers.rs:1071-1092` (`handle_heartbeat`), `src/api/store.go:557-574` (`expires_at`), `src/api/config.go:174` (`SESSION_TTL_MINUTES`).
+- **Nächster zulässiger Schritt:** Gewünschte Lebenszyklus-Semantik fachlich dokumentieren; erst danach gegebenenfalls einen Code-/Test-Auftrag ableiten.
 - **Abschlussnachweis:** ausstehend.
+
+#### AUTH-02b – Propagation ausdrücklicher Session-Widerrufe auf bereits aktive Realm-Verbindungen
+
+- **Status:** `ZU PRÜFEN`
+- **Priorität:** offen (im Audit-Auftrag nicht vergeben)
+- **Betroffener Bereich:** Expliziter Session-Widerruf und aktive Realm-Verbindungen (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/parental.rs`, `src/api/store.go`)
+- **Bekannte Ausgangslage:** Die Auth-API unterstützt ausdrücklichen Session-Widerruf, unter anderem im Zusammenhang mit Passwortänderung oder Passwort-Reset. Der Realm validiert die Session nach dem HELLO nicht erneut; der bestehende `force_logout`-Pfad gehört zur Elternkontrolle und belegt keine allgemeine Propagation ausdrücklicher Session-Widerrufe. Ablauf und ausdrücklicher Widerruf werden getrennt bewertet.
+- **Offene Frage / Entscheidung:** Müssen ausdrückliche Session-Widerrufe bereits aktive Realm-Verbindungen beenden, und existiert dafür ein noch nicht nachgewiesener Propagationspfad?
+- **Verifizierte Belege:** `src/api/store.go:576-585` (`RevokeSession`), `src/api/store.go:816-832` und `src/api/store.go:863-867` (Session-Widerruf bei Passwortänderung beziehungsweise Passwort-Reset), `src/realm-rs/src/handlers.rs:84` (Session-Validierung beim Einstieg), `src/realm-rs/src/parental.rs:309-318` (`force_logout`-Kickerpfad), `src/realm-rs/src/parental.rs:323-331` (10-Sekunden-Poller).
+- **Nächster zulässiger Schritt:** Read-only prüfen und fachlich entscheiden, ob und wie ausdrückliche Widerrufe auf aktive Realm-Verbindungen propagiert werden müssen; danach gegebenenfalls Code-/Test-Auftrag.
+- **Abschlussnachweis:** ausstehend.
+
+#### AUTH-03 – Keine Occupancy-/Einzigkeitsprüfung paralleler Verbindungen desselben Charakters
+
+- **Status:** `BESTÄTIGT`
+- **Priorität:** `MITTEL`
+- **Betroffener Bereich:** Spielerregistrierung und Verbindungszuordnung (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/world.rs`)
+- **Bekannte Ausgangslage:** Beim HELLO werden Player- und Verbindungszuordnung ohne vorherige Occupancy-/Einzigkeitsprüfung eingefügt. `disconnect_player` entfernt anschließend sämtliche `by_conn`-Zuordnungen desselben Charakters. Der strukturelle Befund ist nur statisch belegt; ein dynamischer Paralleltest wurde nicht durchgeführt. Mögliche Auswirkungen betreffen die Zustandsintegrität und mögliches Duping; eine erfolgreiche Ausnutzung ist nicht bewiesen.
+- **Offene Frage / Entscheidung:** Soll verbindlich höchstens eine aktive Realm-Verbindung pro Charakter zulässig sein, und soll ein weiterer Login abgelehnt oder die bestehende Verbindung verdrängt werden?
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:268` (`world.players.insert` ohne Einzigkeitsprüfung), `src/realm-rs/src/handlers.rs:269` (`world.by_conn.insert`), `src/realm-rs/src/world.rs:410-414` (`disconnect_player` und Bereinigung aller Zuordnungen derselben `player_id`).
+- **Nächster zulässiger Schritt:** Occupancy-Semantik dokumentieren; danach gegebenenfalls Code-/Test-Auftrag. Ein dynamischer Paralleltest benötigt einen eigenen späteren Auftrag.
+- **Abschlussnachweis:** Statischer Codebefund bestätigt; dynamischer Nachweis und fachliche Entscheidung ausstehend.
+
+#### AUTH-04 – Leere `AUTHAPI_URL` aktiviert den Dev-Modus ohne Auth
+
+- **Status:** `ZU PRÜFEN`
+- **Priorität:** `MITTEL`
+- **Betroffener Bereich:** Konfiguration der Auth-Anbindung (`src/realm-rs/src/auth_api.rs`, `src/realm-rs/src/handlers.rs`, `src/realm-rs/src/parental.rs`, `src/realm-rs/src/config.rs`, `src/realm-rs/config.env.example`)
+- **Bekannte Ausgangslage:** Bei leerer `AUTHAPI_URL` ist die Auth-API deaktiviert; `verify_entry` gibt ohne Auth-Prüfung `account_id = 0` zurück, und der Parental-Attach wird bei `account_id = 0` übersprungen. Dieser Modus ist ausdrücklich für Entwicklung/Testprototypen dokumentiert. Eine produktive Fehlkonfiguration ist durch das Repository nicht belegt.
+- **Offene Frage / Entscheidung:** Wird in produktiven Deployments verbindlich verhindert, dass der Realm mit leerer `AUTHAPI_URL` startet?
+- **Verifizierte Belege:** `src/realm-rs/src/auth_api.rs:113-115` (`enabled`), `src/realm-rs/src/handlers.rs:65-67` (`Ok(0)`), `src/realm-rs/src/parental.rs:109-111` (Parental-Attach übersprungen), `src/realm-rs/src/config.rs:155-161` (bewusster Dev-/Testmodus), `src/realm-rs/src/config.rs:577-581` (Laden der Auth-API-Konfiguration), `src/realm-rs/config.env.example`.
+- **Nächster zulässiger Schritt:** In einem getrennten Deployment-/Konfigurationsaudit prüfen, ob `AUTHAPI_URL` für Produktionsprofile verbindlich gesetzt sein muss und erzwungen wird.
+- **Abschlussnachweis:** ausstehend; der Dev-Modus ist bestätigt, eine produktive Fehlkonfiguration nicht.
+
+#### AUTH-05 – Vollständige Session-ID in `sec-reject`-Logs
+
+- **Status:** `BESTÄTIGT`
+- **Priorität:** `GERING`
+- **Betroffener Bereich:** Ablehnungs-Logging (`src/realm-rs/src/security.rs`), fachlicher Bezug zu §4.5 „Logging und Schutz sensibler Daten“
+- **Bekannte Ausgangslage:** `log_reject` schreibt die vollständige `session_id` in die Warn-Logzeile. Es ist nicht belegt oder festgelegt, dass die vollständige Session-ID für die Korrelation erforderlich ist.
+- **Offene Frage / Entscheidung:** Ob künftig ein Hash, ein Präfix oder eine interne Korrelations-ID verwendet wird, ist im Rahmen von §4.5 zu entscheiden; mit diesem Eintrag wird noch keine Lösung festgelegt.
+- **Verifizierte Belege:** `src/realm-rs/src/security.rs:138` (`p.session_id.as_str()`), `src/realm-rs/src/security.rs:146-151` (`sec-reject ... session={session}`).
+- **Nächster zulässiger Schritt:** Den Befund im read-only Audit zu §4.5 fachlich bewerten und dort die zulässige Log-Repräsentation festlegen.
+- **Abschlussnachweis:** ausstehend.
+
+#### AUTH-06 – Kein natives TLS im Realm; Deployment-TLS nicht nachgewiesen
+
+- **Status:** `ZU PRÜFEN`
+- **Priorität:** offen (im Audit-Auftrag nicht vergeben)
+- **Betroffener Bereich:** Realm-Transport und Deployment (`src/realm-rs/src/net.rs`, `src/realm-rs/src/health.rs`, `src/realm-rs/src/config.rs`, `docs/Projekt-Status.md`)
+- **Bekannte Ausgangslage:** Im Realm-Code wurde kein natives TLS für den Spieler- oder Health-Transport nachgewiesen. Daraus folgt keine Aussage, dass der produktive Transport sicher unverschlüsselt ist: Eine TLS-Terminierung durch Reverse-Proxy oder andere Deployment-Komponenten wurde in diesem read-only Repository-Audit nicht geprüft.
+- **Offene Frage / Entscheidung:** Erfolgt die TLS-Terminierung in produktiven Deployments nativ im Realm oder außerhalb des Realm-Prozesses, insbesondere durch einen Reverse-Proxy?
+- **Verifizierte Belege:** Repository-Suche `grep -rni "tls\|ssl\|wss" src/realm-rs/src` mit dem Treffer `src/realm-rs/src/config.rs:23` („ohne TLS“ zur MariaDB-DSN); `docs/Projekt-Status.md:26` (mTLS-Vorbereitung für den Andora-Agent, kein Nachweis für den Realm-Spielertransport).
+- **Nächster zulässiger Schritt:** Deployment-/Betriebsarchitektur read-only auf eine vorgeschaltete TLS-Terminierung prüfen; danach gegebenenfalls Doku- oder Implementierungsauftrag.
+- **Abschlussnachweis:** ausstehend; Reverse-Proxy-Terminierung ungeprüft.
+
+#### AUTH-07 – Unauthentifizierter `/players`-Endpoint
+
+- **Status:** `BESTÄTIGT` (bezogen auf den Endpoint; externe Erreichbarkeit ungeprüft)
+- **Priorität:** `MITTEL`
+- **Betroffener Bereich:** Health-/Status-HTTP (`src/realm-rs/src/health.rs`)
+- **Bekannte Ausgangslage:** Der HTTP-Endpoint `/players` liefert Player-Daten ohne Authentifizierung. Die externe Erreichbarkeit des Endpoints hängt von der Laufzeit-/Netzwerkkonfiguration ab und wurde in diesem read-only Repository-Audit nicht geprüft.
+- **Offene Frage / Entscheidung:** Soll `/players` auf interne Erreichbarkeit beschränkt oder mit einer Authentifizierung versehen werden?
+- **Verifizierte Belege:** `src/realm-rs/src/health.rs:13-45` (Routing ohne Auth-Prüfung), `src/realm-rs/src/health.rs:61-150` (`/players` und Antwortaufbereitung).
+- **Nächster zulässiger Schritt:** Externe Erreichbarkeit getrennt prüfen und eine Access-Control-Entscheidung dokumentieren; danach gegebenenfalls Code-/Test-Auftrag.
+- **Abschlussnachweis:** Endpoint-Befund bestätigt; externe Erreichbarkeit ungeprüft.
 
 ### 4.2 Replay-Schutz
 
