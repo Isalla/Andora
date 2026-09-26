@@ -254,7 +254,17 @@ VERBINDLICH für die fachliche Bewertung eines Einstiegs:
 * **Schlägt erst nach dem Commit die Begrüßung (`WELCOME`) oder die Verbindung aus, gilt der Login als zustande gekommen.** Der normale Disconnect-Pfad schreibt anschließend den neuen Logout-Zeitpunkt. Der Einstieg wird in diesem Fall nicht zurückgenommen und nicht als fehlgeschlagen behandelt.
 * **Der Verbrauch des einmalig gültigen Handoffs ist davon unabhängig.** Der Handoff wird weiterhin vor dem fachlichen Realm-Login verbraucht; ein fehlgeschlagener Einstieg nimmt diesen Verbrauch nicht zurück. Das ist bestehende Auth-Semantik und keine Aussage über den Einstieg selbst.
 
-Der Erfolgszeitpunkt bestimmt, wann Offline-Zeit konsumiert wird; die dafür geltenden Regeln stehen in `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6) und `Player_Persistenz.md` (Abschnitt 11). Dieses Dokument legt keine technische Umsetzung, keine Transaktion und keinen zusätzlichen Lock fest.
+**Offline-Abrechnung unmittelbar vor dem Commit**
+
+* Die Offline-Abrechnung ist ein eigener, atomarer Schritt **unmittelbar vor** der Herstellung der Owner-Zuordnung. Sie wird erst ausgeführt, nachdem alle für den Einstieg als **blockierend definierten** Vorprüfungen – einschließlich der erforderlichen Datenladeprüfungen und der Elternkontrolle – erfolgreich abgeschlossen wurden. Damit wird keine neue Fail-closed-Regel für bisher tolerierte Ladefehler eingeführt.
+* Gutschrift und Zurücksetzen des Logout-Zeitpunkts werden **gemeinsam und unteilbar** geschrieben. **Schlägt die Abrechnung fehl, wird der Login nicht committet**; der vorherige Logout-Zeitpunkt und der noch nicht konsumierte Offline-Zeitraum bleiben dann vollständig erhalten. Das gilt auch für die Datenneutralität: es entsteht weder eine Gutschrift noch eine Verbrauchung.
+
+**At-most-once-Unterbrechungsausnahme** (Kurzname: Crash-Ausnahme)
+
+* Die Ausnahme tritt bei einer abrupten Unterbrechung zwischen erfolgreichem DB-Commit der Abrechnung und Herstellung der Owner-Zuordnung ein. Dazu zählen insbesondere Prozessabsturz und – sofern der Handler an dieser Stelle abbrechbar ist – Task-Abbruch oder Panic. Reguläre, kontrolliert behandelte Fehler müssen vor der Abrechnung abgeschlossen sein oder den Einstieg definiert beenden.
+* In diesem Fall bleibt die bereits gebuchte Gutschrift bestehen und der Logout-Zeitpunkt bleibt zurückgesetzt; der Login gilt technisch **nicht** als zustande gekommen. Es entsteht **keine Mehrfachgutschrift** und **kein Wertverlust**: Die Ausnahme verursacht gegenüber der regulär vorgesehenen Abrechnung weder eine Doppelnachbuchung noch einen Verlust. Die vorgesehene Gutschrift ist bereits vollständig gebucht; lediglich ihre Zuordnung zu einem erfolgreich hergestellten Realm-Login entfällt. Zur spielwertbezogenen Einordnung siehe `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6).
+
+Der Erfolgszeitpunkt bestimmt, wann Offline-Zeit konsumiert wird; die dafür geltenden Regeln stehen in `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6) und `Player_Persistenz.md` (Abschnitt 11). Dieses Dokument legt keine technische Umsetzung und keine Sperrarchitektur fest.
 
 ## Verbindungs-Einzigkeit und Takeover
 

@@ -263,7 +263,13 @@ VERBINDLICH:
 * **Schlägt erst nach dem Commit `WELCOME` oder die Verbindung aus**, gilt der Login als zustande gekommen. Der Disconnect-Pfad dieser Verbindung schreibt anschließend den neuen Logout-Zeitpunkt; es findet keine Rücknahme des Einstiegs statt.
 * Der Handoff-Single-Use bleibt davon unberührt: Er wird weiterhin vor dem fachlichen Realm-Login verbraucht und bei einem fehlgeschlagenen Einstieg nicht zurückgenommen (bestehende Auth-Semantik, siehe `Login_Realm_Architektur.md`).
 
-Ob und wie dieser Zeitpunkt im Code umgesetzt wird (Reihenfolge der Schreibvorgänge, Transaktionsgrenze, Verhalten bei Schreibfehlern) ist hier **nicht** festgelegt; der offene sicherheitstechnische Befund dazu steht in `docs/Security.md` unter `P-32`.
+**Abrechnungszeitpunkt und Unterbrechungsausnahme**
+
+* Das Zurücksetzen und die zugehörige Gutschrift erfolgen als **ein gemeinsamer, unteilbarer Schritt unmittelbar vor** der Herstellung der Owner-Zuordnung — nach Abschluss aller für den Einstieg als **blockierend definierten** Vorprüfungen, einschließlich der erforderlichen Datenladeprüfungen und der Elternkontrolle. Damit wird keine neue Fail-closed-Regel für bisher tolerierte Ladefehler eingeführt.
+* **Schlägt die Abrechnung fehl, wird der Login nicht committet.** Der vorherige `logout_at` und der noch nicht konsumierte Offline-Zeitraum bleiben dann vollständig erhalten.
+* **At-most-once-Unterbrechungsausnahme** (Kurzname: Crash-Ausnahme): Bricht der Vorgang **abrupt** zwischen erfolgreichem DB-Commit der Abrechnung und der Herstellung der Owner-Zuordnung ab — insbesondere bei Prozessabsturz sowie, sofern der Handler an dieser Stelle abbrechbar ist, bei Task-Abbruch oder Panic —, bleibt die bereits gebuchte Gutschrift bestehen und `logout_at` bleibt zurückgesetzt; der Login gilt technisch nicht als zustande gekommen. **Die Gutschrift bleibt gebucht**, und es entsteht **keine Mehrfachgutschrift**: gegenüber der regulär vorgesehenen Abrechnung ergibt sich weder ein Wertverlust noch eine Doppelnachbuchung. Zur spielwertbezogenen Einordnung siehe `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6).
+
+Ob und wie dieser Zeitpunkt im Code umgesetzt wird (Reihenfolge der Schreibvorgänge, technische Transaktionsform, Verhalten bei Schreibfehlern) ist hier **nicht** festgelegt; der offene sicherheitstechnische Befund dazu steht in `docs/Security.md` unter `P-32`.
 
 ---
 

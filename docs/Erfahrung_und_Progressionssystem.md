@@ -382,6 +382,12 @@ VERBINDLICH:
 * **Schlägt erst nach dem Commit `WELCOME` oder die Verbindung aus**, gilt der Login als zustande gekommen. Die Gutschrift bleibt; der Disconnect-Pfad schreibt anschließend den neuen Logout-Zeitpunkt.
 * Ein fehlgeschlagener Einstieg erzeugt damit **weder** eine doppelte Gutschrift **noch** einen Verlust der Offline-Zeit: Solange der Logout-Zeitpunkt unverändert bleibt, wird derselbe Zeitraum beim nächsten erfolgreichen Login regulär — gegebenenfalls mit der dann längeren Offline-Dauer — verrechnet. Die Deckelung nach Abschnitt 12.3 gilt unverändert.
 
+**At-most-once-Unterbrechungsausnahme** (Kurzname: Crash-Ausnahme)
+
+* Die Offline-Zeit wird als **ein gemeinsamer, unteilbarer Schritt mit der Gutschrift** verbraucht, und zwar unmittelbar vor der Herstellung der Owner-Zuordnung, nach Abschluss aller für den Einstieg als blockierend definierten Vorprüfungen. Schlägt dieser Schritt fehl, wird der Login nicht committet und der Zeitraum bleibt vollständig erhalten.
+* Bricht der Vorgang **abrupt** zwischen erfolgreichem DB-Commit dieses Schritts und der Herstellung der Owner-Zuordnung ab — insbesondere bei Prozessabsturz sowie, sofern der Handler an dieser Stelle abbrechbar ist, bei Task-Abbruch oder Panic —, wird der Zeitraum **ohne Sitzung** verbraucht und der Login gilt technisch nicht als zustande gekommen.
+* **Spielwertneutralität:** Die Ausnahme verursacht gegenüber der regulär vorgesehenen Abrechnung **weder Wertverlust noch Mehrfachgutschrift**. Die vorgesehene Gutschrift ist bereits vollständig gebucht; lediglich ihre Zuordnung zu einem erfolgreich hergestellten Realm-Login entfällt. Der Bonus ist beim nächsten erfolgreichen Login verfügbar; die Zurechnung des Zeitraums erfolgt ohne Sitzung. Für die Spielwertbilanz ist die Ausnahme damit neutral.
+
 ---
 
 ## 12.7 Rested EXP in Gruppen
