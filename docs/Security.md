@@ -28,7 +28,7 @@
 ### P-20 – Verhalten bei fehlgeschlagenem Spool-Write
 
 - **Status:** `ERLEDIGT`
-- **Belege:** Test `failed_spool_write_sets_degraded_and_keeps_dirty_and_revision` in `src/realm-rs/src/spool.rs:740` mit Code-Kommentar zu `docs/Player_Persistenz.md` §40 (`src/realm-rs/src/spool.rs:741`); Doku-Abschnitt `docs/Player_Persistenz.md:1078` (§40). Verifiziertes Verhalten: Fehlschlag setzt `PersistStatus::Degraded`, Dirty-Bit und `persist_revision` bleiben erhalten.
+- **Belege:** Test `failed_spool_write_sets_degraded_and_keeps_dirty_and_revision` in `src/realm-rs/src/spool.rs:837` mit Code-Kommentar zu `docs/Player_Persistenz.md` §40 (`src/realm-rs/src/spool.rs:838`); Doku-Abschnitt `docs/Player_Persistenz.md:1078` (§40). Verifiziertes Verhalten: Fehlschlag setzt `PersistStatus::Degraded`, Dirty-Bit und `persist_revision` bleiben erhalten.
 - **Abschlussnachweis:** Test im Repository vorhanden; Doku §40 beschreibt die Semantik.
 
 ### DOK-01 – Veraltete Stage-B-Statusbeschreibung korrigiert
@@ -36,6 +36,12 @@
 - **Status:** `ERLEDIGT`
 - **Belege:** Commit `fcbbc5d` („Update Stage-B persist logic and documentation“); Diff in `docs/Player_Persistenz.md`: „dokumentiert, aber noch nicht implementiert“ → „implementiert und in der Datei dokumentiert“; §21-Statuszeile ebenfalls auf „dokumentiert und implementiert“ korrigiert.
 - **Abschlussnachweis:** Korrektur per `git show fcbbc5d -- docs/Player_Persistenz.md` nachvollziehbar.
+
+### AUTH-03A – Verbindungs-Einzigkeit und Takeover im Realm
+
+- **Status:** `ERLEDIGT`
+- **Belege:** Commit `e499dec8d9e9db471f0a3ecb222b1fd869bf643c` („Enforce single realm connection per character“, 7 Dateien: `src/realm-rs/src/handlers.rs`, `net.rs`, `parental.rs`, `persist.rs`, `security.rs`, `spool.rs`, `world.rs`). Genau eine aktive, zur Spiellogik berechtigte Realm-Verbindung pro Charakter: `by_conn` wird ausschließlich über `commit_login` verändert (`src/realm-rs/src/world.rs:304-375`), alle übrigen Pfade lesen nur. Authentifizierter Takeover: Handoff-/Session-Prüfung, Account-/Charakterprüfung und alle falliblen Vorprüfungen einschließlich Elternkontrolle laufen vor dem Commit (`src/realm-rs/src/handlers.rs:138-151`, `:296-320`); die alte `conn_id` wird vor dem Setzen der neuen entfernt und erst danach der vorhandene Closer signalisiert (`src/realm-rs/src/handlers.rs:327-365`). Autoritativer RAM-Zustand bleibt maßgeblich: der bestehende Player wird nicht ersetzt, aktualisiert werden nur `tx`, `session_id`, `lang` und `last_activity` (`src/realm-rs/src/world.rs:254-259`); WELCOME wird aus dem RAM-Stand gesendet (`src/realm-rs/src/handlers.rs:386-400`). Stale Cleanup berührt den neuen Owner nicht: `disconnect_conn` entfernt ausschließlich die Zuordnung der übergebenen `conn_id` statt charakterweit (`src/realm-rs/src/world.rs:597-612`), `is_owner` wird vor dem Flush, vor `logout_at` und unter derselben Sperre wie das Entfernen geprüft (`src/realm-rs/src/world.rs:239-241`, `src/realm-rs/src/net.rs:316-374`), Lesefehler beenden die Schleife kontrolliert statt den Cleanup zu überspringen (`src/realm-rs/src/net.rs:168-186`), der Parental-Force-Logout schließt gezielt die Eigentümer-Verbindung ohne vorzeitiges Cleanup (`src/realm-rs/src/parental.rs:319-327`). Login und Disconnect-Commit sind pro `player_id` über das bestehende per-player-Gate serialisiert (`src/realm-rs/src/spool.rs:95-102`, `src/realm-rs/src/handlers.rs:150-151`, `src/realm-rs/src/net.rs:316-317`); die Sperrenreihenfolge ist Gate → World → Elternkontrolle/Gruppen, ein inverser Pfad World → Gate ist im Repository nicht vorhanden. Takeover-Logging als INFO-Ereignis `authenticated_connection_takeover` mit Account-ID, Charakter-ID, alter und neuer `conn_id` sowie Zustand der verdrängten Verbindung, ohne Roh-IP (`src/realm-rs/src/security.rs:170-189`).
+- **Abschlussnachweis:** 436 Tests bestanden, 0 fehlgeschlagen (`cargo test` in `src/realm-rs`; 436 Testattribute im Quellcode zählbar); `cargo clippy --all-targets --all-features` ohne Fehler (Warnungen unverändert gegenüber dem Vorzustand). Nicht Bestandteil dieses Abschlusses und weiterhin offen: die dauerhafte Takeover-IP-Protokollierung mit 14-Tage-Löschung (Logging-Anforderung in Abschnitt 4.1, `AUTH-03`), der Widerspruch im Erstellungsverhalten von `db::load_character` sowie der fehlende Integrationstest der `pending_revision`-Verdrahtung im Login-Pfad (kein Datenbank-Testlauf möglich; `pending_revision` und die Entscheidungsfunktion sind einzeln getestet).
 
 ### Testbestand (Zählung im Quellcode verifiziert)
 
@@ -52,7 +58,7 @@
 - **Betroffener Bereich:** Spool-Durability (`src/realm-rs/src/spool.rs`, `docs/Player_Persistenz.md` §25)
 - **Bekannte Ausgangslage:** `write_atomic` sichert die Temp-Datei per `f.sync_all()` und benennt danach um; ein Verzeichnis-fsync nach dem Rename findet nicht statt.
 - **Offene Frage / Entscheidung:** Ob für Crash-Sicherheit zusätzlich ein fsync des Zielverzeichnisses nach dem Rename erforderlich ist.
-- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:455-462` (`write_atomic`: `sync_all` in Zeile 458, `rename` in Zeile 460, danach Funktionsende).
+- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:552-559` (`write_atomic`: `sync_all` in Zeile 555, `rename` in Zeile 557, danach Funktionsende).
 - **Nächster zulässiger Schritt:** Dateisystem-Semantik (Rename-Durability ohne Verzeichnis-fsync) prüfen; danach Doku-Entscheidung oder Code-Auftrag.
 - **Abschlussnachweis:** ausstehend.
 
@@ -74,7 +80,7 @@
 - **Betroffener Bereich:** Quarantäne-Aufbewahrung (`docs/Player_Persistenz.md` §33, `src/realm-rs/src/spool.rs`)
 - **Bekannte Ausgangslage:** Die Doku verbietet automatisches Löschen offener Fälle aufgrund des Alters und lässt die 30-Tage-Frist erst mit der Archivierung beginnen; der Code verschiebt offene Dateien älter als 30 Tage automatisch ins Archiv und beschneidet danach das Archiv.
 - **Offene Frage / Entscheidung:** Ob das Code-Verhalten die beabsichtigte Umsetzung ist (Doku veraltet) oder die Automatik gegen die Doku verstößt; dabei sind die vorhandenen Retention-Tests als Beleg zu prüfen. Ohne diese Prüfung wird kein endgültiger Fehler festgestellt.
-- **Verifizierte Belege:** `docs/Player_Persistenz.md:881-911` (§33: Zeile 893 „NIEMALS aufgrund ihres Alters automatisch gelöscht“, Zeile 903 „ERST BEIM ARCHIVIEREN beginnt die 30-Tage-Aufbewahrungsfrist“); `src/realm-rs/src/spool.rs:39` (`RETENTION_SECS` = 30 Tage); `src/realm-rs/src/spool.rs:378-397` (`run_retention_at`, Verschiebung in Zeile 386); Retention-Tests um `src/realm-rs/src/spool.rs:608-638`.
+- **Verifizierte Belege:** `docs/Player_Persistenz.md:881-911` (§33: Zeile 893 „NIEMALS aufgrund ihres Alters automatisch gelöscht“, Zeile 903 „ERST BEIM ARCHIVIEREN beginnt die 30-Tage-Aufbewahrungsfrist“); `src/realm-rs/src/spool.rs:39` (`RETENTION_SECS` = 30 Tage); `src/realm-rs/src/spool.rs:475-493` (`run_retention_at`, Verschiebung in Zeile 490); Retention-Tests um `src/realm-rs/src/spool.rs:695-742`.
 - **Nächster zulässiger Schritt:** Retention-Tests und Code gegen §33 abgleichen; danach Doku oder Code korrigieren.
 - **Abschlussnachweis:** ausstehend.
 
@@ -107,7 +113,7 @@
 - **Betroffener Bereich:** Startup-Recovery (`src/realm-rs/src/spool.rs`, `src/realm-rs/src/main.rs`)
 - **Bekannte Ausgangslage:** Die Recovery-Schleife ist auf 10.000 Iterationen begrenzt und gibt danach `Ok` zurück, auch wenn Batches übrig sind; der Aufrufer setzt bei `Ok` den Status READY.
 - **Offene Frage / Entscheidung:** Ob das Limit als Notventil mit READY-Status beabsichtigt ist oder bei Restarbeit ein anderer Status (z. B. DEGRADED mit Hinweis) gesetzt werden muss.
-- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:138-149` (`recover`, Schleifenbedingung mit `guard < 10_000` in Zeile 141, `Ok(total)` danach); `src/realm-rs/src/main.rs:93-105` (`Ok`-Zweig setzt `PersistStatus::Ready`).
+- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:207-218` (`recover`, Schleifenbedingung mit `guard < 10_000` in Zeile 210, `Ok(total)` in Zeile 217); `src/realm-rs/src/main.rs:93-105` (`Ok`-Zweig setzt `PersistStatus::Ready`).
 - **Nächster zulässiger Schritt:** Fachliche Entscheidung zur Status-Semantik nach Erreichen des Limits; danach ggf. Behandlung und Tests.
 - **Abschlussnachweis:** ausstehend.
 
@@ -151,7 +157,7 @@
 - **Betroffener Bereich:** Serverstart / Verfügbarkeit (`src/realm-rs/src/main.rs`, `src/realm-rs/src/handlers.rs`, `docs/Player_Persistenz.md` §28)
 - **Bekannte Ausgangslage:** Bei Recovery-Fehler startet der Realm als DEGRADED und der Start bricht nicht ab; Logins bleiben in DEGRADED möglich, während RECOVERING blockiert; die Doku beschreibt den RECOVERING-Pfad mit zunächst blockierten Logins.
 - **Offene Frage / Entscheidung:** Ob der dokumentierte RECOVERING-Pfad den Start-DB-Fehler abdeckt oder Code/Doku zum DEGRADED-Start angeglichen werden müssen.
-- **Verifizierte Belege:** `src/realm-rs/src/main.rs:108-109` (Recovery-Fehler → DEGRADED, Start läuft weiter); `src/realm-rs/src/handlers.rs:113-121` (Recovering blockiert Login, DEGRADED lässt Logins zu); `docs/Player_Persistenz.md:718` (§28: Start und Recovery).
+- **Verifizierte Belege:** `src/realm-rs/src/main.rs:108-109` (Recovery-Fehler → DEGRADED, Start läuft weiter); `src/realm-rs/src/handlers.rs:116-122` (Recovering blockiert Login, DEGRADED lässt Logins zu); `docs/Player_Persistenz.md:718` (§28: Start und Recovery).
 - **Nächster zulässiger Schritt:** Doku und Code auf Konsistenz prüfen; DEGRADED-Semantik dokumentieren.
 - **Abschlussnachweis:** ausstehend.
 
@@ -162,8 +168,19 @@
 - **Betroffener Bereich:** Nebenläufigkeit / Persistenz (`src/realm-rs/src/spool.rs`, `src/realm-rs/src/persist.rs`)
 - **Bekannte Ausgangslage:** Pro Spieler wird ein Serialisierungs-Gate in einer Map angelegt; eine Entfernung der Einträge ist nicht nachgewiesen.
 - **Offene Frage / Entscheidung:** Wann Gates entfernt werden (Erfolg/Fehler) und ob ein Leck über die Prozesslaufzeit besteht.
-- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:74` (`in_flight`-Map); `src/realm-rs/src/persist.rs:257-259` (Anlage per `or_insert_with`); keine Entfernung im Repository nachweisbar.
+- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:74` (`in_flight`-Map); `src/realm-rs/src/persist.rs:256-257` (Gate-Erwerb in `persist_player`) und `src/realm-rs/src/spool.rs:95-102` (Anlage per `or_insert_with` in `player_gate`); keine Entfernung im Repository nachweisbar.
 - **Nächster zulässiger Schritt:** Codepfade (Erfolg/Fehler von `persist_player`) nachverfolgen; danach Tests für das Cleanup ergänzen oder beauftragen.
+- **Abschlussnachweis:** ausstehend.
+
+### P-30 – Quarantänisierter Batch ohne DB-Write: Login kann eine ältere DB-Zeile laden
+
+- **Status:** `ZU PRÜFEN`
+- **Priorität:** offen (im Auftrag nicht vergeben)
+- **Betroffener Bereich:** Drain-Quarantäne und Login-Vorabprüfung (`src/realm-rs/src/spool.rs`, `src/realm-rs/src/handlers.rs`, `docs/Player_Persistenz.md` §33)
+- **Bekannte Ausgangslage:** Ein Batch, der beim Drain nicht anwendbar ist (unlesbar, fehlerhaft, unbekanntes Format, unbekannter Charakter), wird über `quarantine` aus `spool/` nach `quarantine/open/` verschoben, ohne dass ein DB-Write stattfindet. Die Login-Vorabprüfung wertet ausschließlich offene Dateien in `spool/` aus; ein quarantänisierter Batch gilt ihr deshalb nicht als ausstehend. Ein folgender Login kann damit eine DB-Zeile laden, die älter ist als der zuletzt autoritative Snapshot; der Batch bleibt als offener Fall in `quarantine/open/` liegen und wird nicht angewendet.
+- **Offene Frage / Entscheidung:** Wie ist mit einem quarantänisierten Batch umzugehen: Login blockieren, den Account markieren oder einen kontrollierten Operator-/Recovery-Ablauf definieren. Eine Lösung und eine Priorität werden hier nicht festgelegt.
+- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:443-464` (`quarantine`: `move_file` nach `quarantine/open/`, sonst `remove_file`); `src/realm-rs/src/spool.rs:353`, `:362`, `:371`, `:391` (Auslöser Unreadable, Malformed, UnknownFormat, UnknownCharacter — jeweils vor jedem DB-Write); `src/realm-rs/src/spool.rs:281-301` (`pending_revision` liest ausschließlich `spool/`); `src/realm-rs/src/handlers.rs:171-181` (Fail-closed-Auswertung über `pending_revision`); `docs/Player_Persistenz.md:881-909` (§33: offene Fälle, „NIEMALS aufgrund ihres Alters automatisch gelöscht“, Verschiebung ins Archiv erst nach Bearbeitung). Abgrenzung: `P-14` betrifft die Aufbewahrung/Retention der Quarantänefälle, `P-22` das Recovery-Limit, `P-26` den beidseitigen Ausfall von DB und Spool; keiner davon den Login-Zustand bei einem quarantänisierten Batch.
+- **Nächster zulässiger Schritt:** Fachliche Entscheidung zum Umgang mit quarantänisierten Batches im Login-Pfad; danach sind je nach Entscheidung Dokumentation, Code und/oder Tests betroffen. Bis dahin keine Änderung am Quarantänepfad.
 - **Abschlussnachweis:** ausstehend.
 
 ## 4. Noch ausstehendes Sicherheits-Audit
@@ -183,9 +200,9 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Status:** `ERLEDIGT` (nur der read-only Auditlauf; die unten dokumentierten offenen Befunde und Entscheidungen sind nicht erledigt)
 - **Priorität:** offen (im Audit-Auftrag nicht vergeben)
 - **Betroffener Bereich:** Realm-Auth, Login/HELLO (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/net.rs`, `src/realm-rs/src/security.rs`)
-- **Bekannte Ausgangslage:** Die HELLO-Prüfung blockiert Login im Status `Recovering` (`src/realm-rs/src/handlers.rs:113,121`); nicht authentifizierte Frames werden vor der Spiellogik verworfen (`src/realm-rs/src/security.rs:214-217`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:642`).
+- **Bekannte Ausgangslage:** Die HELLO-Prüfung blockiert Login im Status `Recovering` (`src/realm-rs/src/handlers.rs:116-122`); nicht authentifizierte Frames werden vor der Spiellogik verworfen (`src/realm-rs/src/security.rs:242-263`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:695-707`).
 - **Auditergebnis:** Der read-only Auditlauf wurde am 25.09.2026 abgeschlossen. Die bestehenden Rust-Tests ergaben 416 bestandene und 0 fehlgeschlagene Tests; `go test ./...` im Modul `src/api` war für `andora/authapi` erfolgreich. `git status --short` hatte nach dem Audit eine leere Ausgabe; der Arbeitsbaum war sauber. Der Auditlauf ist damit abgeschlossen, die nachfolgenden offenen Befunde und Entscheidungen sind jedoch nicht erledigt.
-- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:113-121`, `src/realm-rs/src/security.rs:214-224`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:642`; Testläufe `cargo test --manifest-path src/realm-rs/Cargo.toml` (416 bestanden, 0 fehlgeschlagen) und `go test ./...` in `src/api` (`ok andora/authapi`); `git status --short` mit leerer Ausgabe.
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:116-122`, `src/realm-rs/src/security.rs:242-263`, Test `unauthenticated_requests_dropped_before_logic` in `src/realm-rs/src/security.rs:695-707`; Testläufe `cargo test --manifest-path src/realm-rs/Cargo.toml` (416 bestanden, 0 fehlgeschlagen) und `go test ./...` in `src/api` (`ok andora/authapi`); `git status --short` mit leerer Ausgabe.
 - **Nächster zulässiger Schritt:** Die nachfolgenden Einträge getrennt nach ihrem jeweiligen Status bearbeiten; aus dem abgeschlossenen Auditlauf folgt keine Aussage, dass der geprüfte Bereich insgesamt sicher abgeschlossen ist.
 - **Abschlussnachweis:** Auditlauf am 25.09.2026 abgeschlossen; offene Befunde und Entscheidungen bleiben ausstehend.
 
@@ -196,7 +213,7 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Betroffener Bereich:** Realm-Auth und Charakterladen (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/auth_api.rs`, `src/realm-rs/src/db.rs`, `src/api`)
 - **Bekannte Ausgangslage:** Bei aktivierter Auth-API ist HELLO fail-closed: Der Einstieg erfordert einen one-shot, an den Ziel-Realm gebundenen Handoff sowie eine gültige Session mit identischer `account_id`. Das Charakterladen bindet `char_id` zusätzlich an dieselbe `account_id`.
 - **Offene Frage / Entscheidung:** Keine; der geprüfte Pfad wird als bestätigter Schutzmechanismus und nicht als offene Aufgabe geführt.
-- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:59-92` (`verify_entry`), Aufruf in `src/realm-rs/src/handlers.rs:139`; `src/realm-rs/src/auth_api.rs:165-172`; `src/api/store.go:655-668`, `src/api/endpoints.go:516-546`, `src/api/store.go:557-574`; Ownership-Filter in `src/realm-rs/src/db.rs:165-179` (`WHERE id = ? AND account_id = ?`).
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:59-92` (`verify_entry`), Aufruf in `src/realm-rs/src/handlers.rs:138`; `src/realm-rs/src/auth_api.rs:165-172`; `src/api/store.go:655-668`, `src/api/endpoints.go:516-546`, `src/api/store.go:557-574`; Ownership-Filter in `src/realm-rs/src/db.rs:165-179` (`WHERE id = ? AND account_id = ?`).
 - **Nächster zulässiger Schritt:** Keiner; kein offener Befund.
 - **Abschlussnachweis:** Schutzmechanismus durch Code, vorhandene Tests und den Auditlauf vom 25.09.2026 bestätigt.
 
@@ -207,7 +224,7 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Betroffener Bereich:** Session-Lebenszyklus nach erfolgreichem HELLO (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/security.rs`, `src/realm-rs/src/world.rs`, `src/api`)
 - **Bekannte Ausgangslage:** Die Session wird beim HELLO validiert und anschließend als `session_id` am Player gespeichert. Während einer bereits autorisierten Verbindung prüft `gate_frame` nur den Authentifizierungsstatus der Verbindung; auch `handle_heartbeat` validiert die Session nicht erneut. Die Auth-API kennt einen Ablaufzeitpunkt und eine Session-TTL. Daraus wird keine bestätigte Schwachstelle abgeleitet, weil die gewünschte Lebenszyklus-Semantik noch nicht dokumentiert ist.
 - **Offene Frage / Entscheidung:** Soll der reguläre Ablauf einer Session während einer bereits autorisierten Realm-Verbindung die Verbindung beenden, oder gilt die beim HELLO erteilte Autorisierung bis zum Verbindungsende?
-- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:84` (`validate_session` beim Einstieg), `src/realm-rs/src/handlers.rs:223` und `src/realm-rs/src/world.rs:34` (`session_id` am Player), `src/realm-rs/src/security.rs:205-226` (`gate_frame`), `src/realm-rs/src/handlers.rs:1071-1092` (`handle_heartbeat`), `src/api/store.go:557-574` (`expires_at`), `src/api/config.go:174` (`SESSION_TTL_MINUTES`).
+- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:84` (`validate_session` beim Einstieg), `src/realm-rs/src/handlers.rs:268` und `src/realm-rs/src/world.rs:34` (`session_id` am Player), `src/realm-rs/src/security.rs:242-263` (`gate_frame`), `src/realm-rs/src/handlers.rs:1167-1188` (`handle_heartbeat`), `src/api/store.go:557-574` (`expires_at`), `src/api/config.go:174` (`SESSION_TTL_MINUTES`).
 - **Nächster zulässiger Schritt:** Gewünschte Lebenszyklus-Semantik fachlich dokumentieren; erst danach gegebenenfalls einen Code-/Test-Auftrag ableiten.
 - **Abschlussnachweis:** ausstehend.
 
@@ -218,21 +235,21 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Betroffener Bereich:** Expliziter Session-Widerruf und aktive Realm-Verbindungen (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/parental.rs`, `src/api/store.go`)
 - **Bekannte Ausgangslage:** Die Auth-API unterstützt ausdrücklichen Session-Widerruf, unter anderem im Zusammenhang mit Passwortänderung oder Passwort-Reset. Der Realm validiert die Session nach dem HELLO nicht erneut; der bestehende `force_logout`-Pfad gehört zur Elternkontrolle und belegt keine allgemeine Propagation ausdrücklicher Session-Widerrufe. Ablauf und ausdrücklicher Widerruf werden getrennt bewertet.
 - **Offene Frage / Entscheidung:** Müssen ausdrückliche Session-Widerrufe bereits aktive Realm-Verbindungen beenden, und existiert dafür ein noch nicht nachgewiesener Propagationspfad?
-- **Verifizierte Belege:** `src/api/store.go:576-585` (`RevokeSession`), `src/api/store.go:816-832` und `src/api/store.go:863-867` (Session-Widerruf bei Passwortänderung beziehungsweise Passwort-Reset), `src/realm-rs/src/handlers.rs:84` (Session-Validierung beim Einstieg), `src/realm-rs/src/parental.rs:309-318` (`force_logout`-Kickerpfad), `src/realm-rs/src/parental.rs:323-331` (10-Sekunden-Poller).
+- **Verifizierte Belege:** `src/api/store.go:576-585` (`RevokeSession`), `src/api/store.go:816-832` und `src/api/store.go:863-867` (Session-Widerruf bei Passwortänderung beziehungsweise Passwort-Reset), `src/realm-rs/src/handlers.rs:84` (Session-Validierung beim Einstieg), `src/realm-rs/src/parental.rs:309-311` und `src/realm-rs/src/parental.rs:319-327` (`force_logout`-Kickerpfad), `src/realm-rs/src/parental.rs:330-338` (10-Sekunden-Poller).
 - **Nächster zulässiger Schritt:** Read-only prüfen und fachlich entscheiden, ob und wie ausdrückliche Widerrufe auf aktive Realm-Verbindungen propagiert werden müssen; danach gegebenenfalls Code-/Test-Auftrag.
 - **Abschlussnachweis:** ausstehend.
 
 #### AUTH-03 – Keine Occupancy-/Einzigkeitsprüfung paralleler Verbindungen desselben Charakters
 
-- **Status:** `BESTÄTIGT` (statischer Codebefund; fachliche Entscheidung getroffen, Implementierung und Tests ausstehend)
+- **Status:** `ERLEDIGT` für Verbindungs-Einzigkeit, Takeover und Cleanup (Befund bestätigt, Entscheidung umgesetzt, Commit `e499dec8d9e9db471f0a3ecb222b1fd869bf643c`, Abschlussnachweis in Abschnitt 2). Die Logging-Anforderung dieses Eintrags ist nur teilweise umgesetzt und bleibt unten ausdrücklich offen.
 - **Priorität:** `MITTEL`
-- **Betroffener Bereich:** Spielerregistrierung und Verbindungszuordnung (`src/realm-rs/src/handlers.rs`, `src/realm-rs/src/world.rs`)
-- **Bekannte Ausgangslage:** Beim HELLO werden Player- und Verbindungszuordnung ohne vorherige Occupancy-/Einzigkeitsprüfung eingefügt. `disconnect_player` entfernt anschließend sämtliche `by_conn`-Zuordnungen desselben Charakters. Der strukturelle Befund ist nur statisch belegt; ein dynamischer Paralleltest wurde nicht durchgeführt. Mögliche Auswirkungen betreffen die Zustandsintegrität und mögliches Duping; eine erfolgreiche Ausnutzung ist nicht bewiesen.
+- **Betroffener Bereich:** Spielerregistrierung, Verbindungszuordnung und Verbindungsende (`src/realm-rs/src/handlers.rs`, `net.rs`, `world.rs`, `parental.rs`, `spool.rs`, `security.rs`)
+- **Bekannte Ausgangslage:** Vor Commit `e499dec` wurden Player- und Verbindungszuordnung beim HELLO ohne vorherige Occupancy-/Einzigkeitsprüfung eingefügt, und `disconnect_player` entfernte anschließend sämtliche `by_conn`-Zuordnungen desselben Charakters; damit konnte ein fremdes, verzögertes Cleanup den neuen Eigentümer mit entfernen. Dieser historische Befund ist mit dem Commit behoben; die damalige Belegstellung ist unten durch aktuelle Belegstellen ersetzt.
 - **Offene Frage / Entscheidung:** Fachlich entschieden: Pro Charakter darf höchstens eine aktive, zur Spiellogik berechtigte Realm-Verbindung existieren. Eine neue vollständig authentifizierte Verbindung übernimmt; die alte Verbindung wird vor der Übergabe entmachtet und anschließend getrennt. Die verbindliche Single-Connection-/Takeover-Semantik steht in `docs/Login_Realm_Architektur.md` (Abschnitt „Verbindungs-Einzigkeit und Takeover“). Die Einordnung der Quell-IPs als Sicherheitssignale steht in `docs/netzwerk_ip_schutz.md`; Zweckbindung, Zugriffsbegrenzung und Löschung der Takeover-IP-Daten stehen in `docs/datenschutz_zugang.md`.
-- **Logging-Anforderung:** Ein einzelner Takeover ist das INFO-Ereignis `authenticated_connection_takeover`; auffällige Wiederholungen dürfen nur einen WARN-/Alarmhinweis ohne automatische Sanktion erzeugen. Vollständige Session-IDs, Handoff-Tokens, Passwörter und andere Zugangsdaten werden nicht geloggt. Roh-IP-Adressen und mit Accounts verknüpfte IP-Daten dieser Ereignisse werden nach 14 Tagen automatisch gelöscht.
-- **Verifizierte Belege:** `src/realm-rs/src/handlers.rs:268` (`world.players.insert` ohne Einzigkeitsprüfung), `src/realm-rs/src/handlers.rs:269` (`world.by_conn.insert`), `src/realm-rs/src/world.rs:410-414` (`disconnect_player` und Bereinigung aller Zuordnungen derselben `player_id`).
-- **Nächster zulässiger Schritt:** Implementierung und Tests der beschlossenen Übernahme-, Cleanup- und Logging-Semantik bleiben offen. Ein dynamischer Paralleltest benötigt einen eigenen späteren Auftrag; ein dynamischer Ausnutzungsnachweis wird nicht behauptet.
-- **Abschlussnachweis:** Statischer Codebefund bestätigt und fachliche Entscheidung in den drei zuständigen Fachdokumenten festgehalten; Implementierung, Tests und dynamischer Nachweis ausstehend.
+- **Logging-Anforderung:** Ein einzelner Takeover ist das INFO-Ereignis `authenticated_connection_takeover`; auffällige Wiederholungen dürfen nur einen WARN-/Alarmhinweis ohne automatische Sanktion erzeugen. Vollständige Session-IDs, Handoff-Tokens, Passwörter und andere Zugangsdaten werden nicht geloggt. Roh-IP-Adressen und mit Accounts verknüpfte IP-Daten dieser Ereignisse werden nach 14 Tagen automatisch gelöscht. Umgesetzt sind Ereignisname, Account-ID, Charakter-ID, alte und neue `conn_id` sowie der Zustand der verdrängten Verbindung; eine Roh-IP wird bewusst nicht ausgegeben, weil dafür noch kein freigegebener Log-Sink mit Löschfrist existiert. Der Teil „Roh-IP-Protokollierung mit 14-Tage-Löschung“ bleibt damit offen und ist durch diesen Abschluss nicht erledigt.
+- **Verifizierte Belege:** `src/realm-rs/src/world.rs:304-375` (`commit_login` als einziger Eintrag in `by_conn`, Takeover entfernt alt vor neu); `src/realm-rs/src/handlers.rs:327-365` (Commit, Takeover-Log, Signal an den vorhandenen Closer); `src/realm-rs/src/world.rs:597-612` (`disconnect_conn` ohne charakterweites `retain`); `src/realm-rs/src/net.rs:316-374` (Eigentümerprüfungen und Gate); `src/realm-rs/src/security.rs:170-189` (Takeover-Logzeile ohne Roh-IP); `src/realm-rs/src/spool.rs:95-102` (per-player-Gate), `src/realm-rs/src/spool.rs:281-301` (`pending_revision`).
+- **Nächster zulässiger Schritt:** Die dauerhafte Takeover-IP-Protokollierung mit 14-Tage-Löschung bleibt der nächste Schritt dieses Eintrags; dafür ist zuerst ein freigegebener, zugriffsgeschützter Log-Sink mit Rotation und Löschung fachlich festzulegen. Der vollständige Logging-Audit (Abschnitt 4.5) ist davon nicht abgedeckt. Ein dynamischer Ausnutzungsnachweis wird nicht behauptet.
+- **Abschlussnachweis:** Statischer Codebefund bestätigt, fachliche Entscheidung in den drei zuständigen Fachdokumenten festgehalten, Implementierung und Tests über Commit `e499dec8d9e9db471f0a3ecb222b1fd869bf643c` abgeschlossen (436 Tests bestanden, 0 fehlgeschlagen); Logging-Anforderung teilweise offen, siehe oben.
 
 #### AUTH-04 – Leere `AUTHAPI_URL` aktiviert den Dev-Modus ohne Auth
 
@@ -247,14 +264,14 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 
 #### AUTH-05 – Vollständige Session-ID in `sec-reject`-Logs
 
-- **Status:** `BESTÄTIGT`
+- **Status:** `ERLEDIGT` (Befund bestätigt, Entscheidung umgesetzt, Commit `e499dec8d9e9db471f0a3ecb222b1fd869bf643c`)
 - **Priorität:** `GERING`
 - **Betroffener Bereich:** Ablehnungs-Logging (`src/realm-rs/src/security.rs`), fachlicher Bezug zu §4.5 „Logging und Schutz sensibler Daten“
-- **Bekannte Ausgangslage:** `log_reject` schreibt die vollständige `session_id` in die Warn-Logzeile. Es ist nicht belegt oder festgelegt, dass die vollständige Session-ID für die Korrelation erforderlich ist.
-- **Offene Frage / Entscheidung:** Ob künftig ein Hash, ein Präfix oder eine interne Korrelations-ID verwendet wird, ist im Rahmen von §4.5 zu entscheiden; mit diesem Eintrag wird noch keine Lösung festgelegt.
-- **Verifizierte Belege:** `src/realm-rs/src/security.rs:138` (`p.session_id.as_str()`), `src/realm-rs/src/security.rs:146-151` (`sec-reject ... session={session}`).
-- **Nächster zulässiger Schritt:** Den Befund im read-only Audit zu §4.5 fachlich bewerten und dort die zulässige Log-Repräsentation festlegen.
-- **Abschlussnachweis:** ausstehend.
+- **Bekannte Ausgangslage:** Vor Commit `e499dec` schrieb `log_reject` die vollständige `session_id` in die Warn-Logzeile; die vollständige Session-ID war dort weder für die Korrelation belegt noch festgelegt. Seit diesem Commit wird die Session-ID in diesem Logformat nicht mehr ausgegeben; der Player-Zustand (Position, Ressourcen, Level, Erfahrung, Gold, freie Attributpunkte) wird unverändert erfasst.
+- **Offene Frage / Entscheidung:** Entschieden und umgesetzt: In der `sec-reject`-Zeile wird **keine** Session-Darstellung verwendet — kein Hash, kein Präfix, keine interne Korrelations-ID. Die im Befund genannten Alternativen waren eine Liste zulässiger Optionen, keine Pflicht zur Einführung eines Ersatzidentifikators. Der verbleibende Umgang mit anderen Logdaten ist weiterhin Gegenstand des offenen Audit-Punkts in Abschnitt 4.5 und nicht Teil dieses Eintrags.
+- **Verifizierte Belege:** `src/realm-rs/src/security.rs:134-148` (`reject_log_line` ohne Session-Feld), `src/realm-rs/src/security.rs:158-160` (`log_reject` schreibt ausschließlich diese Zeile), `src/realm-rs/src/net.rs:402-419` (Aufruf im V1-Gate für `GateDecision::Drop`); Test `reject_log_line_contains_no_session_id` in `src/realm-rs/src/security.rs:719-736` (prüft Zeile und die Felder `sess-1`/`session=`); Commit `e499dec8d9e9db471f0a3ecb222b1fd869bf643c`.
+- **Nächster zulässiger Schritt:** Für diesen Eintrag nichts offen. Der Abschnitt 4.5 bleibt als read-only Prüfungsgebiet bestehen und ist nicht durch diesen Abschluss abgedeckt.
+- **Abschlussnachweis:** Befund bestätigt, Entscheidung ohne Ersatzidentifikator umgesetzt und im Repository getestet; `cargo test` in `src/realm-rs` mit 436 bestandenen Tests über den genannten Commit.
 
 #### AUTH-06 – Kein natives TLS im Realm; Deployment-TLS nicht nachgewiesen
 
