@@ -91,6 +91,35 @@ pub async fn verify_entry(
     Ok(h_account)
 }
 
+/// Einheitliche externe Ablehnung des Charakterzugriffs beim Realm-Einstieg.
+/// Ungültige, nicht gefundene und fremde `character_id` sowie
+/// Datenbankfehler sind für den Client bewusst nicht unterscheidbar, damit der
+/// Ablehnungsfall keine Ownership-Information preisgibt. Intern unterscheiden
+/// die Logzeilen den technischen Grund, ohne Session-ID, Token oder andere
+/// Zugangsdaten zu übernehmen.
+const CHARACTER_UNAVAILABLE: &str = "character unavailable";
+
+/// Löst das Ergebnis des Charakter-Lookups fail-closed auf.
+///
+/// `Ok(Some(_))` wird durchgereicht; `Ok(None)` (kein Datensatz für `id` und
+/// `account_id`) und `Err` (Datenbankfehler) ergeben beide dieselbe externe
+/// Ablehnung. Kein Schreibzugriff, keine Charakteranlage.
+pub fn resolve_character_lookup(
+    lookup: Result<Option<db::Character>, String>,
+) -> Result<db::Character, String> {
+    match lookup {
+        Ok(Some(c)) => Ok(c),
+        Ok(None) => {
+            log::info!("HELLO abgelehnt: kein Character für die angegebene character_id");
+            Err(CHARACTER_UNAVAILABLE.to_string())
+        }
+        Err(e) => {
+            log::error!("HELLO load character: {e}");
+            Err(CHARACTER_UNAVAILABLE.to_string())
+        }
+    }
+}
+
 /// HELLO: Einstieg mit Handoff-Token (Zielkette), Charakter laden,
 /// Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
 ///
@@ -108,10 +137,19 @@ pub async fn handle_hello(
     seq: i64,
     data: &serde_json::Value,
 ) -> Result<(), String> {
-    let char_id = get_str(data, "char_id");
-    if char_id.is_empty() {
-        return Err("missing char_id".into());
-    }
+    let raw_char_id = get_str(data, "char_id");
+    // Charakter-ID fail-closed validieren (docs/Login_Realm_Architektur.md
+    // Abschnitt 6): ausschließlich die kanonische Dezimaldarstellung einer
+    // positiven Datenbank-ID. Aliase ("1", "01", "+1", " 1") werden
+    // abgelehnt, damit Gate-, World- und DB-Lookup nie unterschiedliche
+    // Schlüssel bilden. Die Prüfung läuft VOR Persistence-Gate, World-Zugriff
+    // und Datenbankzugriff.
+    let char_id_db = db::parse_character_id(&raw_char_id).map_err(|reason| {
+        log::info!("HELLO abgelehnt: character_id ungültig ({reason})");
+        CHARACTER_UNAVAILABLE.to_string()
+    })?;
+    // Kanonische Darstellung: identischer Schlüssel für Gate, World und DB.
+    let char_id = char_id_db.to_string();
     // Stufe B Login-Guard (docs/Player_Persistenz.md §34/§36/§37): Solange
     // der Realm im Startup-Recovery ist (Recovering), wird der HELLO-Einstieg
     // VERWEIGERT (Login blockiert — kein Spieler betritt einen Realm, dessen
@@ -160,12 +198,11 @@ pub async fn handle_hello(
         crate::world::ensure_takeover_allowed(&world, &char_id, account_id)?;
     }
 
-    let c = db::load_character(&ctx.db, account_id, &char_id)
-        .await
-        .map_err(|e| {
-            log::error!("HELLO load character: {e}");
-            "character unavailable".to_string()
-        })?;
+    // Charakter ausschließlich lesend laden und fail-closed auflösen: kein
+    // Treffer (fehlend oder fremder Account) und Datenbankfehler führen beide
+    // zur selben externen Ablehnung, damit keine Ownership-Information
+    // preisgegeben wird. Es wird kein Charakter angelegt.
+    let c = resolve_character_lookup(db::load_character(&ctx.db, account_id, char_id_db).await)?;
 
     // AUTH-03 (Restzustand nach Disconnect): Liegt im Spool ein NEUERER
     // Snapshot als die gerade geladene DB-Zeile, ist der DB-Stand veraltet
@@ -1296,6 +1333,417 @@ mod tests {
             return_speed: 5.0,
             persist_interval_ms: 30000,
         }
+    }
+
+    /// Testkontext für die fail-closed-Prüfungen des HELLO-Einstiegs: Auth-API
+    /// bewusst deaktiviert (`verify_entry` -> Konto 0), Datenbank als nicht
+    /// erreichbarer Lazy-Pool. Ein gültiger Canonical-`char_id` erreicht damit
+    /// nachweisbar Gate und World-Logik; jeder DB-Zugriff schlägt fehl.
+    /// Gespiegelt aus `net::tests::test_ctx`.
+    async fn test_ctx() -> std::sync::Arc<Ctx> {
+        use std::collections::HashMap;
+        let dir = std::env::temp_dir().join(format!(
+            "andora-realm-hello-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let env = HashMap::<String, String>::new();
+        let cfg = std::sync::Arc::new(crate::config::Config {
+            realm_id: 1,
+            ws_port: 3001,
+            health_port: 3002,
+            ws_bind_host: String::new(),
+            health_bind_host: String::new(),
+            tick_ms: 100,
+            aofb_radius: 20.0,
+            render_cap: 64,
+            ollama_url: String::new(),
+            auth_api: crate::config::AuthApiConfig {
+                url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
+            realm_db: crate::config::DbConfig {
+                host: "127.0.0.1".into(),
+                port: 3306,
+                user: "u".into(),
+                password: "p".into(),
+                database: "realm_state_test".into(),
+            },
+            migrations_dir: String::new(),
+            allow_destructive: false,
+            combat: crate::config::combat_config(&env),
+            npc: crate::config::npc_config(&env),
+            group: crate::config::group_config(&env),
+            inventory: crate::config::inventory_config(&env),
+            loot: crate::config::loot_config(&env),
+            progression: crate::config::progression_config(&env),
+            persist: crate::config::persist_config(&env),
+            security: crate::config::security_config(&env),
+        });
+        let db = sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("mysql://u:p@127.0.0.1:3306/realm_state_test")
+            .unwrap();
+        let auth = AuthApi::new(&cfg.auth_api).unwrap();
+        let shared = crate::world::new_shared();
+        let parental = crate::parental::new_shared(auth.clone());
+        let groups = crate::group::new_shared_groups(cfg.group.clone());
+        let persist = std::sync::Arc::new(
+            crate::spool::PersistRuntime::new(&dir, &cfg.combat.weapon_skill_id).unwrap(),
+        );
+        std::sync::Arc::new(Ctx {
+            cfg,
+            db,
+            auth,
+            shared,
+            parental,
+            registry: crate::combat::ability::AbilityRegistry::new(),
+            groups,
+            quest: crate::quest::QuestService::new(),
+            persist,
+        })
+    }
+
+    fn hello_frame(char_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "t": "hello",
+            "char_id": char_id,
+            "lang": "de",
+            "session_id": "sess-1",
+            "handoff_token": "h",
+        })
+    }
+
+    /// Minimales `db::Character` für die Auflösungslogik.
+    fn character_stub(id: &str) -> db::Character {
+        db::Character {
+            id: id.to_string(),
+            name: "hero".into(),
+            x: 0.0,
+            y: 0.0,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            logout_at: None,
+            idia: 0,
+            persist_revision: 0,
+            hp: 100,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            armor: 0,
+            mana: 50,
+            mana_max: 50,
+            race: "Mensch".into(),
+            strength: 10,
+            dexterity: 10,
+            intelligence: 10,
+            constitution: 10,
+            wisdom: 10,
+            luck: 10,
+            endurance: 10,
+        }
+    }
+
+    /// RAM-Player mit fremder `account_id` unter der `char_id` "1" — damit
+    /// wird der Ownership-Check für den Account 0 (deaktivierte Auth-API)
+    /// unterscheidbar.
+    async fn insert_foreign_player(ctx: &Ctx) {
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        let mut world = ctx.shared.lock().await;
+        world.players.insert(
+            "1".to_string(),
+            crate::world::Player {
+                id: "1".into(),
+                name: "hero".into(),
+                x: 0.0,
+                y: 0.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 100,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 7,
+                session_id: "sess-other".into(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            },
+        );
+    }
+
+    // ---- P-31: fail-closed Charakter-Lookup (kein Create im Login-Pfad) ----
+
+    /// Die kanonische Dezimaldarstellung einer positiven DB-ID wird akzeptiert;
+    /// der Wert ist der i32-Wert der Spalte `characters.id INT` (1..=2147483647).
+    #[test]
+    fn character_id_accepts_canonical_positive_db_id() {
+        for (raw, expected) in [
+            ("1", 1i32),
+            ("7", 7),
+            ("42", 42),
+            ("1000", 1000),
+            ("2147483646", 2147483646),
+            ("2147483647", 2147483647),
+        ] {
+            assert_eq!(
+                db::parse_character_id(raw),
+                Ok(expected),
+                "kanonische ID {raw} muss akzeptiert werden"
+            );
+            // Nach erfolgreicher Prüfung genau eine kanonische Darstellung:
+            // der Gate-/World-/DB-Schlüssel ist `value.to_string()`.
+            assert_eq!(
+                expected.to_string(),
+                raw,
+                "Schlüssel muss der kanonischen Darstellung entsprechen"
+            );
+        }
+    }
+
+    /// 0, negative Werte, Nicht-Zahlen, Whitespace, Vorzeichen, nichtkanonische
+    /// Aliase und Werte außerhalb des DB-ID-Typs werden abgelehnt. Aliase
+    /// derselben ID erzeugen damit keinen zweiten Gate-/Lookup-Schlüssel.
+    #[test]
+    fn character_id_rejects_non_canonical_zero_negative_and_overflow() {
+        // 0 und negative Werte (Positivitätsgrenze).
+        assert_eq!(db::parse_character_id("0"), Err("not-positive"));
+        // Nicht-Zahlen, Whitespace, Vorzeichen, Dezimalstellen.
+        for raw in [
+            "abc", "1a", "a1", "1.0", "0x1", "1e3", "١", "1_0", "NaN", "inf", "--1", "1\n", "1\t",
+        ] {
+            assert_eq!(
+                db::parse_character_id(raw),
+                Err("not-canonical"),
+                "{raw:?} muss nichtkanonisch abgelehnt werden"
+            );
+        }
+        // Whitespace und Vorzeichen (auch mit führendem Null-Alias).
+        for raw in [
+            "", " ", " 1", "1 ", " 1 ", "\t1", "+1", "-1", "+0", "-0", " -1", "+ 1", "++1", "--1",
+        ] {
+            let reason = db::parse_character_id(raw);
+            assert!(
+                matches!(
+                    reason,
+                    Err("not-canonical") | Err("empty") | Err("not-positive")
+                ),
+                "{raw:?} muss abgelehnt werden, war {reason:?}"
+            );
+        }
+        // Nichtkanonische Aliase derselben ID.
+        for raw in ["01", "007", "000", "0001", "041"] {
+            assert_eq!(
+                db::parse_character_id(raw),
+                Err("not-canonical"),
+                "Alias {raw:?} muss abgelehnt werden"
+            );
+        }
+        // Überlauf und Werte außerhalb des Spaltentyps (MariaDB INT, signed).
+        for raw in [
+            "2147483648",
+            "2147483649",
+            "4294967295",
+            "4294967296",
+            "9223372036854775807",
+            "18446744073709551615",
+            "99999999999999999999",
+        ] {
+            assert_eq!(
+                db::parse_character_id(raw),
+                Err("out-of-range"),
+                "{raw} liegt außerhalb des DB-ID-Typs"
+            );
+        }
+        // Sehr lange Ziffernfolgen: kein Panik-Verhalten.
+        let long = "1".repeat(512);
+        assert_eq!(db::parse_character_id(&long), Err("out-of-range"));
+        let zeros = format!("0{}", "0".repeat(512));
+        assert_eq!(db::parse_character_id(&zeros), Err("not-canonical"));
+    }
+
+    /// Der Ablehnungsgrund enthält niemals die rohe, untrusted Eingabe.
+    #[test]
+    fn character_id_rejection_reason_does_not_echo_input() {
+        for raw in [" 1\n", "abc", "+1", "2147483648", "0", ""] {
+            let reason = db::parse_character_id(raw).unwrap_err();
+            assert!(
+                !reason.contains(raw.trim()) || raw.is_empty(),
+                "Grund {reason:?} darf die Eingabe {raw:?} nicht wiedergeben"
+            );
+            assert!(
+                reason.len() <= 16,
+                "Grund muss ein statisches Kurzwort sein"
+            );
+        }
+    }
+
+    /// NotFound und DB-Fehler werden intern unterschieden, extern aber
+    /// identisch abgelehnt: kein Ownership-Leak, kein Fallback-Create.
+    #[test]
+    fn character_lookup_maps_not_found_and_db_error_to_same_external_rejection() {
+        // Treffer wird durchgereicht.
+        let found = resolve_character_lookup(Ok(Some(character_stub("1")))).unwrap();
+        assert_eq!(found.id, "1");
+        // Kein Treffer (fehlend ODER fremder Account: die Abfrage filtert nach
+        // id UND account_id) -> generische Ablehnung.
+        let not_found = resolve_character_lookup(Ok(None)).unwrap_err();
+        // DB-Fehler -> dieselbe generische Ablehnung.
+        let db_error =
+            resolve_character_lookup(Err("Charakter laden: pool timeout".into())).unwrap_err();
+        assert_eq!(not_found, db_error);
+        assert_eq!(not_found, CHARACTER_UNAVAILABLE);
+        // Kein Zeichen des Charakters und kein Create-Hinweis im Fehler.
+        assert!(!not_found.contains("create"), "kein Create-Fallback");
+        assert!(
+            !not_found.contains("char_id"),
+            "keine ID-Information im Fehler"
+        );
+    }
+
+    /// Ungültige, nichtkanonische und überlaufende `char_id` werden abgelehnt,
+    /// BEVOR Gate, World und Datenbank berührt werden: mit einem RAM-Player
+    /// unter "1" (fremder Account) ist der Ownership-Fehler nur erreichbar,
+    /// wenn die ID die Vorprüfung passiert.
+    #[tokio::test]
+    async fn hello_rejects_non_canonical_char_id_before_gate_world_and_db() {
+        for raw in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            "01",
+            "007",
+            " 1",
+            "1 ",
+            "1.0",
+            "abc",
+            "1a",
+            "2147483648",
+            "99999999999",
+            "1\n",
+            "  1",
+        ] {
+            let ctx = test_ctx().await;
+            insert_foreign_player(&ctx).await;
+            let (tx, mut _rx) = mpsc::unbounded_channel();
+            let err = handle_hello(&ctx, &tx, 42, 1, &hello_frame(raw))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err, CHARACTER_UNAVAILABLE,
+                "char_id {raw:?} muss generisch abgelehnt werden"
+            );
+            // Kein Takeover/Ownership-Fehler -> World-Logik wurde nicht erreicht.
+            assert_ne!(err, "character is owned by another account");
+            // Kein Player-Zustand und keine Verbindungszuordnung entstanden.
+            let world = ctx.shared.lock().await;
+            assert_eq!(world.players.len(), 1, "nur der vorbestehende Player");
+            assert!(world.by_conn.is_empty(), "keine by_conn-Zuordnung");
+            assert_eq!(
+                world.players.get("1").unwrap().account_id,
+                7,
+                "Ownership des vorbestehenden Players unverändert"
+            );
+        }
+    }
+
+    /// Eine gültige kanonische `char_id` passiert die Vorprüfung und erreicht
+    /// nachweisbar die Ownership-Prüfung gegen den RAM-World-Zustand. Der
+    /// Alias "01" erreicht sie nicht — derselbe numerische Wert erzeugt also
+    /// genau einen Gate-/Lookup-Schlüssel.
+    #[tokio::test]
+    async fn hello_with_canonical_char_id_reaches_ownership_check() {
+        let ctx = test_ctx().await;
+        ctx.persist.set_status(crate::spool::PersistStatus::Ready);
+        insert_foreign_player(&ctx).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Kanonisch: erreicht die World-/Takeover-Logik.
+        assert_eq!(
+            handle_hello(&ctx, &tx, 42, 1, &hello_frame("1"))
+                .await
+                .unwrap_err(),
+            "character is owned by another account"
+        );
+        // Alias: wird vorher fail-closed abgelehnt.
+        assert_eq!(
+            handle_hello(&ctx, &tx, 42, 1, &hello_frame("01"))
+                .await
+                .unwrap_err(),
+            CHARACTER_UNAVAILABLE
+        );
+        // Der vorbestehende Player bleibt unangetastet (kein RAM-Überschreiben,
+        // keine Entmachtung eines fremden Players).
+        let world = ctx.shared.lock().await;
+        assert_eq!(world.players.len(), 1);
+        assert_eq!(world.players.get("1").unwrap().account_id, 7);
+        assert_eq!(world.by_conn.len(), 0);
+    }
+
+    /// Erreicht die kanonische ID Gate, World- und DB-Schritt, und ist der
+    /// Charakterzugriff nicht verfügbar, endet der Einstieg fail-closed: kein
+    /// Player im World-State, keine Verbindungszuordnung, kein Progressionseintrag.
+    ///
+    /// Der Test deckt den **Err-Zweig** von `resolve_character_lookup` ab (der
+    /// Test-Pool erreicht kein MariaDB: `pool timed out while waiting for an
+    /// open connection`). Der **Ok(None)-Zweig** — fehlender oder fremder
+    /// Datensatz — ist in `character_lookup_maps_not_found_and_db_error_to_
+    /// same_external_rejection` auf der Entscheidungslogik abgedeckt. Die
+    /// MariaDB-Integration (Treffer mit passendem `account_id`, NotFound ohne
+    /// INSERT) bleibt eine ausdrücklich benannte Testlücke.
+    #[tokio::test]
+    async fn hello_fails_closed_when_character_lookup_is_unavailable() {
+        let ctx = test_ctx().await;
+        ctx.persist.set_status(crate::spool::PersistStatus::Ready);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Auth deaktiviert -> Konto 0; kein RAM-Player für "1" -> kein
+        // Ownership-Konflikt; der DB-Lookup schlägt fehl (kein MariaDB im Test).
+        assert_eq!(
+            handle_hello(&ctx, &tx, 42, 1, &hello_frame("1"))
+                .await
+                .unwrap_err(),
+            CHARACTER_UNAVAILABLE
+        );
+        let world = ctx.shared.lock().await;
+        assert!(world.players.is_empty(), "kein Player im World-State");
+        assert!(world.by_conn.is_empty(), "kein Realm-Commit");
     }
 
     #[tokio::test]

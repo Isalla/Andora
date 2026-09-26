@@ -156,17 +156,57 @@ impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for CharacterRow {
     }
 }
 
-/// Lädt einen Charakter AUSSCHLIESSLICH bei nachgewiesener Ownership:
-/// `char_id` muss der mit dem Handoff authentifizierten `account_id`
-/// gehören (characters.account_id). Unbekannte char_id, fremde Charaktere
-/// oder DB-Fehler werden fail-closed abgelehnt — es wird NIEMALS ein
-/// Charakter angelegt (docs/Player_Persistenz.md, Sicherheits-Blocker
-/// Charakter-Ownership V1; kein impliziter Create im Login-/Lookup-Pfad).
+/// Kanonische serverseitige Charakter-ID.
+///
+/// `char_id` ist laut `docs/Login_Realm_Architektur.md` (Abschnitt 6) eine
+/// **serverseitig vergebene positive Datenbank-ID**; das Schema legt sie als
+/// `characters.id INT AUTO_INCREMENT PRIMARY KEY` fest (MariaDB `INT`, 32 Bit,
+/// signed → 1..=2147483647).
+///
+/// Akzeptiert wird ausschließlich die kanonische Dezimaldarstellung: nur
+/// ASCII-Ziffern, keine Vorzeichen, keine führenden Nullen, kein Whitespace und
+/// keine weiteren Zeichen. Dadurch bilden Aliase derselben ID („1", „01",
+/// "+1", „ 1") **keine** unterschiedlichen Gate-, World- oder DB-Lookup-Schlüssel:
+/// Nicht-kanonische Eingaben werden abgelehnt, kanonische Eingaben liefern
+/// genau einen Schlüssel (`value.to_string()`).
+///
+/// `Err` enthält nur einen statischen Grund ohne die rohe Eingabe, damit die
+/// Meldung keine untrusted Daten (Whitespace, Steuertags, Steuerzeichen)
+/// weiterreicht.
+pub fn parse_character_id(raw: &str) -> Result<i32, &'static str> {
+    if raw.is_empty() {
+        return Err("empty");
+    }
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("not-canonical");
+    }
+    if raw.len() > 1 && raw.starts_with('0') {
+        return Err("not-canonical");
+    }
+    let value: i32 = raw.parse().map_err(|_| "out-of-range")?;
+    if value <= 0 {
+        return Err("not-positive");
+    }
+    Ok(value)
+}
+
+/// Lädt einen Charakter **ausschließlich lesend** und ausschließlich bei
+/// nachgewiesener Ownership: `char_id` muss der mit dem Handoff
+/// authentifizierten `account_id` gehören (`characters.account_id`).
+///
+/// * Treffer: der vorhandene Character wird zurückgegeben.
+/// * Kein Treffer: `Ok(None)` — der Aufrufer lehnt fail-closed ab.
+/// * Datenbankfehler: `Err` — vom Aufrufer getrennt davon fail-closed behandelt.
+///
+/// Die Funktion führt **keinen Schreibzugriff** aus. Ein Charakter wird nicht
+/// angelegt: Character-Erstellung ist ein separater, authentifizierter Ablauf
+/// und nicht Teil des Realm-Einstiegs (`docs/Login_Realm_Architektur.md`
+/// Abschnitte 6 und 16, `docs/Charaktererstellung_und_Charakterdarstellung.md`).
 pub async fn load_character(
     pool: &Pool<MySql>,
     account_id: u32,
-    char_id: &str,
-) -> Result<Character, String> {
+    char_id: i32,
+) -> Result<Option<Character>, String> {
     let row: Option<CharacterRow> = sqlx::query_as::<_, CharacterRow>(
         "SELECT id, name, level, exp, free_attr_points, rested_pool, logout_at, idia, persist_revision, hp, char_class, faction_transition, pos_x, pos_y, combat_armor, \
          mana, mana_max, race, strength, agility, intelligence, constitution, wisdom, luck, \
@@ -177,74 +217,38 @@ pub async fn load_character(
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Charakter laden: {e}"))?;
-    if let Some(row) = row {
-        let class = crate::class::ClassStatus::from_db_name(&row.char_class);
-        return Ok(Character {
-            id: row.id.to_string(),
-            name: row.name,
-            x: row.x,
-            y: row.y,
-            level: row.level.max(0) as u32,
-            exp: row.exp.max(0),
-            free_attr_points: row.free_attr_points.max(0) as u32,
-            rested_pool: row.rested_pool.max(0),
-            logout_at: row.logout_at,
-            idia: row.idia.max(0),
-            persist_revision: row.persist_revision,
-            hp: row.hp,
-            char_class: row.char_class,
-            class,
-            faction_transition: row.faction_transition != 0,
-            armor: row.armor,
-            mana: row.mana,
-            mana_max: row.mana_max.max(row.mana),
-            race: row.race,
-            strength: row.strength.max(1),
-            dexterity: row.dexterity.max(1),
-            intelligence: row.intelligence.max(1),
-            constitution: row.constitution.max(1),
-            wisdom: row.wisdom.max(1),
-            luck: row.luck.max(1),
-            endurance: row.endurance.max(1),
-        });
-    }
-    // Neuer Charakter beginnt als Abenteurer
-    // (docs/Klassensystem.md; Grundklassenwahl ab L9).
-    let class = crate::class::ClassStatus::Adventurer;
-    sqlx::query("INSERT INTO characters (name, race, char_class) VALUES (?, 'Mensch', ?)")
-        .bind(char_id)
-        .bind(class.canonical_db_name())
-        .execute(pool)
-        .await
-        .map_err(|e| format!("Charakter anlegen: {e}"))?;
-    Ok(Character {
-        id: char_id.to_string(),
-        name: char_id.to_string(),
-        x: 0.0,
-        y: 0.0,
-        level: 1,
-        exp: 0,
-        free_attr_points: 0,
-        rested_pool: 0,
-        logout_at: None,
-        idia: 0,
-        persist_revision: 0,
-        hp: 100,
-        char_class: class.canonical_db_name().to_string(),
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let class = crate::class::ClassStatus::from_db_name(&row.char_class);
+    Ok(Some(Character {
+        id: row.id.to_string(),
+        name: row.name,
+        x: row.x,
+        y: row.y,
+        level: row.level.max(0) as u32,
+        exp: row.exp.max(0),
+        free_attr_points: row.free_attr_points.max(0) as u32,
+        rested_pool: row.rested_pool.max(0),
+        logout_at: row.logout_at,
+        idia: row.idia.max(0),
+        persist_revision: row.persist_revision,
+        hp: row.hp,
+        char_class: row.char_class,
         class,
-        faction_transition: false,
-        armor: 0,
-        mana: 50,
-        mana_max: 50,
-        race: "Mensch".to_string(),
-        strength: 10,
-        dexterity: 10,
-        intelligence: 10,
-        constitution: 10,
-        wisdom: 10,
-        luck: 10,
-        endurance: 10,
-    })
+        faction_transition: row.faction_transition != 0,
+        armor: row.armor,
+        mana: row.mana,
+        mana_max: row.mana_max.max(row.mana),
+        race: row.race,
+        strength: row.strength.max(1),
+        dexterity: row.dexterity.max(1),
+        intelligence: row.intelligence.max(1),
+        constitution: row.constitution.max(1),
+        wisdom: row.wisdom.max(1),
+        luck: row.luck.max(1),
+        endurance: row.endurance.max(1),
+    }))
 }
 
 /// Level des Waffen-/Kampfskills (docs/Kampfsystem.md §4). Grundsätzlich
