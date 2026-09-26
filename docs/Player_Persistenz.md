@@ -252,6 +252,19 @@ Der finale Player-Zustand beim Logout muss weiterhin den dokumentierten Sicherhe
 
 Die genaue technische Koordination zwischen dem finalen Spool-Snapshot und dem direkten `logout_at`-DB-Eintrag wird hier nicht festgelegt (Abschnitt 42).
 
+**ZURÜCKSETZEN VON `logout_at` BEIM LOGIN**
+
+`logout_at` wird nach der obigen Regel ausschließlich beim Logout gesetzt. Es wird **beim Login** zurückgesetzt, um die einmalige Offline-/Rested-Berechnung (Abschnitt 12 in `Erfahrung_und_Progressionssystem.md`) nicht zu wiederholen.
+
+VERBINDLICH:
+
+* Das Zurücksetzen und die zugehörige Gutschrift gehören fachlich zu einem **erfolgreichen Realm-Login**. Wann dieser erreicht ist, legt `Login_Realm_Architektur.md` (Abschnitt „Erfolgszeitpunkt des Realm-Logins") fest: erst wenn der Server-Commit eine Owner-Zuordnung hergestellt hat.
+* **Schlägt der Einstieg vor diesem Commit fehl** — insbesondere bei Quest- oder Datenladefehlern, bei `BLOCKED` oder nicht verfügbarer Elternkontrolle sowie bei einem Registry- oder Account-Konflikt —, bleiben der vorherige `logout_at` und der noch nicht konsumierte Offline-Zeitraum fachlich erhalten. Es wird weder `logout_at` zurückgesetzt noch Offline-Zeit als verbraucht gebucht; die Rested-Berechnung erfolgt dann beim nächsten erfolgreichen Login.
+* **Schlägt erst nach dem Commit `WELCOME` oder die Verbindung aus**, gilt der Login als zustande gekommen. Der Disconnect-Pfad dieser Verbindung schreibt anschließend den neuen Logout-Zeitpunkt; es findet keine Rücknahme des Einstiegs statt.
+* Der Handoff-Single-Use bleibt davon unberührt: Er wird weiterhin vor dem fachlichen Realm-Login verbraucht und bei einem fehlgeschlagenen Einstieg nicht zurückgenommen (bestehende Auth-Semantik, siehe `Login_Realm_Architektur.md`).
+
+Ob und wie dieser Zeitpunkt im Code umgesetzt wird (Reihenfolge der Schreibvorgänge, Transaktionsgrenze, Verhalten bei Schreibfehlern) ist hier **nicht** festgelegt; der offene sicherheitstechnische Befund dazu steht in `docs/Security.md` unter `P-32`.
+
 ---
 
 ## 12. Graceful Shutdown

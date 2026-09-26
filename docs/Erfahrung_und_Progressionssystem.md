@@ -373,6 +373,15 @@ Der berechnete Zuwachs wird anschließend zum vorhandenen Pool addiert und am ma
 
 Dadurch benötigt ein Charakter, der lange Zeit oder dauerhaft nicht mehr gespielt wird, keinerlei laufende Berechnung durch den Realm.
 
+**VERBRAUCH DER OFFLINE-ZEIT**
+
+VERBINDLICH:
+
+* Die Offline-Zeit wird **nur bei einem erfolgreichen Realm-Login** einmalig konsumiert und dem Rested-Pool gutgeschrieben. Der Erfolgszeitpunkt ist in `Login_Realm_Architektur.md` (Abschnitt „Erfolgszeitpunkt des Realm-Logins") festgelegt: erst wenn der Server-Commit eine Owner-Zuordnung hergestellt hat.
+* **Schlägt der Einstieg vor diesem Commit fehl** — insbesondere bei Quest- oder Datenladefehlern, bei `BLOCKED` oder nicht verfügbarer Elternkontrolle sowie bei einem Registry- oder Account-Konflikt —, wird die Offline-Zeit **nicht** konsumiert und dem Pool **nichts** gutgeschrieben. Der gespeicherte Logout-Zeitpunkt und der Offline-Zeitraum bleiben erhalten; die Berechnung erfolgt beim nächsten erfolgreichen Login.
+* **Schlägt erst nach dem Commit `WELCOME` oder die Verbindung aus**, gilt der Login als zustande gekommen. Die Gutschrift bleibt; der Disconnect-Pfad schreibt anschließend den neuen Logout-Zeitpunkt.
+* Ein fehlgeschlagener Einstieg erzeugt damit **weder** eine doppelte Gutschrift **noch** einen Verlust der Offline-Zeit: Solange der Logout-Zeitpunkt unverändert bleibt, wird derselbe Zeitraum beim nächsten erfolgreichen Login regulär — gegebenenfalls mit der dann längeren Offline-Dauer — verrechnet. Die Deckelung nach Abschnitt 12.3 gilt unverändert.
+
 ---
 
 ## 12.7 Rested EXP in Gruppen

@@ -245,6 +245,17 @@ VERBINDLICH für den Realm-Einstieg:
 
 Ein Charakter, der zu einem anderen Account oder zu keinem Account gehört, wird vom Realm nicht geladen und nicht erzeugt.
 
+## Erfolgszeitpunkt des Realm-Logins
+
+VERBINDLICH für die fachliche Bewertung eines Einstiegs:
+
+* **Ein Realm-Login gilt erst als erfolgreich, wenn der Server-Commit eine Owner-Zuordnung hergestellt hat.** Der Commit ist der einzige Punkt, der die Berechtigung zur Spiellogik vergibt, und kann genau einen der folgenden Zustände herstellen: Registrierung (Registered), Übernahme des vorhandenen RAM-Zustands (Adopted), Erneuerung derselben Verbindung (Refreshed) oder Eigentümerwechsel (Takeover). Jeder andere Ausgang — insbesondere eine Ablehnung — ist kein erfolgreicher Realm-Login.
+* **Fehler vor diesem Commit — insbesondere Quest- oder Datenladefehler, `BLOCKED` oder eine nicht verfügbare Elternkontrolle sowie ein Registry- oder Account-Konflikt — lassen den Login fehlschlagen.** Der vorherige `logout_at` und der noch nicht konsumierte Offline-Zeitraum bleiben dabei fachlich erhalten; es wird keine Offline-Zeit verbraucht und keine Rested-EXP gutgeschrieben.
+* **Schlägt erst nach dem Commit die Begrüßung (`WELCOME`) oder die Verbindung aus, gilt der Login als zustande gekommen.** Der normale Disconnect-Pfad schreibt anschließend den neuen Logout-Zeitpunkt. Der Einstieg wird in diesem Fall nicht zurückgenommen und nicht als fehlgeschlagen behandelt.
+* **Der Verbrauch des einmalig gültigen Handoffs ist davon unabhängig.** Der Handoff wird weiterhin vor dem fachlichen Realm-Login verbraucht; ein fehlgeschlagener Einstieg nimmt diesen Verbrauch nicht zurück. Das ist bestehende Auth-Semantik und keine Aussage über den Einstieg selbst.
+
+Der Erfolgszeitpunkt bestimmt, wann Offline-Zeit konsumiert wird; die dafür geltenden Regeln stehen in `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6) und `Player_Persistenz.md` (Abschnitt 11). Dieses Dokument legt keine technische Umsetzung, keine Transaktion und keinen zusätzlichen Lock fest.
+
 ## Verbindungs-Einzigkeit und Takeover
 
 Für die Zuordnung eines Charakters zu Realm-Verbindungen gilt verbindlich:

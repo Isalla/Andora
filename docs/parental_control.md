@@ -184,6 +184,17 @@ Ein Logout oder Disconnect während des Puffers darf niemals einen neuen Puffer 
 
 Der Puffer gehört zur bestehenden Sitzung und stellt keine zusätzliche Loginberechtigung dar. Wird die bestehende Sitzung während des Puffers beendet oder unterbrochen, ist kein erneuter Spieleinstieg möglich. Insbesondere darf ein Reconnect keinen neuen Puffer starten oder die verbleibende Spielzeit zurücksetzen.
 
+**WIRKUNG EINES VERWEIGERTEN EINSTIEGS**
+
+Wird ein Spieleinstieg verweigert — insbesondere weil der Tag bereits beim Login `BLOCKED` ist oder weil die Elternkontrolle beim Einstieg nicht verfügbar ist —, zählt dieser fehlgeschlagene Einstieg fachlich **nicht** als zustande gekommener Realm-Login.
+
+VERBINDLICH gilt deshalb:
+
+* Der Einstieg wird nicht durch die Elternkontrolle blockiert und der Charakter dennoch teilweise in den Realm aufgenommen; die Ablehnung bleibt vollständig und fail-closed.
+* Die Offline-Zeit des Charakters wird dabei **nicht** verbraucht und dem Rested-Pool wird **nichts** gutgeschrieben. Der gespeicherte Logout-Zeitpunkt und der Offline-Zeitraum bleiben für den nächsten erfolgreichen Einstieg erhalten (siehe `Erfahrung_und_Progressionssystem.md`, Abschnitt 12.6, und `Player_Persistenz.md`, Abschnitt 11).
+* Die Elternkontrolle verbraucht durch eine verweigerte Anmeldung **keine** Spielzeit und erzeugt **keinen** neuen Puffer; die bestehende Pufferregel (kein Re-Login während des Puffers) bleibt davon unberührt.
+* Ob und wie die technische Umsetzung die erhaltene Offline-Zeit sicherstellt, ist nicht Gegenstand dieses Dokuments; der dazu offene sicherheitstechnische Befund steht in `docs/Security.md` unter `P-32`.
+
 ---
 
 ## Temporäre Session-Ausnahmen
