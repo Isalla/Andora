@@ -234,6 +234,17 @@ wird von keinem Dienst mehr verwendet und bleibt nur kompatibel
 bestehen. Server-Credentials werden nicht unnötig im Klartext in der
 Datenbank gespeichert.)
 
+## Charakter-Lookup beim Einstieg (fail-closed)
+
+VERBINDLICH für den Realm-Einstieg:
+
+* **HELLO ist ausschließlich Login und Lookup. HELLO erzeugt niemals einen Charakter.** Der Einstieg darf keinen Charakter-Datensatz anlegen, auch nicht beim ersten HELLO eines unbekannten `char_id`.
+* **`char_id` ist eine serverseitig vergebene positive Datenbank-ID** des Characters im Realm, zu dem der Account gehört. Der Client wählt sie nicht frei und darf sie nicht selbst vergeben; sie stammt aus dem vorgelagerten Auswahl- und Erstellungsschritt (siehe Abschnitt 16 und `Charaktererstellung_und_Charakterdarstellung.md`).
+* **Der Realm-Lookup erfolgt mit `id` UND `account_id`.** Beide Bedingungen müssen gemeinsam erfüllt sein.
+* **Ein fehlender oder fremder Datensatz wird fail-closed abgelehnt:** kein erfolgreicher Realm-Einstieg, keine Verbindung, kein Spieler im RAM-Zustand des Realms, keine Teilaktualisierung. Ein nicht gefundener `char_id` ist ein Ablehnungsfall, kein Anlass für einen Schreibvorgang.
+
+Ein Charakter, der zu einem anderen Account oder zu keinem Account gehört, wird vom Realm nicht geladen und nicht erzeugt.
+
 ## Verbindungs-Einzigkeit und Takeover
 
 Für die Zuordnung eines Charakters zu Realm-Verbindungen gilt verbindlich:
@@ -626,6 +637,12 @@ Nach der Realm-Auswahl kann der Spieler:
 * einen neuen Charakter erstellen
 
 Bei einem Fresh-Start-Realm kann die Verwendung bzw. Übertragung älterer Charaktere entsprechend der Realmregeln gesperrt sein.
+
+VERBINDLICH:
+
+* Die Charaktererstellung ist **nicht** Teil des Realm-Einstiegs. HELLO ist Login und Lookup und legt keinen Charakter an (siehe Abschnitt 6 „Charakter-Lookup beim Einstieg“).
+* Die `character_id` wird bei der Erstellung **serverseitig** vergeben und ist eine positive Datenbank-ID; der Client vergibt sie nicht und kann sie nicht erzwingen.
+* Die Erstellung ist ein **separater, authentifizierter Ablauf** außerhalb des Realm-Einstiegs. Die fachlichen Anforderungen an diesen Ablauf stehen in `Charaktererstellung_und_Charakterdarstellung.md`.
 
 Die eigentliche Charaktererstellung und die clientseitigen Character-Sets sind separat dokumentiert.
 

@@ -14,6 +14,29 @@ Der Server speichert ausschließlich abstrakte Charakter- und Appearance-Werte. 
 
 Nur während der Charaktererstellung übermittelt der Client Appearance-Daten an den Server.
 
+### Verbindliche Regeln der Charakteranlage
+
+VERBINDLICH:
+
+* Die Charaktererstellung ist ein **separater, authentifizierter Ablauf** und ist **nicht** Teil des Realm-Einstiegs. HELLO ist ausschließlich Login und Lookup und legt niemals einen Charakter an; der Realm lehnt einen unbekannten `char_id` fail-closed ab, statt einen Datensatz anzulegen (`Login_Realm_Architektur.md`, Abschnitt 6 und Abschnitt 16).
+* Die `character_id` wird bei der Erstellung **serverseitig** vergeben und ist eine **positive Datenbank-ID** des Characters im jeweiligen Realm. Der Client liefert keine ID und darf keine erzwingen.
+* Die Erstellung ist an den **authentifizierten Account** gebunden; die `account_id` wird serverseitig aus der Anmeldung übernommen und nie aus Clientangaben gesetzt.
+
+Der Erstellungsablauf validiert mindestens:
+
+1. **Account-Bindung** – die `account_id` stammt aus der authentifizierten Sitzung; ein Auftrag ohne authentifizierte Sitzung wird abgelehnt.
+2. **Name** – Länge und zulässiger Zeichensatz werden serverseitig geprüft; der Name darf kein Ersatz für die `character_id` sein.
+3. **Eindeutigkeit** – ein bereits vergebener Name wird abgelehnt, statt einen zweiten Datensatz anzulegen.
+4. **Rasse, Klasse und Appearance** – die übermittelten Werte werden gegen die gültigen Werte geprüft und in kanonischer Form gespeichert; die Grundklasse folgt den Regeln des Klassensystems.
+5. **Initiale Datensätze** – neben dem Charakter-Datensatz werden die zugehörigen Startdatensätze angelegt (zum Beispiel Ausrüstung/Inventar, Fähigkeiten, Questzustand), damit kein unvollständiger Charakter entsteht.
+6. **Transaktionsgrenzen** – die Anlage der Datensätze erfolgt so, dass ein Fehler keinen halb angelegten Charakter hinterlässt.
+
+### Offene Architekturentscheidung
+
+Aus den bestehenden Dokumenten geht **nicht** eindeutig hervor, welcher Dienst den Erstellungsablauf anbietet und welche Datenbanktransaktion er verwendet. Diese Festlegung ist eine **gesonderte Entscheidung** und wird hier nicht vorweggenommen. Solange sie nicht getroffen ist, gilt die Regel oben unabhängig vom anbietenden Dienst: kein Anlegen im Realm-Einstieg, serverseitig vergebene positive `character_id`, fail-closed bei fehlendem oder fremdem `char_id` beim Lookup.
+
+### Appearance beim Erstellen
+
 Dabei werden ausschließlich abstrakte Werte übertragen, beispielsweise:
 
 ```text
