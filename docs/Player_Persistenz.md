@@ -269,6 +269,41 @@ VERBINDLICH:
 * **Schlägt die Abrechnung fehl, wird der Login nicht committet.** Der vorherige `logout_at` und der noch nicht konsumierte Offline-Zeitraum bleiben dann vollständig erhalten.
 * **At-most-once-Unterbrechungsausnahme** (Kurzname: Crash-Ausnahme): Bricht der Vorgang **abrupt** zwischen erfolgreichem DB-Commit der Abrechnung und der Herstellung der Owner-Zuordnung ab — insbesondere bei Prozessabsturz sowie, sofern der Handler an dieser Stelle abbrechbar ist, bei Task-Abbruch oder Panic —, bleibt die bereits gebuchte Gutschrift bestehen und `logout_at` bleibt zurückgesetzt; der Login gilt technisch nicht als zustande gekommen. **Die Gutschrift bleibt gebucht**, und es entsteht **keine Mehrfachgutschrift**: gegenüber der regulär vorgesehenen Abrechnung ergibt sich weder ein Wertverlust noch eine Doppelnachbuchung. Zur spielwertbezogenen Einordnung siehe `Erfahrung_und_Progressionssystem.md` (Abschnitt 12.6).
 
+**FEHLERSEMANTIK DES DIREKTEN `logout_at`-SCHREIBENS**
+
+Der direkte Logout-Write ist der einzige Weg, auf dem ein Logout-Zeitpunkt in MariaDB entsteht (Spool und Recovery schreiben ihn nicht; siehe Abschnitt 11 oben). Für seinen Fehlerfall gilt daher eine eigene, verbindliche Regel:
+
+* **Begrenzter unmittelbarer Retry.** Schlägt das direkte Schreiben fehl, wiederholt der Server den Versuch **zeitlich und zahlenmäßig begrenzt** unmittelbar. Der Disconnect darf dadurch **nicht** unbegrenzt blockiert werden.
+* **Derselbe Zeitpunkt.** Alle Wiederholungen verwenden den **bereits ermittelten** Logout-Zeitpunkt. Während der Retries wird **kein neuerer** Zeitpunkt erzeugt — der Logout-Zeitpunkt ist der Moment des Verbindungsendes, nicht der Moment des Schreibens.
+* **Schutzmechanismen unverändert.** Der per-player-Gate- und der Owner-Schutz bleiben über alle Versuche erhalten; ein Retry ist kein Wiederholen des Logout-Ablaufs und darf keine zweite Eigentümer-Zuordnung erzeugen.
+* **Parameter offen.** Die konkrete Zahl der Versuche, die Abstände und das Zeitbudget werden **nicht** hier festgelegt, sondern erst im Coding-Plan anhand der vorhandenen DB-Timeouts.
+
+Sind alle Versuche erfolglos, gilt:
+
+* Der Fehler wird **strukturiert** mit Charakter-ID, Versuchszahl und Fehlerklasse geloggt. **Keine** Session-ID, **keine** Tokens, **keine** Roh-IP.
+* Der Realm-Betriebsstatus wird auf `Degraded` gesetzt (oder ein vorhandener gleichwertiger Degraded-Pfad verwendet).
+* Der Cleanup läuft **kontrolliert weiter**; der Logout-Ablauf wird nicht abgebrochen und nicht wiederholt.
+* Es erfolgt **kein** Bann und **keine** spielerseitige Sanktion.
+* Der Write gilt **nicht** als stillschweigend erfolgreich.
+
+**RESTRISIKO NACH AUSGESCHÖPFTEM RETRY** (bewusst akzeptiert)
+
+Bleibt der Write endgültig erfolglos, ist die Folge fachlich festgelegt und abgenommen:
+
+* Nach einem erfolgreichen Login steht `logout_at` regelmäßig auf `NULL` (der Login schreibt es gemeinsam mit der Rested-Gutschrift zurück, siehe „ZURÜCKSETZEN VON `logout_at` BEIM LOGIN" oben). Der nächste Login kann deshalb **keinen** Offline-Beginn bestimmen.
+* Der vorhandene Rested-Pool bleibt **erhalten**; es wird nichts von ihm abgezogen.
+* Der Zuwachs für diese Offline-Periode **geht verloren**. Er wird nicht später nachgeholt.
+* Es entsteht **keine** Doppelgutschrift und **kein** wirtschaftlicher Vorteil; der Fehler ist für den betroffenen Spieler ein Nachteil, nicht ein Vorteil.
+* Die Höhe des Verlusts ist durch den Rested-Deckel begrenzt und damit gedeckelt.
+* Dies ist ein **bewusst akzeptiertes niedriges Persistenz-/Fairnessrestrisiko**.
+
+**NICHT BESTANDTEIL DIESER REGEL**
+
+* Spool und Recovery reparieren den direkten Logout-Write **nicht** — `logout_at` gehört nicht in den Persistenz-Snapshot.
+* Ein `mark_dirty` ist **kein** Retry für `logout_at`; es erzeugt einen Snapshot, der den Logout-Zeitpunkt nicht enthält.
+* Für P-27 werden ausdrücklich **nicht** eingeführt: `logout_at` im Persistenz-Snapshot, eine Änderung des Spool-Drahtformats, eine neue Datenbankspalte, ein persistenter Retry-Marker, ein RAM-Marker als vermeintlich dauerhafte Reparatur sowie Schema- oder Migrationsänderungen. Ein späteres Release-Audit darf eine dauerhafte Retry-/Recovery-Lösung erneut bewerten.
+* Die At-most-once-Unterbrechungsausnahme des Login-Pfads (oben) ist **nicht** Teil dieser Regel.
+
 Ob und wie dieser Zeitpunkt im Code umgesetzt wird (Reihenfolge der Schreibvorgänge, technische Transaktionsform, Verhalten bei Schreibfehlern) ist hier **nicht** festgelegt; der offene sicherheitstechnische Befund dazu steht in `docs/Security.md` unter `P-32`.
 
 ---
@@ -366,7 +401,9 @@ Ein fehlgeschlagener periodischer Save:
 
 Konkrete Retry-Abstände/-Anzahlen werden **nicht** festgelegt.
 
-Für Graceful-Shutdown-Fehler darf später eine eigene begrenzte Retry-/Shutdown-Regel definiert werden.
+Für Graceful-Shutdown-Fehler wird die Regel in **Abschnitt 30** festgelegt (begrenzter Retry, zusammengefasster Abschlussbericht, kontrolliert beendeter Prozess).
+
+Das **direkte Schreiben des `logout_at`** ist vom periodischen Save getrennt geregelt: Es ist **kein** Snapshot-Wert und folgt der eigenen Regel in **Abschnitt 11** (begrenzter unmittelbarer Retry, danach `Degraded` und kontrolliert weiterlaufender Cleanup). Ein `mark_dirty` ist **kein** Retry für `logout_at`, und Spool/Recovery reparieren diesen Write nicht.
 
 In der Stufe-B-Architektur bleibt der Spool-Snapshot bei fehlgeschlagener DB-Übertragung lokal erhalten; der Realm läuft weiter und sein Persistence-Zustand wird DEGRADED (Details: Abschnitt 26).
 
@@ -818,6 +855,15 @@ Nach einem späteren Bugfix kann der neue Realm-Prozess die gespeicherten Daten 
 
 Die detaillierte Shutdown-Implementierung bleibt einer späteren Stufe vorbehalten (Stufe D). Hier wird nur die Architektur dokumentiert.
 
+**`logout_at` BEIM GRACEFUL SHUTDOWN**
+
+Für das direkte Schreiben des Logout-Zeitpunkts beim kontrollierten Realm-Shutdown gilt dieselbe Regel wie beim normalen Disconnect (Abschnitt 11): ein **begrenzter Retry**, danach `Degraded`, strukturiertes Logging ohne Session-ID, Tokens oder Roh-IP, kontrolliertes Weiterarbeiten. Zusätzlich gilt beim Shutdown:
+
+* **Bounded Waiting.** Der Shutdown darf **nicht** unbegrenzt auf eine nicht erreichbare Datenbank warten. Nach Ausschöpfen des begrenzten Budgets wird der Prozess **kontrolliert beendet**; ein Hängenbleiben des Shutdowns ist ausgeschlossen.
+* **Pro Charakter erfassen, am Ende zusammenfassen.** Fehler werden **je Charakter** erfasst und **am Ende zusammengefasst** ausgewiesen, damit aus vielen Einzelfehlen ein Befund wird.
+* **Der Abschluss muss erkennbar sein.** Der Abschlussbericht beziehungsweise das Log muss **erkennen lassen, dass der Shutdown nicht vollständig persistiert werden konnte**. Ein Shutdown mit Fehlern darf nicht als vollständig persistiert gemeldet werden.
+* **Viele Spieler zugleich.** Die Zahl der gleichzeitig betroffenen Spieler kann **größer** sein als beim einzelnen Disconnect, weil alle laufenden Spieler nacheinander bearbeitet werden. Daraus wird **keine** Behauptung abgeleitet, ein Fehler sei beim Shutdown **wahrscheinlicher**.
+
 Die Final-Save-Reihenfolge aus Abschnitt 12 bleibt unverändert gültig.
 
 Gelingt beim Shutdown **weder** die DB-Übertragung **noch** die lokale Spool-Sicherung, wird der Vorgang NICHT als erfolgreich persistiert gemeldet: Der Zustand ist dann nicht dauerhaft gesichert und als schwerwiegender Persistence-Fehler zu behandeln (Abschnitt 41).
@@ -1148,9 +1194,10 @@ Ohne vorhandene Entscheidung werden NICHT festgelegt:
 * konkrete Dirty-Bit-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten (Attribute, aktuelle HP, aktuelles Mana, Klasse, Fraktionszustand, Weapon Skills, Abilities)
 * genaue HP-Max-/Mana-Max-Berechnung (die Werte selbst sind abgeleitet, Abschnitt 23)
 * genaue Armor-Berechnung (der Wert selbst ist abgeleitet, Abschnitt 23)
-* konkrete Logout-/Spool-Koordination für `logout_at` (Abschnitt 11)
 * neue Gameplay-Regeln
 * Quest V1.2b
 * neue Item-/Loot-Regeln
+
+**GESCHLOSSEN — Fehlersemantik des `logout_at`-Schreibens:** Die grundsätzliche Fehlersemantik des direkten Logout-Writes ist entschieden und in Abschnitt 11 verbindlich festgelegt (begrenzter Retry; danach `Degraded`, strukturiertes Logging ohne Session-ID/Tokens/Roh-IP, kontrolliert weiterlaufender Cleanup; Shutdown-Regel in Abschnitt 30). Bewusst **nicht** festgelegt und Aufgabe des Coding-Plans sind nur noch die technischen Parameter des begrenzten Retries (Versuchsanzahl, Abstände, Zeitbudget) anhand der vorhandenen DB-Timeouts. Der Snapshot- oder Spool-Bau repariert `logout_at` nicht; dauerhafte Retry-/Recovery-Lösungen sind ausdrücklich nicht Teil dieses Punktes und werden allenfalls in einem späteren Release-Audit neu bewertet.
 
 Enthält bestehende Dokumentation zu einem dieser Punkte bereits eine verbindliche Regel, wird sie nicht stillschweigend geändert; ein solcher Konflikt wird gemeldet.
