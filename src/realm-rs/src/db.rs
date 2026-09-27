@@ -359,25 +359,60 @@ pub(crate) async fn write_progression_fields(
 /// Progressionssystem.md §§4/7/12): Level, EXP, freie Attributpunkte,
 /// Rested-Pool und optional den Logout-Zeitpunkt (Epoch-Sekunden).
 /// `logout_at=None` setzt die Spalte auf NULL (nach der Rested-Berechnung
-/// beim Login). Fehler nur loggen — kein Crash/Kick (wie save_position).
+/// beim Login).
+///
+/// **Atomar:** Rested-Pool und `logout_at` werden in EINER Transaktion
+/// geschrieben (docs/Login_Realm_Architektur.md, „Offline-Abrechnung
+/// unmittelbar vor dem Commit"). Schlägt ein Teilschritt fehl, wird die
+/// Transaktion verworfen — es entsteht **kein** Teilwrite.
+///
+/// **Zielzeile:** Vor dem ersten Write wird die Charakterzeile innerhalb
+/// derselben Transaktion per `SELECT … FOR UPDATE` validiert und gesperrt.
+/// Das unterscheidet „Zeile fehlt" eindeutig von „Wert war bereits gleich":
+/// eine vorhandene Zeile liefert genau einen Datensatz, unabhängig davon, ob
+/// die folgenden UPDATEs etwas ändern — anders als `rows_affected`, dessen
+/// Bedeutung vom Treiber-Capability `FOUND_ROWS` abhinge. Die InnoDB-Sperre
+/// (MariaDB-Standard; die Migration setzt keine Engine explizit) verhindert
+/// zudem, dass die Zeile zwischen Prüfung und Write verschwindet.
+/// Das Prädikat enthält `account_id`: eine Zeile, die einem anderen Account
+/// gehört, gilt als nicht vorhanden — die Ownership-Bindung bleibt damit auch
+/// zum Abrechnungszeitpunkt erhalten.
+///
+/// Fehler werden an den Aufrufer zurückgegeben: der Login-Pfad entscheidet
+/// fail-closed, ob der Einstieg committet wird; ein stillschweigend
+/// verschluckter Fehler würde einen RAM-Stand fortschreiben, den die DB nicht
+/// kennt.
 #[allow(clippy::too_many_arguments)]
 pub async fn save_progression(
     pool: &Pool<MySql>,
     char_id: &str,
+    account_id: u32,
     level: u32,
     exp: i64,
     free_attr_points: u32,
     rested_pool: i64,
     logout_at: Option<i64>,
-) {
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            log::error!("saveProgression {char_id}: {e}");
-            return;
-        }
-    };
-    if let Err(e) = write_progression(
+) -> Result<(), String> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("saveProgression {char_id} (Transaktion beginnen): {e}"))?;
+    let owner: Option<i32> = sqlx::query_scalar(
+        "SELECT account_id FROM characters WHERE id = ? AND account_id = ? FOR UPDATE",
+    )
+    .bind(char_id)
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("saveProgression {char_id} (Zielzeile prüfen): {e}"))?;
+    if owner.is_none() {
+        // Kein erfolgreicher Settlement-Rückgabewert: `tx` wird ohne Commit
+        // verworfen, es gab keinen vorherigen Write in dieser Transaktion.
+        return Err(format!(
+            "saveProgression {char_id}: Zielzeile fehlt oder gehört nicht zu diesem Account"
+        ));
+    }
+    write_progression(
         &mut tx,
         char_id,
         level,
@@ -386,14 +421,10 @@ pub async fn save_progression(
         rested_pool,
         logout_at,
     )
-    .await
-    {
-        log::error!("saveProgression {char_id}: {e}");
-        return;
-    }
-    if let Err(e) = tx.commit().await {
-        log::error!("saveProgression {char_id}: {e}");
-    }
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("saveProgression {char_id} (Commit): {e}"))
 }
 
 /// Schreibt `logout_at` direkt (finaler Disconnect-Save, docs/

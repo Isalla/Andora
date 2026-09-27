@@ -120,6 +120,77 @@ pub fn resolve_character_lookup(
     }
 }
 
+/// Bedingtes Parental-Cleanup nach einem Fehler **vor** `commit_login`.
+///
+/// Detacht **nur**, wenn für den Charakter kein Owner existiert. Grund: bei einem
+/// Takeover existiert der Owner der verdrängten Sitzung, und `parental::attach`
+/// hat den Elternzustand bereits ersetzt. Ein unbedingtes `detach` würde dort
+/// die Elternkontrolle einer weiterhin verbundenen Sitzung entfernen — ein
+/// Eingriff in den autoritativen Zustand, den AUTH-03A schützt.
+///
+/// Der World-Lock wird gescoped und **vor** dem `detach`-Await freigegeben;
+/// es wird kein Lock über einen Await gehalten.
+///
+/// Gibt `true` zurück, wenn der Elternzustand entfernt wurde.
+async fn detach_if_unowned(
+    parental: &parental::SharedParental,
+    shared: &crate::world::Shared,
+    char_id: &str,
+) -> bool {
+    let has_owner = {
+        let world = shared.lock().await;
+        crate::world::conn_of(&world, char_id).is_some()
+    };
+    if has_owner {
+        return false;
+    }
+    parental::detach(parental, char_id).await;
+    true
+}
+
+/// Outcome-abhängige RAM-Anwendung nach der Login-Abrechnung.
+///
+/// **Rein:** kein Lock, kein DB-Zugriff, keine Persistenzwirkung. Liefert
+/// `(neuer rested_pool, Reconciliation nötig)`.
+///
+/// Grundlagen (docs/Security.md `P-32`, docs/Login_Realm_Architektur.md):
+/// * `Registered` — es existiert **kein** vorheriger autoritativer RAM-Player.
+///   Der neu registrierte Player muss exakt den Wert tragen, der unmittelbar
+///   zuvor gemeinsam mit `logout_at = NULL` abgerechnet wurde. Eine
+///   Dirty-Markierung wäre hier falsch: sie könnte einen abweichenden
+///   Kandidatenwert zurückschreiben.
+/// * `Adopted` / `Takeover` — der bestehende RAM-Player bleibt autoritativ.
+///   Ein **positives** Delta (der Offline-Zuwachs) wird additiv angewandt; ein
+///   **negatives** Delta aus dem DB-Kandidaten (Kappung nach
+///   `Erfahrung_und_Progressionssystem.md` §12.3) wird **nie** angewandt, weil
+///   er den autoritativen RAM-Stand verschlechtern würde.
+/// * `Refreshed` — keine erneute Gutschrift, keine Kandidatenkappung.
+///
+/// `delta > 0` ist die Mehrzahl der Fälle additiv und damit gegenüber einer
+/// zwischenzeitlichen Spielmutation (Kill-EXP verbraucht den Pool über
+/// `apply_progression`) verträglich. Die Signed-Form deckt zusätzlich den
+/// Kappungsfall ab, in dem `credited < c.rested_pool`.
+///
+/// `true` als zweiter Rückgabewert bedeutet: die DB hält nach der Abrechnung
+/// `credited`, der autoritative RAM-Player `pool` — der nächste Snapshot muss
+/// den RAM-Stand in die DB bringen. Das dient **ausschließlich** der
+/// Reconciliation des `rested_pool` und ist **kein** Retry für `logout_at`;
+/// der Reset ist bereits in derselben Transaktion geschrieben.
+fn apply_login_settlement(
+    outcome: crate::world::CommitOutcome,
+    ram_pool: i64,
+    delta: i64,
+    credited: i64,
+) -> (i64, bool) {
+    use crate::world::CommitOutcome as Outcome;
+    let pool = match outcome {
+        Outcome::Registered => credited,
+        Outcome::Adopted | Outcome::Takeover { .. } if delta > 0 => ram_pool.saturating_add(delta),
+        Outcome::Adopted | Outcome::Takeover { .. } | Outcome::Refreshed => ram_pool,
+    };
+    (pool, pool != credited)
+}
+
 /// HELLO: Einstieg mit Handoff-Token (Zielkette), Charakter laden,
 /// Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
 ///
@@ -180,7 +251,7 @@ pub async fn handle_hello(
     // zum Persistenz-Gate, `Spool::player_gate`), geholt VOR der ersten
     // World-Sperre und VOR dem ersten DB-Zugriff und gehalten bis über den
     // Commit. Damit ist die Reihenfolge garantiert:
-    //   alter Logout-Write  <  save_progression(logout_at = NULL)  <  Commit
+    //   alter Logout-Write  <  Offline-Abrechnung(logout_at = NULL)  <  Commit
     // Der Login wartet also auf einen laufenden Logout-Write, berechnet die
     // Rested-Zeit aus dem echten Logout-Zeitpunkt der beendeten Sitzung und
     // setzt die Spalte danach selbst zurück — ein verspäteter Logout-Write der
@@ -240,30 +311,24 @@ pub async fn handle_hello(
         inventory.remove_broken_equipment(&world.item_definitions)
     };
     // Rested-EXP (docs/Erfahrung_und_Progressionssystem.md §12): einmalige
-    // Berechnung beim Login aus dem letzten Logout-Zeitpunkt; danach wird
-    // der Zeitstempel persistierend zurückgesetzt (keine Doppel-Berechnung
-    // nach einem Crash). Fehler nur loggen — kein Login-Abbruch.
+    // Berechnung beim Login aus dem letzten Logout-Zeitpunkt. Hier wird
+    // **nur berechnet** — der Write erfolgt als atomare Offline-Abrechnung
+    // unmittelbar vor `commit_login` (siehe dort), damit ein fehlschlagender
+    // Einstieg weder `logout_at` zurücksetzt noch eine Gutschrift bucht.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let rested_pool = crate::progression::apply_offline_rested(
+    let credited = crate::progression::apply_offline_rested(
         &ctx.cfg.progression,
         c.level,
         c.rested_pool,
         c.logout_at,
         now_secs,
     );
-    db::save_progression(
-        &ctx.db,
-        &c.id,
-        c.level,
-        c.exp,
-        c.free_attr_points,
-        rested_pool,
-        None,
-    )
-    .await;
+    // Signed: `apply_offline_rested` kappt auf `max_pool`; ist der geladene
+    // Pool bereits überfüllt, ist `credited < c.rested_pool` und `delta` negativ.
+    let delta = credited - c.rested_pool;
     // Quest V1 (§13): persistierte Spieler-Questzustände (ACTIVE/COMPLETED/
     // FAILED) laden. Fehler am Laden => leerer Questzustand (Fallback wie
     // save_position, kein Login-Abbruch). HIDDEN/AVAILABLE sind abgeleitet
@@ -313,7 +378,10 @@ pub async fn handle_hello(
         armor: c.armor,
         exp: c.exp,
         free_attr_points: c.free_attr_points,
-        rested_pool: rested_pool,
+        // Ungecrediteter DB-Stand: der Kandidat ist noch nicht autoritativ,
+        // die Gutschrift erfolgt nach der Abrechnung über
+        // `apply_login_settlement` (bei `Registered` auf `credited` gesetzt).
+        rested_pool: c.rested_pool,
         idia: c.idia,
         weapon_skill,
         combat: None,
@@ -355,12 +423,39 @@ pub async fn handle_hello(
         return Err(reason);
     }
 
+    // ── Offline-Abrechnung (docs/Login_Realm_Architektur.md, „Offline-
+    // Abrechnung unmittelbar vor dem Commit") ───────────────────────────
+    // Gutschrift und Zurücksetzen von `logout_at` werden gemeinsam und
+    // unteilbar in EINER Transaktion geschrieben (`db::save_progression`).
+    // Position: nach allen falliblen Vorprüfungen, unmittelbar vor dem Commit.
+    // Schlägt sie fehl, wird der Login NICHT committet: `logout_at` und der
+    // noch nicht konsumierte Offline-Zeitraum bleiben erhalten. Der Disconnect
+    // kann das nicht reparieren (er setzt `logout_at = now`), deshalb Abbruch.
+    // Kein World-Lock während des Awaits.
+    if let Err(e) = db::save_progression(
+        &ctx.db,
+        &c.id,
+        account_id,
+        c.level,
+        c.exp,
+        c.free_attr_points,
+        credited,
+        None,
+    )
+    .await
+    {
+        log::error!("HELLO settlement {char_id}: {e}");
+        detach_if_unowned(&ctx.parental, &ctx.shared, &c.id).await;
+        return Err("character settlement unavailable".into());
+    }
+
     // ── Commit (AUTH-03) ────────────────────────────────────────────────
     // EINZIGER Punkt, der `by_conn` (Berechtigung zur Spiellogik) verändert.
     // Alle falliblen Schritte (Auth, Charakterprüfung, Questzustand,
-    // Elternkontrolle) liegen davor. Der Aufruf ist unter der World-Sperre
-    // atomar: beim Takeover wird die alte `conn_id` ZUERST entmachtet, dann
-    // die neue eingesetzt; der bestehende RAM-Player bleibt maßgeblich.
+    // Elternkontrolle, Offline-Abrechnung) liegen davor. Der Aufruf ist unter
+    // der World-Sperre atomar: beim Takeover wird die alte `conn_id` ZUERST
+    // entmachtet, dann die neue eingesetzt; der bestehende RAM-Player bleibt
+    // maßgeblich.
     let outcome = {
         let mut world = ctx.shared.lock().await;
         crate::world::commit_login(
@@ -380,16 +475,27 @@ pub async fn handle_hello(
             // Commit abgelehnt: nur aufräumen, was diese Verbindung selbst
             // angehängt hat. Ein aktiver Eigentümer behält Player UND
             // Eltern-State.
-            let has_owner = {
-                let world = ctx.shared.lock().await;
-                crate::world::conn_of(&world, &c.id).is_some()
-            };
-            if !has_owner {
-                parental::detach(&ctx.parental, &c.id).await;
-            }
+            detach_if_unowned(&ctx.parental, &ctx.shared, &c.id).await;
             return Err(reason);
         }
     };
+
+    // Der Login ist damit fachlich zustande gekommen (P-32). Die gebuchte
+    // Gutschrift wird jetzt auf den **autoritativen** RAM-Player angewandt:
+    // ein await-freier World-Lock-Block, der einzige RAM-Schreibpunkt nach
+    // dem Commit. `reconcile` markiert die Progression dirty, damit der nächste
+    // Snapshot den RAM-Stand in die DB bringt — es ist ausschließlich die
+    // Reconciliation von `rested_pool`, kein Retry für `logout_at`.
+    {
+        let mut world = ctx.shared.lock().await;
+        if let Some(p) = world.players.get_mut(&c.id) {
+            let (pool, reconcile) = apply_login_settlement(outcome, p.rested_pool, delta, credited);
+            p.rested_pool = pool;
+            if reconcile {
+                p.mark_dirty(crate::persist::PersistComponent::Progression);
+            }
+        }
+    }
     if let crate::world::CommitOutcome::Takeover { old_conn_id } = outcome {
         // Eigentümerwechsel abgeschlossen: erst JETZT den vorhandenen Closer
         // der verdrängten Verbindung signalisieren (kein neuer Mechanismus).
@@ -1240,10 +1346,25 @@ mod tests {
         handoff_status: u16,
         session_resp: String,
         session_status: u16,
+        /// Canned-Antwort für `POST /parental/status` (Elternkontrolle am
+        /// Login). Vorher lieferte der Stub für diesen Pfad `unknown path`,
+        /// wodurch `parental::attach` immer mit `status_unavailable` scheiterte
+        /// und der Zustand nach einem Attach nicht beobachtbar war.
+        parental_resp: String,
+        parental_status: u16,
     }
 
     async fn start_stub(handoff_resp: &str, session_resp: &str) -> AuthApi {
         start_stub_status(handoff_resp, 200, session_resp, 200).await
+    }
+
+    /// Stub mit zusätzlich konfigurierbarer Elternkontroll-Antwort.
+    async fn start_stub_with_parental(
+        handoff_resp: &str,
+        session_resp: &str,
+        parental_resp: &str,
+    ) -> AuthApi {
+        start_stub_full(handoff_resp, 200, session_resp, 200, parental_resp, 200).await
     }
 
     async fn start_stub_status(
@@ -1252,6 +1373,31 @@ mod tests {
         session_resp: &str,
         session_status: u16,
     ) -> AuthApi {
+        start_stub_full(
+            handoff_resp,
+            handoff_status,
+            session_resp,
+            session_status,
+            PARENTAL_ON,
+            200,
+        )
+        .await
+    }
+
+    /// Elternkontrolle aktiv, Chat gesperrt: `parental::chat_allowed` ist dann
+    /// genau dann `false`, wenn ein Zustand für den Charakter existiert —
+    /// damit ist das Anlegen bzw. Entfernen des Zustands beobachtbar.
+    const PARENTAL_ON: &str = r#"{"enabled":true,"chat_allowed":false}"#;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_stub_full(
+        handoff_resp: &str,
+        handoff_status: u16,
+        session_resp: &str,
+        session_status: u16,
+        parental_resp: &str,
+        parental_status: u16,
+    ) -> AuthApi {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr: SocketAddr = listener.local_addr().unwrap();
         let state = StubState {
@@ -1259,6 +1405,8 @@ mod tests {
             session_resp: session_resp.to_string(),
             session_status,
             handoff_status,
+            parental_resp: parental_resp.to_string(),
+            parental_status,
         };
         tokio::spawn(async move {
             loop {
@@ -1270,6 +1418,8 @@ mod tests {
                 let h_status = state.handoff_status;
                 let s_resp = state.session_resp.clone();
                 let s_status = state.session_status;
+                let p_resp = state.parental_resp.clone();
+                let p_status = state.parental_status;
                 tokio::spawn(async move {
                     let mut br = tokio::io::BufReader::new(r);
                     let mut buf = Vec::new();
@@ -1294,6 +1444,8 @@ mod tests {
                         (h_resp, h_status)
                     } else if path == "/session/validate" {
                         (s_resp, s_status)
+                    } else if path == "/parental/status" {
+                        (p_resp, p_status)
                     } else {
                         (r#"{"error":"unknown path"}"#.to_string(), 200)
                     };
@@ -1390,6 +1542,19 @@ mod tests {
             .connect_lazy("mysql://u:p@127.0.0.1:3306/realm_state_test")
             .unwrap();
         let auth = AuthApi::new(&cfg.auth_api).unwrap();
+        test_ctx_with_auth(cfg, db, dir, auth).await
+    }
+
+    /// Testkontext mit frei wählbarer Auth-API. Notwendig für die Elternkontrolle:
+    /// `parental::attach` legt den Zustand nur bei **aktivierter** Auth-API an
+    /// (`account_id != 0`), sonst kehrt es sofort zurück.
+    async fn test_ctx_with_auth(
+        cfg: std::sync::Arc<crate::config::Config>,
+        db: sqlx::MySqlPool,
+        dir: std::path::PathBuf,
+        auth: AuthApi,
+    ) -> std::sync::Arc<Ctx> {
+        let _ = &dir;
         let shared = crate::world::new_shared();
         let parental = crate::parental::new_shared(auth.clone());
         let groups = crate::group::new_shared_groups(cfg.group.clone());
@@ -1417,6 +1582,18 @@ mod tests {
             "session_id": "sess-1",
             "handoff_token": "h",
         })
+    }
+
+    /// RAM-Player **mit** Owner-Zuordnung. `insert_foreign_player` setzt nur
+    /// `players`; für den Owner-Nachweis braucht es zusätzlich `by_conn`, weil
+    /// `world::conn_of` ausschließlich `by_conn` auswertet.
+    async fn insert_owned_player(ctx: &Ctx, conn_id: u64, player_id: &str) {
+        insert_foreign_player(ctx).await;
+        ctx.shared
+            .lock()
+            .await
+            .by_conn
+            .insert(conn_id, player_id.to_string());
     }
 
     /// Minimales `db::Character` für die Auflösungslogik.
@@ -1728,6 +1905,264 @@ mod tests {
     /// same_external_rejection` auf der Entscheidungslogik abgedeckt. Die
     /// MariaDB-Integration (Treffer mit passendem `account_id`, NotFound ohne
     /// INSERT) bleibt eine ausdrücklich benannte Testlücke.
+    // ---- P-32: atomare Offline-Abrechnung vor dem Owner-Commit ----
+
+    /// N3 — die outcome-abhängige RAM-Anwendung ist **rein** und damit ohne
+    /// MariaDB vollständig prüfbar. `true` als zweiter Wert bedeutet: die DB
+    /// hält nach der Abrechnung einen anderen Wert als der RAM-Player und die
+    /// Progression wird dirty markiert, damit der nächste Snapshot den
+    /// RAM-Stand in die DB bringt (Reconciliation, **kein** `logout_at`-Retry).
+    #[test]
+    fn login_settlement_is_outcome_dependent() {
+        use crate::world::CommitOutcome as O;
+        let takeover = O::Takeover { old_conn_id: 7 };
+
+        // (1) Registered: exakt `credited`, kein Delta, keine Reconciliation —
+        // auch wenn der Kandidatenwert abweicht (darf nicht zurückgeschrieben
+        // werden).
+        assert_eq!(
+            apply_login_settlement(O::Registered, 90, 0, 90),
+            (90, false)
+        );
+        assert_eq!(
+            apply_login_settlement(O::Registered, 50, -100, 100),
+            (100, false)
+        );
+        assert_eq!(
+            apply_login_settlement(O::Registered, 7, 40, 47),
+            (47, false)
+        );
+
+        // (2)/(3) Adopted/Takeover, positives Delta: additiv, dirty nur bei
+        // verbleibender Abweichung zum DB-Wert.
+        assert_eq!(apply_login_settlement(O::Adopted, 50, 40, 90), (90, false));
+        assert_eq!(apply_login_settlement(takeover, 50, 40, 90), (90, false));
+        assert_eq!(apply_login_settlement(O::Adopted, 60, 40, 90), (100, true));
+        assert_eq!(apply_login_settlement(takeover, 60, 40, 90), (100, true));
+
+        // (4)/(5) Adopted/Takeover, negatives Delta (Kappung aus dem
+        // DB-Kandidaten): RAM bleibt autoritativ, Reconciliation markiert.
+        assert_eq!(
+            apply_login_settlement(O::Adopted, 50, -100, 100),
+            (50, true)
+        );
+        assert_eq!(apply_login_settlement(takeover, 50, -100, 100), (50, true));
+
+        // (6) RAM bereits gleich dem DB-Wert: keine unnötige Mutation.
+        assert_eq!(apply_login_settlement(O::Adopted, 90, 0, 90), (90, false));
+        assert_eq!(apply_login_settlement(takeover, 90, 0, 90), (90, false));
+
+        // (7) Refreshed: keine zweite Gutschrift, keine Kandidatenkappung;
+        // eine bestehende Divergenz wird nicht dauerhaft stehen gelassen.
+        assert_eq!(apply_login_settlement(O::Refreshed, 30, 40, 90), (30, true));
+        assert_eq!(apply_login_settlement(O::Refreshed, 90, 0, 90), (90, false));
+    }
+
+    /// N3 (6) am echten Player: `reconcile == false` bedeutet keine
+    /// `mark_dirty`, also keine Generationserhöhung und kein Dirty-Bit.
+    #[tokio::test]
+    async fn login_settlement_marks_dirty_only_on_divergence() {
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        let mut player = crate::world::Player {
+            id: "1".into(),
+            name: "hero".into(),
+            x: 0.0,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 100,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 7,
+            session_id: "sess-1".into(),
+            entities: Default::default(),
+            last_activity: std::time::Instant::now(),
+            tx: ptx,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 90,
+            idia: 0,
+            armor: 0,
+            weapon_skill: 1,
+            combat: None,
+            mana: 50,
+            max_mana: 50,
+            effects: Vec::new(),
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: Default::default(),
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 50,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: Default::default(),
+            quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
+            persist_revision: 0,
+        };
+
+        // RAM (90) == DB (90): keine Reconciliation, keine Dirty-Markierung.
+        let (pool, reconcile) = apply_login_settlement(
+            crate::world::CommitOutcome::Adopted,
+            player.rested_pool,
+            0,
+            90,
+        );
+        assert_eq!((pool, reconcile), (90, false));
+        if reconcile {
+            player.mark_dirty(crate::persist::PersistComponent::Progression);
+        }
+        assert_eq!(player.persist_generation, 0, "keine Generationserhöhung");
+        assert!(!player
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Progression));
+
+        // RAM (50) != DB (100) nach negativer Kandidatenkorrektur: Reconciliation.
+        player.rested_pool = 50;
+        let (pool, reconcile) = apply_login_settlement(
+            crate::world::CommitOutcome::Adopted,
+            player.rested_pool,
+            -100,
+            100,
+        );
+        assert_eq!((pool, reconcile), (50, true));
+        player.rested_pool = pool;
+        player.mark_dirty(crate::persist::PersistComponent::Progression);
+        assert_eq!(player.rested_pool, 50, "RAM bleibt autoritativ");
+        assert_eq!(player.persist_generation, 1);
+        assert!(player
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Progression));
+    }
+
+    /// N2a/N2b — das bedingte Parental-Cleanup läuft **nur** ohne Owner.
+    #[tokio::test]
+    async fn parental_cleanup_runs_only_without_owner() {
+        let ctx = test_ctx().await;
+        // N2a: kein Owner im World-State -> Cleanup wird ausgeführt.
+        assert!(detach_if_unowned(&ctx.parental, &ctx.shared, "1").await);
+        // N2b: Owner vorhanden -> KEIN Cleanup (Takeover-Fall: der Elternzustand
+        // gehört der weiterhin verbundenen Sitzung).
+        insert_owned_player(&ctx, 77, "1").await;
+        assert!(!detach_if_unowned(&ctx.parental, &ctx.shared, "1").await);
+    }
+
+    /// N2c — mit aktivem `parental::attach`: der Zustand existiert danach nur
+    /// ohne Owner nicht mehr. Beobachtung über den bestehenden `pub`-Accessor
+    /// `parental::chat_allowed` (Elternkontrolle aktiv + Chat gesperrt ⇒
+    /// `false`, solange ein Zustand existiert).
+    #[tokio::test]
+    async fn parental_state_removed_only_without_owner_after_attach() {
+        let auth = start_stub_with_parental(HANDOFF_OK, SESSION_OK, PARENTAL_ON).await;
+        let dir = std::env::temp_dir().join(format!(
+            "andora-realm-parental-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut env = std::collections::HashMap::<String, String>::new();
+        let cfg = std::sync::Arc::new(crate::config::Config {
+            realm_id: 1,
+            ws_port: 3001,
+            health_port: 3002,
+            ws_bind_host: String::new(),
+            health_bind_host: String::new(),
+            tick_ms: 100,
+            aofb_radius: 20.0,
+            render_cap: 64,
+            ollama_url: String::new(),
+            auth_api: crate::config::AuthApiConfig {
+                url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
+            realm_db: crate::config::DbConfig {
+                host: "127.0.0.1".into(),
+                port: 3306,
+                user: "u".into(),
+                password: "p".into(),
+                database: "realm_state_test".into(),
+            },
+            migrations_dir: String::new(),
+            allow_destructive: false,
+            combat: crate::config::combat_config(&env),
+            npc: crate::config::npc_config(&env),
+            group: crate::config::group_config(&env),
+            inventory: crate::config::inventory_config(&env),
+            loot: crate::config::loot_config(&env),
+            progression: crate::config::progression_config(&env),
+            persist: crate::config::persist_config(&env),
+            security: crate::config::security_config(&env),
+        });
+        let db = sqlx::mysql::MySqlPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(300))
+            .connect_lazy("mysql://u:p@127.0.0.1:3306/realm_state_test")
+            .unwrap();
+        let ctx = test_ctx_with_auth(cfg, db, dir, auth).await;
+        let _ = &mut env;
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Echter Attach: legt den Elternzustand an (Auth aktiv, Konto 7).
+        crate::parental::attach(&ctx.parental, &tx, "1", 7, "sess-1")
+            .await
+            .expect("attach mit Stub-Antwort muss erfolgreich sein");
+        assert!(
+            !crate::parental::chat_allowed(&ctx.parental, "1").await,
+            "Zustand nach attach vorhanden"
+        );
+
+        // Ohne Owner: Cleanup entfernt den Zustand.
+        assert!(detach_if_unowned(&ctx.parental, &ctx.shared, "1").await);
+        assert!(
+            crate::parental::chat_allowed(&ctx.parental, "1").await,
+            "Zustand nach Cleanup entfernt"
+        );
+
+        // Zweiter Attach, diesmal mit vorhandenem Owner: Zustand bleibt.
+        crate::parental::attach(&ctx.parental, &tx, "1", 7, "sess-1")
+            .await
+            .expect("attach");
+        insert_owned_player(&ctx, 77, "1").await;
+        assert!(!detach_if_unowned(&ctx.parental, &ctx.shared, "1").await);
+        assert!(
+            !crate::parental::chat_allowed(&ctx.parental, "1").await,
+            "Zustand bleibt bei vorhandenem Owner erhalten"
+        );
+    }
+
+    /// N1-Struktur: der Settlement-Aufruf und die Fehler-Rückkehr liegen VOR
+    /// dem Commit-Block. Ohne Datenbank ist der Settlement-Fehlerpfad selbst
+    /// nicht auslösbar (`load_character` ist der erste DB-Zugriff und scheitert
+    /// am nicht erreichbaren Pool) — das ist eine MariaDB-Testlücke und wird
+    /// hier nur als Reihenfolge-Invariante belegt.
+    #[test]
+    fn settlement_precedes_commit_in_source_order() {
+        let src = include_str!("handlers.rs");
+        let settle = src
+            .find("HELLO settlement {char_id}")
+            .expect("Settlement-Fehlerbehandlung vorhanden");
+        let commit = src
+            .find("crate::world::commit_login(")
+            .expect("Commit-Aufruf vorhanden");
+        assert!(
+            settle < commit,
+            "Settlement muss vor dem Commit liegen (Zeilenlage)"
+        );
+    }
+
     #[tokio::test]
     async fn hello_fails_closed_when_character_lookup_is_unavailable() {
         let ctx = test_ctx().await;

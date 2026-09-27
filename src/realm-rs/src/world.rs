@@ -277,16 +277,48 @@ pub enum CommitOutcome {
 /// Fail-closed-Vorprüfung vor jedem DB-Zugriff im HELLO: Nur der
 /// authentifizierte Account, der den aktiven RAM-Player besitzt, darf den
 /// Charakter übernehmen. Verhindert zusätzlich, dass ein fremder Account den
-/// Charakter über die DB lädt.
+/// Charakter über die DB lädt, und schließt die Registry-Inkonsistenz aus, die
+/// `commit_login` sonst als kontrollierten Fehler nach der Offline-Abrechnung
+/// ablehnen würde (docs/Security.md `P-32`).
+///
+/// **Stabilität bis `commit_login`:** Der Aufrufer hält das per-player-Gate vom
+/// Login bis über den Commit. Damit kann `disconnect_conn` (das `by_conn` und
+/// `players` gemeinsam entfernt) für denselben Charakter nicht laufen, und kein
+/// weiterer Produktionsschreiber schreibt `by_conn` oder `players` für diesen
+/// Charakter. Die `account_id` eines vorhandenen RAM-Players kann in diesem
+/// Fenster nicht wechseln. Damit bleiben **alle heutigen kontrollierten
+/// `commit_login`-Fehlerbedingungen bis zum Commit ausgeschlossen**.
+///
+/// **Pflicht für neue Registry-Schreiber:** Jeder künftige Schreibvorgang auf
+/// `by_conn` oder `players`, der den Charakter eines laufenden Logins betrifft,
+/// muss das per-player-Gate nehmen. Andernfalls kann der hier geprüfte Zustand
+/// zwischen Vorprüfung und `commit_login` wechseln, und die Vorprüfung würde
+/// ihre Garantie verlieren.
 pub fn ensure_takeover_allowed(
     world: &World,
     player_id: &str,
     account_id: u32,
 ) -> Result<(), String> {
+    // Zwei fail-closed Vorprüfungen. Beide müssen VOR dem ersten DB-Zugriff
+    // liegen, weil die Offline-Abrechnung unmittelbar vor `commit_login`
+    // läuft (docs/Login_Realm_Architektur.md, „Offline-Abrechnung unmittelbar
+    // vor dem Commit"; docs/Security.md `P-32`): ein kontrollierter Fehler des
+    // Commits würde sonst eine bereits verbrauchte Offline-Zeit hinterlassen.
     match world.players.get(player_id) {
+        // (1) Fremder Account: der Charakter darf nicht einmal geladen werden.
         Some(p) if p.account_id != account_id => {
             Err("character is owned by another account".to_string())
         }
+        // (2) Registry-Invariante: existiert der Player nicht, darf auch keine
+        // Verbindungszuordnung auf ihn zeigen. `commit_login` lehnt genau
+        // diesen Zustand ab ("inconsistent connection registry"); die
+        // Ablehnung muss hier erfolgen, damit die Abrechnung nicht ohne
+        // erfolgreichen Login verbraucht wird. **Kein automatisches Reparieren
+        // und kein Entfernen der inkonsistenten Zuordnung** — die Registry wird
+        // ausschließlich über `commit_login` verändert.
+        None if conn_of(world, player_id).is_some() => Err(format!(
+            "inconsistent connection registry for character {player_id}"
+        )),
         _ => Ok(()),
     }
 }
@@ -917,6 +949,71 @@ mod tests {
         assert!(is_owner(&w, 1, "hero"));
         assert_eq!(w.by_conn.len(), 1);
         assert_eq!(w.players["hero"].session_id, before);
+    }
+
+    /// Die Vorprüfung schließt **beide** kontrollierten `commit_login`-Fehler
+    /// aus: den fremden Account und die Registry-Inkonsistenz. Ohne den zweiten
+    /// Fall könnte `commit_login` nach der Offline-Abrechnung kontrolliert
+    /// scheitern und die Offline-Zeit wäre ohne erfolgreichen Login verbraucht
+    /// (docs/Security.md `P-32`).
+    #[test]
+    fn precheck_rejects_registry_inconsistency_without_touching_state() {
+        let mut w = World::new();
+
+        // (1) Player fehlt, keine Zuordnung -> erlaubt.
+        assert!(ensure_takeover_allowed(&w, "hero", 7).is_ok());
+
+        // (2) Player fehlt, `by_conn` zeigt auf die ID -> fail-closed.
+        w.by_conn.insert(9, "hero".into());
+        let err = ensure_takeover_allowed(&w, "hero", 7).unwrap_err();
+        assert!(
+            err.contains("inconsistent connection registry"),
+            "Registry-Inkonsistenz muss benannt werden, war: {err}"
+        );
+        // (5) Die Vorprüfung verändert weder `players` noch `by_conn` und
+        // repariert die Inkonsistenz NICHT.
+        assert!(w.players.is_empty(), "kein Player angelegt");
+        assert_eq!(w.by_conn.len(), 1, "Zuordnung bewusst unverändert");
+        assert_eq!(
+            conn_of(&w, "hero"),
+            Some(9),
+            "kein automatisches Reparieren"
+        );
+
+        // (2b) Auch mit passendem Konto bleibt die Inkonsistenz abgelehnt.
+        assert!(ensure_takeover_allowed(&w, "hero", 42).is_err());
+
+        // (3) Player vorhanden, passender Account -> erlaubt.
+        w.by_conn.clear();
+        let (p, _r) = candidate("hero", 7);
+        w.players.insert("hero".into(), p);
+        assert!(ensure_takeover_allowed(&w, "hero", 7).is_ok());
+
+        // (4) Player vorhanden, fremder Account -> fail-closed.
+        let err = ensure_takeover_allowed(&w, "hero", 8).unwrap_err();
+        assert_eq!(err, "character is owned by another account");
+        // (5) unverändert geblieben.
+        assert_eq!(w.players.len(), 1);
+        assert!(w.by_conn.is_empty());
+        assert_eq!(w.players["hero"].account_id, 7);
+    }
+
+    /// Die erweiterte Vorprüfung macht den kontrollierten `commit_login`-Fehler
+    /// der Registry-Inkonsistenz für den Login-Pfad unerreichbar: der
+    /// HELLO-Aufrufer prüft vor der Offline-Abrechnung, `commit_login` selbst
+    /// bleibt unverändert fail-closed (rein defensiv).
+    #[test]
+    fn precheck_excludes_the_registry_error_branch_of_commit_login() {
+        let mut w = World::new();
+        w.by_conn.insert(9, "hero".into());
+        // Vorprüfung lehnt ab …
+        assert!(ensure_takeover_allowed(&w, "hero", 7).is_err());
+        // … und `commit_login` wäre in diesem Zustand ebenfalls fehlgeschlagen.
+        let (p, _r) = candidate("hero", 7);
+        let (cf, _rx) = conn_fields("sess-1");
+        assert!(commit_login(&mut w, 1, p, cf).is_err());
+        assert!(w.players.is_empty());
+        assert_eq!(conn_of(&w, "hero"), Some(9));
     }
 
     /// Player im RAM ohne Eigentümer (Fall: Disconnect-Save fehlgeschlagen,
