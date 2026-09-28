@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -26,10 +27,12 @@ type fakeStore struct {
 	lastLogin  map[int]*time.Time
 	// TOTP-2FA / devices / recovery codes / security events.
 	trustedDevices map[int]map[string]TrustedDevice
-	recoveryCodes  map[int]map[string]*RecoveryCode
-	securityEvents map[int][]SecurityEvent
-	nextDeviceID   int
-	nextEventID    int
+	// recoverFailStage injects a RecoverPassword failure (0 = off).
+	recoverFailStage int
+	recoveryCodes    map[int]map[string]*RecoveryCode
+	securityEvents   map[int][]SecurityEvent
+	nextDeviceID     int
+	nextEventID      int
 	// Parental control (mirrors the parental_* tables).
 	parental      map[int]*ParentalControls
 	periods       map[int][]*ParentalPeriod
@@ -174,17 +177,60 @@ func (f *fakeStore) ValidateSession(_ context.Context, rawToken string) (*Sessio
 	if !ok {
 		return nil, nil
 	}
-	if sess.ExpiresAt.Before(time.Now()) {
+	// Revoked wins over expiry, exactly like sessionStatusOf in store.go.
+	if sess.RevokedAt != nil || sess.ExpiresAt.Before(time.Now()) {
 		return nil, nil
 	}
 	s := sess
 	return &s, nil
 }
 
+// statusOfLocked mirrors sessionStatusOf (store.go). Caller holds f.mu.
+func statusOfLocked(sess Session) SessionStatus {
+	if sess.RevokedAt != nil {
+		return SessionRevoked
+	}
+	if sess.ExpiresAt.Before(time.Now()) {
+		return SessionExpired
+	}
+	return SessionValid
+}
+
+func (f *fakeStore) SessionStatusOf(_ context.Context, rawToken string) (SessionStatus, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sess, ok := f.sessions[tokenHash(rawToken)]
+	if !ok {
+		return SessionMissing, 0, nil
+	}
+	return statusOfLocked(sess), sess.AccountID, nil
+}
+
+// BatchSessionStatus preserves input order, like the real single-IN query.
+func (f *fakeStore) BatchSessionStatus(_ context.Context, tokens []string) ([]SessionStatus, []int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	statuses := make([]SessionStatus, len(tokens))
+	accountIDs := make([]int, len(tokens))
+	for i, t := range tokens {
+		statuses[i] = SessionMissing
+		if sess, ok := f.sessions[tokenHash(t)]; ok {
+			statuses[i] = statusOfLocked(sess)
+			accountIDs[i] = sess.AccountID
+		}
+	}
+	return statuses, accountIDs, nil
+}
+
 func (f *fakeStore) RevokeSession(_ context.Context, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.sessions, tokenHash(sessionID))
+	h := tokenHash(sessionID)
+	if sess, ok := f.sessions[h]; ok && sess.RevokedAt == nil {
+		now := time.Now()
+		sess.RevokedAt = &now
+		f.sessions[h] = sess
+	}
 	return nil
 }
 
@@ -312,6 +358,15 @@ func (f *fakeStore) ValidateRecovery(_ context.Context, rawToken string) (*Recov
 	return &c, nil
 }
 
+// recoverFailAt injects a failure into RecoverPassword AFTER the password was
+// changed but BEFORE the commit, to prove the transaction rolls back
+// completely (AUTH-02b). 0 = no injection. Values 1..4 mark the stage.
+func (f *fakeStore) recoverFailAt(stage int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recoverFailStage = stage
+}
+
 func (f *fakeStore) RecoverPassword(_ context.Context, accountID int, newPasswordHash string, rawRecoveryToken string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -323,9 +378,58 @@ func (f *fakeStore) RecoverPassword(_ context.Context, accountID int, newPasswor
 	if !ok {
 		return sql.ErrNoRows
 	}
+	// Snapshot for the rollback assertion: the fake mutates a copy and only
+	// writes it back after every step succeeded, which is what a real
+	// transaction commit does.
+	oldHash := acc.PasswordHash
+	oldBan := acc.BanUntil
+	oldSessions := map[string]Session{}
+	for h, s := range f.sessions {
+		oldSessions[h] = s
+	}
+	oldDevices := f.trustedDevices[accountID]
+	eventsBefore := len(f.securityEvents[accountID])
+	fail := func(stage int) error {
+		if f.recoverFailStage == stage {
+			// Undo everything, as tx.Rollback() would.
+			acc.PasswordHash = oldHash
+			acc.BanUntil = oldBan
+			for h, s := range oldSessions {
+				f.sessions[h] = s
+			}
+			f.trustedDevices[accountID] = oldDevices
+			f.securityEvents[accountID] = f.securityEvents[accountID][:eventsBefore]
+			return errors.New("injected recovery failure")
+		}
+		return nil
+	}
 	acc.PasswordHash = newPasswordHash
 	acc.BanUntil = nil
 	now := time.Now()
+	if err := fail(1); err != nil {
+		return err
+	}
+	// stage 1: sessions marked
+	for h, s := range f.sessions {
+		if s.AccountID == accountID && s.RevokedAt == nil {
+			s.RevokedAt = &now
+			f.sessions[h] = s
+		}
+	}
+	if err := fail(2); err != nil {
+		return err
+	}
+	// stage 2: trusted devices removed
+	delete(f.trustedDevices, accountID)
+	if err := fail(3); err != nil {
+		return err
+	}
+	// stage 3: security event written
+	f.recordEventLocked(accountID, eventPasswordReset)
+	if err := fail(4); err != nil {
+		return err
+	}
+	// stage 4: recovery token consumed (last step, as in the SQL)
 	rec.UsedAt = &now
 	return nil
 }
@@ -394,9 +498,11 @@ func (f *fakeStore) ChangePasswordRevokeAll(_ context.Context, accountID int, ne
 		return sql.ErrNoRows
 	}
 	acc.PasswordHash = newPasswordHash
+	now := time.Now()
 	for h, s := range f.sessions {
-		if s.AccountID == accountID {
-			delete(f.sessions, h)
+		if s.AccountID == accountID && s.RevokedAt == nil {
+			s.RevokedAt = &now
+			f.sessions[h] = s
 		}
 	}
 	delete(f.trustedDevices, accountID)
@@ -574,16 +680,18 @@ func (f *fakeStore) CountRecoveryCodes(_ context.Context, accountID int) (int, e
 	return n, nil
 }
 
-// RevokeAllSessions drops every live session of the account.
+// RevokeAllSessions MARKS every live session of the account (migration 014).
 func (f *fakeStore) RevokeAllSessions(_ context.Context, accountID int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.accounts[accountID] == nil {
 		return sql.ErrNoRows
 	}
+	now := time.Now()
 	for h, s := range f.sessions {
-		if s.AccountID == accountID {
-			delete(f.sessions, h)
+		if s.AccountID == accountID && s.RevokedAt == nil {
+			s.RevokedAt = &now
+			f.sessions[h] = s
 		}
 	}
 	return nil

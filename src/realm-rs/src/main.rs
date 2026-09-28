@@ -28,6 +28,7 @@ mod parental;
 mod persist;
 mod protocol;
 mod security;
+mod session_watch;
 mod spool;
 mod world;
 
@@ -77,6 +78,10 @@ async fn async_main() -> Result<(), String> {
     let auth = auth_api::AuthApi::new(&cfg.auth_api)?;
     let shared = world::new_shared();
     let parental = parental::new_shared(auth.clone());
+    // Zentraler Session-Revocation-Poller (docs/Security.md AUTH-02b).
+    // Eigener Task neben dem Elternkontroll-Poller; gleiches Start-/Abort-
+    // Muster, keine Vermischung der fachlichen Semantik.
+    let session_poller = session_watch::start_poller(auth.clone(), shared.clone());
     let groups = group::new_shared_groups(cfg.group.clone());
 
     // Spieler-Persistenz Stufe B: Spool-Runtime (Durable-Batches) inkl.
@@ -398,6 +403,7 @@ async fn async_main() -> Result<(), String> {
     log::info!("shutting down");
     ticker.abort();
     poller.abort();
+    session_poller.abort();
     ws_task.abort();
     player_persister.abort();
     drainer.abort();

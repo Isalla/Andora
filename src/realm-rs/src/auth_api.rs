@@ -98,6 +98,61 @@ pub struct AuthApi {
     client: reqwest::Client,
 }
 
+/// Vier-Wege-Status einer Session, wie ihn der Revocation-Poller
+/// auswertet (`docs/Security.md` AUTH-02b).
+///
+/// `Expired` und `Revoked` sind bewusst unterscheidbar: ein normaler
+/// TTL-Ablauf darf eine bereits hergestellte Realm-Verbindung **nicht**
+/// trennen (AUTH-02a), ein ausdrücklicher Widerruf dagegen schon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    Valid,
+    Expired,
+    Revoked,
+    Missing,
+}
+
+impl SessionState {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "valid" => Some(Self::Valid),
+            "expired" => Some(Self::Expired),
+            "revoked" => Some(Self::Revoked),
+            "missing" => Some(Self::Missing),
+            _ => None,
+        }
+    }
+}
+
+/// Status eines Eintrags, korreliert über die Position im Anfragebatch.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionStatusEntry {
+    /// Der Status laut Auth-API.
+    pub state: SessionState,
+    /// Die autoritative `account_id` (0 bei `Missing`). Weicht sie von der
+    /// Erwartung des Aufrufers ab, gehört das Ergebnis **nicht** zu seiner
+    /// Verbindung.
+    pub account_id: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct BatchStatusResponse {
+    results: Vec<BatchStatusResult>,
+}
+
+#[derive(serde::Deserialize)]
+struct BatchStatusResult {
+    index: usize,
+    status: String,
+    account_id: u32,
+}
+
+/// Ein Eintrag des Anfragebatches.
+pub struct SessionStatusQuery<'a> {
+    pub session_id: &'a str,
+    pub account_id: u32,
+}
+
 impl AuthApi {
     pub fn new(cfg: &AuthApiConfig) -> Result<Self, String> {
         let client = reqwest::Client::builder()
@@ -180,6 +235,53 @@ impl AuthApi {
             serde_json::json!({"session_id": session_id}),
         )
         .await
+    }
+
+    /// Mehrere Session-Status in **einem** Request (ein DB-Lookup auf der
+    /// Auth-API-Seite, kein N+1). Reihenfolge der Antwort entspricht der
+    /// Reihenfolge von `queries`.
+    ///
+    /// Der Aufrufer muss `queries.len() <= MAX_SESSION_STATUS_BATCH` zusichern;
+    /// die Auth-API lehnt größere Batches fail-closed ab.
+    pub async fn session_status_batch(
+        &self,
+        queries: &[SessionStatusQuery<'_>],
+    ) -> Result<Vec<SessionStatusEntry>, AuthApiError> {
+        debug_assert!(!queries.is_empty());
+        debug_assert!(queries.len() <= crate::session_watch::MAX_BATCH);
+        let sessions: Vec<serde_json::Value> = queries
+            .iter()
+            .map(|q| serde_json::json!({"session_id": q.session_id, "account_id": q.account_id}))
+            .collect();
+        let resp: BatchStatusResponse = self
+            .post(
+                "/session/status/batch",
+                serde_json::json!({ "sessions": sessions }),
+            )
+            .await?;
+        // Die Auth-API liefert `index`; wir prüfen es, damit ein verrutschter
+        // Eintrag niemals einer falschen Verbindung zugeordnet wird.
+        let mut out = vec![
+            SessionStatusEntry {
+                state: SessionState::Missing,
+                account_id: 0,
+            };
+            queries.len()
+        ];
+        for r in resp.results {
+            if r.index >= queries.len() {
+                continue;
+            }
+            let Some(state) = SessionState::parse(&r.status) else {
+                // Unbekannter Statuswert: nicht raten, als fehlend behandeln.
+                continue;
+            };
+            out[r.index] = SessionStatusEntry {
+                state,
+                account_id: r.account_id,
+            };
+        }
+        Ok(out)
     }
 
     pub async fn parental_status(

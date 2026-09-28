@@ -92,6 +92,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/session/create", s.handleSessionCreate)
 	mux.HandleFunc("/session/validate", s.handleSessionValidate)
 	mux.HandleFunc("/session/revoke", s.handleSessionRevoke)
+	// Batch-Statusabfrage fuer den Realm-Revocation-Poller (AUTH-02b).
+	// Nutzt dieselbe Berechtigung wie /session/validate.
+	mux.HandleFunc("/session/status/batch", s.handleSessionStatusBatch)
 	mux.HandleFunc("/realms", s.handleRealms)
 	mux.HandleFunc("/handoff/create", s.handleHandoffCreate)
 	mux.HandleFunc("/handoff/validate", s.handleHandoffValidate)

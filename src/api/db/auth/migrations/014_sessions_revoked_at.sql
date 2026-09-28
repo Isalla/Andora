@@ -1,0 +1,32 @@
+-- 014_sessions_revoked_at.sql — auth: unterscheidbarer Session-Widerruf
+--
+-- Fachliche Grundlage: docs/Login_Realm_Architektur.md, Abschnitt
+-- "Session-Lebenszyklus nach dem Einstieg"; docs/Security.md AUTH-02b.
+--
+-- Bisher wurde eine widerrufene Session physisch GELOESCHT. Damit war ein
+-- ausdrücklicher Widerruf von einem regulären Ablauf (expires_at) und von einer
+-- unbekannten Session nicht unterscheidbar: ValidateSession lieferte in allen
+-- drei Fällen `nil`. Ein Realm, der `valid:false` sieht, konnte deshalb nicht
+-- entscheiden, ob er eine aktive Verbindung wegen eines WIDERRUFS schließen
+-- muss oder wegen eines normalen Ablaufs bestehen lassen muss.
+--
+-- revoked_at trennt diese Fälle:
+--   revoked_at IS NULL  -> regulärer Ablauf (expires_at) oder weiterhin gültig
+--   revoked_at NOT NULL -> ausdrücklich widerrufen
+--   Zeile fehlt         -> unbekannt / gelöscht
+--
+-- Bestehende Zeilen erhalten NULL und gelten damit ausdrücklich NICHT als
+-- widerrufen: ein vor dieser Migration erfolgter Widerruf ist als Löschung
+-- nicht mehr rekonstruierbar und wird fachlich als "unbekannt" behandelt, das
+-- der Realm ebenfalls schließt.
+--
+-- Es wird bewusst KEIN physisches Löschen in den Widerrufspfaden mehr
+-- durchgeführt und KEIN Retention-/Cleanup-System eingeführt: die
+-- Ablaufbereinigung ist nicht Teil dieses Auftrags.
+--
+-- Ergänzung der geschlossenen Event-Menge aus 011_security_events.sql um
+-- `password_reset` (neben password_changed). Die Spalte event_type ist
+-- VARCHAR(32) ohne CHECK/ENUM, daher genügt hier die Dokumentation; es ist
+-- kein DDL-Schritt auf security_events nötig.
+ALTER TABLE sessions
+  ADD COLUMN revoked_at TIMESTAMP NULL;

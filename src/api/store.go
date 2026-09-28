@@ -20,7 +20,34 @@ type Session struct {
 	AccountID int
 	CreatedAt time.Time
 	ExpiresAt time.Time
+	// RevokedAt marks an EXPLICIT revocation (session.revoke, password
+	// change, password reset, 2FA reset). nil means "never explicitly
+	// revoked" — an expired session therefore keeps revoked_at = NULL and
+	// stays distinguishable from a revoked one (docs/Security.md AUTH-02b).
+	RevokedAt *time.Time
 }
+
+// SessionStatus is the internal four-way session state. The distinction
+// between Expired and Revoked is what lets a realm keep a connection on
+// normal TTL expiry while closing it on explicit revocation.
+//
+// The EXTERNAL /session/validate response stays backward compatible: only
+// Valid yields valid:true. Only the batch endpoint exposes the distinction.
+type SessionStatus string
+
+const (
+	// SessionValid: row present, revoked_at IS NULL, expires_at in the future.
+	SessionValid SessionStatus = "valid"
+	// SessionExpired: row present, revoked_at IS NULL, expires_at in the past.
+	// Must NOT disconnect an already authenticated realm connection
+	// (docs/Security.md AUTH-02a).
+	SessionExpired SessionStatus = "expired"
+	// SessionRevoked: row present with revoked_at set. Explicit revocation.
+	SessionRevoked SessionStatus = "revoked"
+	// SessionMissing: no row at all — unknown token, or a revocation that
+	// predates migration 014 and therefore deleted the row.
+	SessionMissing SessionStatus = "missing"
+)
 
 // Realm is a persistent Andora world with the operator-facing
 // registration data.
@@ -112,6 +139,12 @@ type AuthStore interface {
 	CreateSession(ctx context.Context, accountID int, ttl time.Duration) (string, Session, error)
 	ValidateSession(ctx context.Context, rawToken string) (*Session, error)
 	RevokeSession(ctx context.Context, sessionID string) error
+	// SessionStatusOf / BatchSessionStatus expose the four-way status
+	// (valid/expired/revoked/missing) needed by a realm revocation poller
+	// (docs/Security.md AUTH-02b). The single /session/validate endpoint
+	// keeps its boolean contract and does not use them.
+	SessionStatusOf(ctx context.Context, rawToken string) (SessionStatus, int, error)
+	BatchSessionStatus(ctx context.Context, tokens []string) ([]SessionStatus, []int, error)
 	CreateHandoff(ctx context.Context, accountID, realmID int, ttl time.Duration) (string, time.Time, error)
 	ValidateHandoff(ctx context.Context, rawToken string) (*Handoff, error)
 	ListRealms(ctx context.Context) ([]Realm, error)
@@ -218,6 +251,7 @@ const (
 	eventTwoFactorDisabled = "two_factor_disabled"
 	eventTwoFactorReset    = "two_factor_reset"
 	eventPasswordChanged   = "password_changed"
+	eventPasswordReset     = "password_reset"
 	eventRecoveryCodeUsed  = "recovery_code_used"
 )
 
@@ -556,29 +590,135 @@ func (s *sQLStore) CreateSession(ctx context.Context, accountID int, ttl time.Du
 
 func (s *sQLStore) ValidateSession(ctx context.Context, rawToken string) (*Session, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT token_hash, account_id, created_at, expires_at
+		`SELECT token_hash, account_id, created_at, expires_at, revoked_at
 		 FROM sessions WHERE token_hash = ?`,
 		tokenHash(rawToken))
 	sess := &Session{}
-	err := row.Scan(&sess.TokenHash, &sess.AccountID, &sess.CreatedAt, &sess.ExpiresAt)
+	var revoked sql.NullTime
+	err := row.Scan(&sess.TokenHash, &sess.AccountID, &sess.CreatedAt, &sess.ExpiresAt, &revoked)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup session: %w", err)
 	}
-	if sess.ExpiresAt.Before(time.Now()) {
+	if revoked.Valid {
+		sess.RevokedAt = &revoked.Time
+	}
+	if sess.RevokedAt != nil || sess.ExpiresAt.Before(time.Now()) {
 		return nil, nil
 	}
 	return sess, nil
 }
 
+// sessionStatusOf classifies a fetched row. A revoked row is checked BEFORE
+// expiry: an explicitly revoked session is reported as revoked even if its
+// expires_at has also passed, because the revocation is the authoritative,
+// intentional signal and the realm must not silently downgrade it to expiry.
+func sessionStatusOf(sess *Session, now time.Time) SessionStatus {
+	if sess.RevokedAt != nil {
+		return SessionRevoked
+	}
+	if sess.ExpiresAt.Before(now) {
+		return SessionExpired
+	}
+	return SessionValid
+}
+
+// SessionStatusOf returns the four-way status of one session WITHOUT logging
+// the token. Used by the batch endpoint; the single /session/validate
+// endpoint keeps its backward-compatible boolean behaviour.
+func (s *sQLStore) SessionStatusOf(ctx context.Context, rawToken string) (SessionStatus, int, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT account_id, expires_at, revoked_at FROM sessions WHERE token_hash = ?`,
+		tokenHash(rawToken))
+	var accountID int
+	var expiresAt time.Time
+	var revoked sql.NullTime
+	switch err := row.Scan(&accountID, &expiresAt, &revoked); {
+	case err == sql.ErrNoRows:
+		return SessionMissing, 0, nil
+	case err != nil:
+		return SessionMissing, 0, fmt.Errorf("lookup session: %w", err)
+	}
+	sess := &Session{AccountID: accountID, ExpiresAt: expiresAt}
+	if revoked.Valid {
+		sess.RevokedAt = &revoked.Time
+	}
+	return sessionStatusOf(sess, time.Now()), accountID, nil
+}
+
+// BatchSessionStatus resolves many sessions in ONE query (single IN clause,
+// no N+1). Input order is preserved: result[i] belongs to tokens[i].
+//
+// Tokens are used exclusively for hashing and the lookup; nothing is logged
+// and no raw token appears in the response. accountIDs[i] is 0 for a missing
+// session and is otherwise the authoritative owner, so a realm can verify
+// that a result really belongs to the connection it asked about.
+func (s *sQLStore) BatchSessionStatus(ctx context.Context, tokens []string) (statuses []SessionStatus, accountIDs []int, err error) {
+	statuses = make([]SessionStatus, len(tokens))
+	accountIDs = make([]int, len(tokens))
+	for i := range tokens {
+		statuses[i] = SessionMissing
+	}
+	if len(tokens) == 0 {
+		return statuses, accountIDs, nil
+	}
+	// One placeholders string, one query, len(tokens) bound parameters.
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(tokens)), ",")
+	args := make([]any, 0, len(tokens))
+	index := make(map[string]int, len(tokens))
+	for i, raw := range tokens {
+		h := tokenHash(raw)
+		index[h] = i
+		args = append(args, h)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT token_hash, account_id, expires_at, revoked_at
+		 FROM sessions WHERE token_hash IN (`+ph+`)`, args...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("batch session lookup: %w", err)
+	}
+	defer rows.Close()
+	now := time.Now()
+	for rows.Next() {
+		var h string
+		var accountID int
+		var expiresAt time.Time
+		var revoked sql.NullTime
+		if err := rows.Scan(&h, &accountID, &expiresAt, &revoked); err != nil {
+			return nil, nil, fmt.Errorf("scan batch session: %w", err)
+		}
+		i, ok := index[h]
+		if !ok {
+			// Unreachable for correct data; ignored deliberately rather than
+			// aborting the whole batch.
+			continue
+		}
+		sess := &Session{AccountID: accountID, ExpiresAt: expiresAt}
+		if revoked.Valid {
+			sess.RevokedAt = &revoked.Time
+		}
+		statuses[i] = sessionStatusOf(sess, now)
+		accountIDs[i] = accountID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("batch session rows: %w", err)
+	}
+	return statuses, accountIDs, nil
+}
+
+// RevokeSession marks EXACTLY this one session as explicitly revoked. The row
+// is kept so that the revocation stays distinguishable from a normal expiry
+// (migration 014, docs/Security.md AUTH-02b). Idempotent: re-revoking keeps
+// the original revoked_at.
 func (s *sQLStore) RevokeSession(ctx context.Context, sessionID string) error {
 	if !isHexToken(sessionID) {
 		return fmt.Errorf("bad session token")
 	}
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE token_hash = ?", tokenHash(sessionID)); err != nil {
+		`UPDATE sessions SET revoked_at = NOW()
+		 WHERE token_hash = ? AND revoked_at IS NULL`, tokenHash(sessionID)); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil
@@ -736,8 +876,15 @@ func (s *sQLStore) ValidateRecovery(ctx context.Context, rawToken string) (*Reco
 	return r, nil
 }
 
-// RecoverPassword sets the new password, clears the ban and consumes
-// the recovery token in one transaction.
+// RecoverPassword sets the new password, clears the ban, consumes the
+// recovery token, revokes every session and every trusted device, and records
+// the security event — ALL of it in one transaction (AUTH-02b).
+//
+// The password change and the session revocation must not be separable: a
+// partial commit would leave a password the previous owner no longer knows
+// next to still-valid logins. Every error path rolls back completely, so the
+// old password stays, sessions and trusted devices stay untouched, and the
+// recovery token remains reusable.
 func (s *sQLStore) RecoverPassword(ctx context.Context, accountID int, newPasswordHash string, rawRecoveryToken string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -748,6 +895,26 @@ func (s *sQLStore) RecoverPassword(ctx context.Context, accountID int, newPasswo
 		newPasswordHash, accountID); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("recover password: %w", err)
+	}
+	// Same full security effect as ChangePasswordRevokeAll: sessions are
+	// MARKED (not deleted, migration 014) so an explicit revocation stays
+	// distinguishable from a normal expiry.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET revoked_at = NOW()
+		 WHERE account_id = ? AND revoked_at IS NULL`, accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("recover password: revoke sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM trusted_devices WHERE account_id = ?", accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("recover password: revoke trusted devices: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO security_events (event_type, account_id, created_at) VALUES (?, ?, NOW())",
+		eventPasswordReset, accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("record recovery event: %w", err)
 	}
 	res, err := tx.ExecContext(ctx,
 		`UPDATE recoveries SET used_at = NOW() WHERE token_hash = ? AND used_at IS NULL`,
@@ -827,7 +994,8 @@ func (s *sQLStore) ChangePasswordRevokeAll(ctx context.Context, accountID int, n
 		return fmt.Errorf("set password: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM sessions WHERE account_id = ?", accountID); err != nil {
+		`UPDATE sessions SET revoked_at = NOW()
+		 WHERE account_id = ? AND revoked_at IS NULL`, accountID); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("revoke sessions: %w", err)
 	}
@@ -860,10 +1028,12 @@ func (s *sQLStore) CountTrustedDevices(ctx context.Context, accountID int) (int,
 	return n, nil
 }
 
-// RevokeAllSessions drops every live session of the account.
+// RevokeAllSessions marks every live session of the account as explicitly
+// revoked (rows are kept, see migration 014).
 func (s *sQLStore) RevokeAllSessions(ctx context.Context, accountID int) error {
 	if _, err := s.db.ExecContext(ctx,
-		"DELETE FROM sessions WHERE account_id = ?", accountID); err != nil {
+		`UPDATE sessions SET revoked_at = NOW()
+		 WHERE account_id = ? AND revoked_at IS NULL`, accountID); err != nil {
 		return fmt.Errorf("revoke all sessions: %w", err)
 	}
 	return nil

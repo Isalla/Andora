@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -416,7 +417,8 @@ type sessionRevokeRequest struct {
 	SessionID string `json:"session_id"`
 }
 
-// handleSessionRevoke deletes a session token.
+// handleSessionRevoke marks a session as explicitly revoked. The row is kept
+// (migration 014) so the revocation stays distinguishable from a normal expiry.
 func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permSessionRevoke)
 	if !ok {
@@ -436,6 +438,127 @@ func (s *Server) handleSessionRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
+}
+
+// --- session status batch (realm revocation poller, AUTH-02b) ---
+
+// MaxSessionStatusBatch bounds one batch request. The realm poller splits
+// larger sets; anything above this is rejected fail-closed instead of being
+// silently truncated, so a realm can never act on a partial answer.
+const MaxSessionStatusBatch = 250
+
+// maxSessionStatusBatchBytes bounds THIS endpoint's request body, derived from
+// MaxSessionStatusBatch and the accepted token format:
+//
+//	session_id   64 hex chars (isHexToken)          ->  64 bytes
+//	per-entry JSON envelope, measured 106 B (int32 account_id)
+//	                                           ->  128 bytes reserved
+//	250 * 128                                    = 32000
+//	+ slack for the "sessions" wrapper           =  1024
+//	                                            = 33024  (32.25 KiB)
+//
+// 32 KiB = 32768 is therefore SLIGHTLY BELOW that arithmetic upper bound, a
+// deliberate rounding down. It is nevertheless safe because the measured
+// canonical payload is well under it: 26514 bytes at int32 account_id and
+// 28764 bytes (28.09 KiB) at the int64 maximum — about 12% headroom. That is
+// proven by TestSessionStatusBatchRejectsOversizeBody, which shows a full
+// 250-entry batch is still accepted with all 250 results.
+//
+// The limit stays BELOW the server-wide maxBodyBytes (64 KiB, enforced in
+// authorize() before any decoder); that server-wide limit is the outer backstop
+// and is unchanged.
+//
+// Note: authorize() uses io.LimitReader, which TRUNCATES instead of
+// rejecting. A chunked request (ContentLength == -1) therefore cannot be
+// pre-checked and would surface as "invalid JSON body" (400) rather than 413.
+// No partial processing happens either way, because the decoder sees the whole
+// request as one value.
+const maxSessionStatusBatchBytes int64 = 32 * 1024
+
+type sessionStatusBatchRequest struct {
+	Sessions []sessionStatusBatchItem `json:"sessions"`
+}
+
+type sessionStatusBatchItem struct {
+	// SessionID is the opaque login token. It is used exclusively for hashing
+	// and the lookup, never logged, and never echoed back.
+	SessionID string `json:"session_id"`
+	// AccountID is the caller's expectation. It is verified so a result can
+	// never be attributed to the wrong account's connection.
+	AccountID int `json:"account_id"`
+}
+
+type sessionStatusBatchResponse struct {
+	Results []sessionStatusBatchResult `json:"results"`
+}
+
+type sessionStatusBatchResult struct {
+	// Index is the position in the request, so correlation needs no secret.
+	Index int `json:"index"`
+	// Status is one of valid | expired | revoked | missing.
+	Status SessionStatus `json:"status"`
+	// AccountID is the authoritative owner (0 for missing). A realm must
+	// treat a value different from its own expectation as "not my session".
+	AccountID int `json:"account_id"`
+}
+
+// handleSessionStatusBatch resolves many sessions in one DB roundtrip and
+// exposes the four-way status a realm needs to tell an explicit revocation
+// apart from a normal TTL expiry (docs/Security.md AUTH-02a / AUTH-02b).
+//
+// Reuses permSessionValidate — no new permission. Tokens never appear in the
+// response, and nothing about them is logged.
+func (s *Server) handleSessionStatusBatch(w http.ResponseWriter, r *http.Request) {
+	// Größenprüfung VOR authorize(): bei deklarierter Überschreitung wird der
+	// Body gar nicht erst gelesen, es wird also nichts gebunden und nichts
+	// teilverarbeitet. Der Server-weite maxBodyBytes bleibt die äußere Schranke.
+	if r.ContentLength > maxSessionStatusBatchBytes {
+		writeError(w, http.StatusRequestEntityTooLarge,
+			"request body exceeds the session status batch limit")
+		return
+	}
+	body, _, ok := s.authorize(w, r, permSessionValidate)
+	if !ok {
+		return
+	}
+	var req sessionStatusBatchRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if len(req.Sessions) == 0 {
+		writeError(w, http.StatusBadRequest, "sessions must not be empty")
+		return
+	}
+	if len(req.Sessions) > MaxSessionStatusBatch {
+		// Fail closed: a truncated answer must never be interpreted as
+		// "all still valid".
+		writeError(w, http.StatusRequestEntityTooLarge,
+			"too many sessions, max "+strconv.Itoa(MaxSessionStatusBatch))
+		return
+	}
+	tokens := make([]string, len(req.Sessions))
+	for i, it := range req.Sessions {
+		if !isHexToken(it.SessionID) {
+			writeError(w, http.StatusBadRequest, "session_id must be a 64-char hex token")
+			return
+		}
+		tokens[i] = it.SessionID
+	}
+	statuses, accountIDs, err := s.store.BatchSessionStatus(context.Background(), tokens)
+	if err != nil {
+		dbError(w, err, "session status batch failed")
+		return
+	}
+	out := sessionStatusBatchResponse{Results: make([]sessionStatusBatchResult, len(statuses))}
+	for i := range statuses {
+		out.Results[i] = sessionStatusBatchResult{
+			Index:     i,
+			Status:    statuses[i],
+			AccountID: accountIDs[i],
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // --- realms ---
