@@ -170,7 +170,13 @@ Die oben festgelegte Sollsemantik ist umgesetzt. Belege aus dem Repository:
 
 **Datenminimierung.** Tokens werden ausschließlich zum Hashen und für den Lookup verwendet, erscheinen in keiner Antwort und in keinem Log. Die von der Anforderung mitgelieferte `account_id` wird vom Server nicht für die Abfrage verwendet; die Antwort nennt stets die der Datenbank.
 
-**Noch nicht umgesetzt: Retention.** Abgelaufene **und** nun auch widerrufene Zeilen bleiben erhalten; ein Cleanup-Mechanismus existiert nicht. Das ist als eigener offener Punkt `P-33` in `docs/Security.md` geführt. Dieser Abschnitt stellt **keine** Retention als vorhanden dar.
+**Retention: ausdrücklich nicht umgesetzt, und nicht einheitlich entscheidbar.** Abgelaufene **und** auch widerrufene Zeilen bleiben erhalten; ein Cleanup-Mechanismus existiert nicht. Der Punkt ist als `BESTÄTIGT` unter `P-33` in `docs/Security.md` geführt, Priorität `GERING`. Festgehalten ist dort:
+
+* **Widerrufene Zeilen sind technisch grundsätzlich bereinigbar.** Nach ihrer Löschung liefert der Status `missing`, was für aktive Verbindungen fail-closed ist und dieselbe Trennwirkung wie `revoked` hat. Auth-API-Ausfälle ändern das nicht: nach Wiedererreichbarkeit führt `missing` weiterhin zur Trennung. **Offen** ist allein die **Audit-Semantik** — `/session/revoke` erzeugt keinen eigenen `security_events`-Eintrag, sodass `revoked_at` heute der einzige persistente Nachweis eines Einzelwiderrufs ist. Solange das nicht entschieden ist, wird **keine** Löschfrist, **kein** Batchumfang und **kein** Cleanup-Takt festgelegt.
+* **Abgelaufene, nicht widerrufene Zeilen dürfen nicht automatisch gelöscht werden.** Nach einer Löschung lieferte der Batch `missing`, und der Realm behandelt `missing` wie einen Widerruf — das würde eine nach `AUTH-02a` weiterhin zulässige Verbindung schließen. Eine Bereinigung ist erst zulässig, wenn zuverlässig feststeht, dass keine aktive Realm-Verbindung die Session mehr verwendet; dieser Nachweis ist technisch offen und wird hier **nicht** vorweggenommen.
+* **Monitoring fehlt vollständig** und ist Voraussetzung einer späteren Entscheidung: weder Zeilenzahlen nach Status noch Tabellen-/Indexgröße noch Wachstumsrate noch Laufzeit der Statusabfrage werden erhoben.
+
+Dieser Abschnitt stellt **keine** Retention als vorhanden dar und legt **keine** Frist, Batchgröße, Ausführungsfrequenz oder gesetzliche Aufbewahrungsdauer fest.
 
 ### Ausfallverhalten der Auth-API
 

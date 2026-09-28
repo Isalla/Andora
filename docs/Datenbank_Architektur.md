@@ -824,7 +824,15 @@ Das ist bewusst so gewählt, weil nur so ein ausdrücklicher Widerruf von einem 
 * Ein **Retention- oder Cleanup-Mechanismus existiert nicht.** Es gibt keinen Hintergrundtask und keinen geplanten Löschlauf.
 * Der Index `idx_sessions_expires` auf `expires_at` besteht, wird aber von **keiner** Anweisung für eine Bereinigung verwendet.
 
-Diese Lücke ist als eigener offener Punkt `P-33` in `docs/Security.md` geführt. Bis zu ihrer Entscheidung ist dieses Dokument **keine** Beschreibung einer vorhandenen Retention.
+Diese Lücke ist als `BESTÄTIGT` unter `P-33` in `docs/Security.md` geführt, Priorität `GERING`. Festgehalten ist dort:
+
+* **Widerrufene Zeilen sind technisch grundsätzlich bereinigbar.** Nach ihrer Löschung liefert der Status `missing`, was für aktive Realm-Verbindungen fail-closed ist und dieselbe Trennwirkung wie `revoked` hat. **Offen** bleibt die Audit-Semantik, weil `/session/revoke` keinen eigenen Eintrag in `security_events` erzeugt und `revoked_at` damit heute der einzige persistente Nachweis eines Einzelwiderrufs ist.
+* **Abgelaufene, nicht widerrufene Zeilen dürfen nicht automatisch gelöscht werden.** Nach einer Löschung lieferte der Batch `missing`; der Realm behandelt `missing` wie einen Widerruf und würde damit eine nach `AUTH-02a` weiterhin zulässige Verbindung schließen. Erforderlich wäre ein zuverlässiger Nachweis, dass keine aktive Realm-Verbindung die Session mehr verwendet — dieser ist technisch offen.
+* **Monitoring fehlt** (weder Zeilenzahlen nach Status noch Tabellen-/Indexgröße noch Wachstumsrate noch Laufzeit der Statusabfrage).
+
+Für einen etwaigen späteren Löschlauf ist `idx_sessions_expires` für eine Bedingung auf `expires_at` verwendbar; ein **Index auf `revoked_at` fehlt**. Ein unbeschränktes Löschen ist wegen Sperren und Undo/Redo zu vermeiden, daher wären **begrenzte Chargen** angezeigt. **Frist, Batchgröße und Intervall sind bewusst nicht festgelegt**; die einzige im Repository ableitbare Betriebsgröße (`src/realm-rs/src/spool.rs`, 30 Tage) betrifft den **Spool** und ist keine Ableitung für Sessions. Eine im Audit berechnete Größenordnung ist eine **illustrative Modellrechnung** ohne Messung und ohne belastbare InnoDB-Zeilengröße; aus ihr folgt **keine** Frist und **keine** Priorität.
+
+Bis zu einer späteren Entscheidung ist dieses Dokument **keine** Beschreibung einer vorhandenen Retention.
 
 Bereits angewendete Migrationen werden nicht nachträglich umnummeriert oder verändert.
 
