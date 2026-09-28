@@ -412,17 +412,48 @@ async fn async_main() -> Result<(), String> {
     if !online.is_empty() {
         log::info!("Shutdown-Flush für {} Spieler", online.len());
     }
-    for id in &online {
-        if let Err(e) = persist.persist_player(&shared, id, true).await {
-            log::error!("shutdown persist {id}: {e}");
-        }
-        let logout_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if let Err(e) = db::write_logout_at(&pool, id, logout_at).await {
-            log::error!("shutdown logout_at {id}: {e}");
-        }
+    // Begrenzte Retry-Semantik für den direkten `logout_at`-Write
+    // (docs/Player_Persistenz.md §30; docs/Security.md `P-27`): die Phase
+    // besitzt ein **globales** Budget und erzeugt genau eine Abschlusszusammen-
+    // fassung. Der kontrollierte Abschluss (Drain, `pool.close()`, `Ok(())`)
+    // bleibt unverändert.
+    let logout_wait = |d: std::time::Duration| {
+        Box::pin(async move {
+            tokio::time::sleep(d).await;
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    };
+    let make_logout_write = |id: &str| -> crate::net::DisconnectLogout {
+        let pool = pool.clone();
+        let pid = id.to_string();
+        Box::new(move |ts: i64| {
+            let pool = pool.clone();
+            let pid = pid.clone();
+            Box::pin(async move { db::write_logout_at(&pool, &pid, ts).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        })
+    };
+    let logout_report = crate::net::shutdown_logout_phase(
+        &persist,
+        &shared,
+        &online,
+        crate::net::LOGOUT_RETRY_PLAN,
+        crate::net::SHUTDOWN_LOGOUT_BUDGET,
+        &logout_wait,
+        &make_logout_write,
+    )
+    .await;
+    if logout_report.failed > 0 || logout_report.skipped > 0 {
+        // Der Abschluss muss erkennen lassen, dass nicht vollständig
+        // persistiert werden konnte. Ausgegeben werden ausschließlich Zähler,
+        // keine Zeichenketten aus der Datenbank.
+        persist.set_status(crate::spool::PersistStatus::Degraded);
+        log::error!(
+            "shutdown_logout_incomplete retried={} failed={} skipped={} budget_exhausted={}",
+            logout_report.retried,
+            logout_report.failed,
+            logout_report.skipped,
+            logout_report.budget_exhausted
+        );
     }
     if let Err(e) = persist.drain_one(&pool).await {
         log::error!("final drain: {e}");
