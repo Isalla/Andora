@@ -128,6 +128,33 @@ login_status
 Er benötigt keine Passwort-Hashes, verschlüsselten E-Mail-Daten,
 Lookup-Hashes oder Verschlüsselungsschlüssel.
 
+### Session-Widerruf (ausdrücklich, VERBINDLICH)
+
+Die Auth-API verwaltet die Session. Ein **ausdrücklicher Widerruf** unterscheidet sich fachlich vom bloßen Ablaufzeitpunkt der Session (das Lebenszyklusverhalten für den Realm ist in `Login_Realm_Architektur.md`, Abschnitt „Session-Lebenszyklus nach dem Einstieg", verbindlich festgelegt).
+
+VERBINDLICH gilt:
+
+* Ein ausdrücklicher Widerruf einer Session muss **alle** über diese Session bestehenden Realm-Verbindungen beenden, wenn der Realm erreichbar ist; die Frist beträgt **spätestens 30 Sekunden** nach dem Widerruf.
+* Ein Widerruf **aller** Sessions eines Accounts muss **alle** aktiven Realm-Verbindungen dieses Accounts beenden.
+* **Kein** Widerruf und **kein** Ablauf darf **anderweitig** wirken, insbesondere nicht über Bann, Sperre oder zusätzliche Sanktionen. Der Widerruf beendet ausschließlich die zugehörigen Verbindungen.
+
+Anlassfälle, für die die API einen Widerruf auslösen muss:
+
+* **expliziter Widerruf einer einzelnen Session**;
+* **Passwortänderung** — der bisherige Passwortbesitz entfällt, alle zugehörigen Anmeldungen sind zu beenden;
+* **Passwort-Reset beziehungsweise Account-Recovery** — der Passwortbesitz wurde ohne Kenntnis des bisherigen Passwortinhabers ersetzt; alle zugehörigen Anmeldungen sind ebenfalls zu beenden;
+* **2FA-Reset** — die zweite Authentifizierungsstufe wurde zurückgesetzt, alle zugehörigen Anmeldungen sind zu beenden;
+* **weitere administrative Session-Widerrufe**, soweit die API solche anbietet.
+
+**IST-ABWEICHUNG (dokumentiert, nicht umgesetzt):** Der aktuelle Code beendet Sessions bei Passwortänderung und beim 2FA-Reset, **nicht** jedoch beim Passwort-Reset/Recovery. Der Recovery-Pfad setzt das Passwort zurück, ohne die zugehörigen Sessions zu widerrufen. Das widerspricht der oben festgelegten Sollsemantik und ist als Umsetzungsdefizit in `docs/Security.md` unter `AUTH-02b` geführt. Dieser Abschnitt beschreibt die **Soll**-Semantik; er behauptet nicht, dass der heutige Code sie bereits erfüllt.
+
+### Ausfallverhalten der Auth-API
+
+* Neue Logins bleiben bei Ausfall der Auth-API **fail-closed**; ein Einstieg ohne erfolgreiche Session-Prüfung erfolgt nicht.
+* Ein Erreichbarkeitsproblem der Auth-API ist **kein** Sicherheitsereignis und beendet **keine** bereits laufenden Realm-Verbindung.
+* Während eines Ausfalls kann ein ausdrücklicher Widerruf im Realm vorübergehend nicht wirksam werden. Das ist ein bewusst akzeptiertes Restrisiko zugunsten der Verfügbarkeit laufender Verbindungen und keine Revocation-Garantie.
+* Fehler und Wiederherstellung werden ohne Session-ID, Token und Roh-IP protokolliert (siehe Abschnitt 12, Datenminimierung).
+
 ## 8. Login-/Realm-Server
 
 Login- und Realmserver besitzen keinen direkten Zugriff auf `auth`.

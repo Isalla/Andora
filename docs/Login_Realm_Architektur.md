@@ -968,6 +968,51 @@ Ein Handoff-Token ist beispielsweise nur für den Übergang zu einem bestimmten 
 
 ---
 
+## Session-Lebenszyklus nach dem Einstieg (VERBINDLICH)
+
+Dieser Abschnitt legt fest, was das **Auslaufen** und was der **ausdrückliche Widerruf** einer Session für eine bereits hergestellte Realm-Verbindung bedeutet. Beide Fälle werden getrennt geregelt und sind **nicht** gleichzusetzen. Die Aufgabenübersicht führt beide Punkte als `AUTH-02a` (regulärer Ablauf) und `AUTH-02b` (ausdrücklicher Widerruf); die technische Umsetzung von `AUTH-02b` ist offen.
+
+Grundbegriff: *Session* ist das von der Auth-API ausgestellte Login-Token mit Ablaufzeitpunkt. *Realm-Verbindung* ist eine TCP-Verbindung, deren Einstieg (HELLO) die Session erfolgreich geprüft hat. Beide werden im Folgenden getrennt behandelt.
+
+### Regulärer Ablauf (TTL)
+
+VERBINDLICH gilt:
+
+* Der **normale Ablaufzeitpunkt** einer Session verhindert **neue** Realm-Einstiege. Nach Ablauf weist der Realm den Einstieg fail-closed ab.
+* Eine bereits erfolgreich authentifizierte und hergestellte Realm-Verbindung wird durch den normalen Ablauf **allein nicht automatisch getrennt**.
+* Die bestehende Verbindung bleibt gültig bis zu einem der folgenden Ereignisse, die von sich aus unabhängig vom Ablaufzeitpunkt eintreten: normaler Disconnect, Takeover durch einen gültigen neuen Login, serverseitiger Logout aus einem anderen Grund, Prozessende oder ein ausdrücklich geregeltes Sicherheitsereignis nach der Regel unten.
+* Der normale Ablauf ist **kein ausdrücklicher Widerruf**. Er ist ein Ablauf, keine Widerrufshandlung.
+
+Daraus folgt **kein** technischer Auftrag: Die bestehende Umsetzung erfüllt diese Regel, weil sie eine Session ohnehin nur beim Einstieg prüft. Ein periodischer Ablauf-Kick ist **nicht** gefordert und wird nicht verlangt.
+
+### Ausdrücklicher Widerruf
+
+VERBINDLICH gilt:
+
+* Ein **ausdrücklicher Session-Widerruf muss eine aktive Realm-Verbindung beenden**, wenn diese genau die widerrufene Session verwendet. Der Widerruf ist der ausdrückliche Ausdruck, dass der Betreiber diese Anmeldung beenden will; ein Verstreichenlassen des Zeitablaufs genügt dafür nicht.
+* Ein Widerruf **aller** Sessions eines Accounts muss **alle** aktiven Realm-Verbindungen dieses Accounts beenden.
+* Bei **erreichbarer** Auth-API muss ein solcher Widerruf **spätestens innerhalb von 30 Sekunden** im Realm wirksam werden. Diese Frist ist fachlich verbindlich; **wie** sie technisch erreicht wird (Prüfintervall, Ereignis, Lease oder anderer Mechanismus), ist **nicht** festgelegt und wird erst im Coding-Plan entschieden.
+* Die Trennung erfolgt **kontrolliert** über den bereits bestehenden Connection-Close-/Cleanup-Pfad des Realms (derselbe Pfad, den auch HELLO-Ablehnung und Takeover benutzen). Es wird kein eigener Abbruchweg eingeführt.
+* Ein Widerruf ist **kein** Bann und **keine** zusätzliche Sanktion. Er beendet ausschließlich die zur Session gehörenden Verbindungen und sonst nichts.
+* Der Einstieg mit einer bereits widerrufenen Session bleibt **fail-closed** abgelehnt; das ist bereits die bestehende Regel aus Abschnitt 6 und wird durch diese Festlegung nicht geändert.
+
+### Verhalten bei Ausfall der Auth-API
+
+VERBINDLICH gilt für die Verfügbarkeit:
+
+* **Neue Logins** bleiben bei Ausfall der Auth-API **fail-closed**. Ein Einstieg darf ohne erfolgreiche Session-Prüfung nicht erfolgen.
+* **Bereits aktive Realm-Verbindungen** werden **allein wegen eines Transportfehlers** der Auth-API **nicht pauschal getrennt**. Ein Erreichbarkeitsproblem ist kein Sicherheitsereignis.
+* Während des Ausfalls kann ein **neuer** Widerruf im Realm **vorübergehend nicht erkannt** werden. Die 30-Sekunden-Frist aus dem vorigen Abschnitt gilt nur bei **erreichbarer** Auth-API.
+* Nach **Wiedererreichbarkeit** muss der Widerruf bei der **nächsten erfolgreichen Prüfung** wirksam werden. Eine rückwirkende oder sofortige Wirkung während des Ausfalls wird **nicht** zugesichert.
+* Dieses Verhalten ist ein **bewusst akzeptiertes Restrisiko** und darf **nicht** als Revocation-Garantie während eines Ausfalls beschrieben werden. Es ist ausdrücklich eine Entscheidung zugunsten der Verfügbarkeit bereits laufender Verbindungen.
+* Fehler und die Wiederherstellung werden ohne Session-ID, Token und Roh-IP protokolliert (siehe Abschnitt 21, Abschnitt „Schutz sensibler Daten").
+
+### Abgrenzung zur Elternkontrolle
+
+Der regelmäßige Poller der Elternkontrolle ist **kein** allgemeiner Session-Widerruf-Mechanismus. Dass er heute eine Session mitübermittelt und eine nicht mehr gültige Session erkennt, macht ihn nicht zum Revocation-Kanal; die Elternkontrollsemantik in `parental_control.md` bleibt davon unberührt. Ob vorhandene Infrastruktur für die Umsetzung der 30-Sekunden-Regel wiederverwendet werden kann, ist **erst im Coding-Plan** zu prüfen und wird hier nicht entschieden.
+
+---
+
 ## RAM-Dump-Szenario
 
 Andora geht davon aus, dass ein Angreifer bei vollständiger Kontrolle über einen laufenden Server möglicherweise auch dessen Arbeitsspeicher auslesen kann.
