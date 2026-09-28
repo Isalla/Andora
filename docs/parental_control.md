@@ -474,3 +474,43 @@ Die Elternkontrolle darf nicht davon abhängen, wie technisch versiert Eltern od
 Der Client stellt die Bedienoberfläche bereit.
 
 Die verbindliche Entscheidung und Durchsetzung erfolgt auf dem Server.
+
+## Zwei getrennte Historien: `security_events` und `parental_notifications`
+
+Die Elternkontrolle schreibt an zwei **getrennte** Ziele, die **nicht**
+verwechselt werden dürfen. Festgehalten als `P-35` (GERING) in
+`docs/Security.md`.
+
+| | `security_events` | `parental_notifications` |
+|---|---|---|
+| Zweck | Security-Event-Verlauf der Auth-DB | Benachrichtigungs- und Quittungsweg |
+| Betroffene Ereignisse | `parental_setup`, `parental_settings`, `parental_removed`, `parental_pin_changed` | `parental_email_changed`, `parental_email_removed`, `parental_period`, `parental_exception` |
+| Verbindlichkeit | **informativ und best-effort** | **informativ und best-effort** |
+
+**Beide Pfade sind best-effort.** Ihr Fehlschlag darf eine bereits
+erfolgreiche Zustandsänderung **nicht zurückrollen** und dem Benutzer
+**nicht als fehlgeschlagene Zustandsänderung** dargestellt werden: Wird die
+Elternkontrolle entfernt, ist sie entfernt — unabhängig davon, ob das
+anschließende Ereignis oder die Benachrichtigung geschrieben werden konnte.
+
+**Der autoritative Zustand bleibt `parental_controls`.** Ein verlorenes
+Ereignis verändert diesen Zustand **nicht**. Die Elternkontrolle wird nicht
+dadurch aufgehoben, undeutlich oder umgangen, dass ihr Verlaufseintrag
+fehlt. Betroffen sind **Nachvollziehbarkeit und Historie**, nicht die
+Durchsetzung.
+
+**Der Verlust darf nicht vollständig unsichtbar bleiben.** Fehler beim
+Schreiben dieser Historien- und Benachrichtigungspfade werden
+**strukturiert protokolliert**. Die Protokollierung verändert das
+fachliche Ergebnis **nicht** nachträglich — sie macht lediglich sichtbar,
+dass eine Zustandsänderung ohne ihren Verlaufseintrag stattgefunden hat.
+
+**Keine sensiblen Inhalte in Protokollen.** Protokolliert werden dürfen
+weder die PIN, noch die E-Mail-Adresse, noch Token, Session-ID, Roh-IP oder
+andere sensible Inhalte.
+
+**Abgrenzung:** Diese Semantik ist bewusst **getrennt** von der Atomarität
+der Auth-Sicherheitsereignisse (`P-34`). Hier wird **keine** Atomarität
+gefordert, weil hier kein Sicherheitszustand ohne Nachweis entsteht; dort
+wird sie gefordert, weil ein Zustandswechsel sonst ohne Nachweis bliebe.
+Diese Regelung wird **nicht** an den `P-34`-Transaktionsumbau gekoppelt.

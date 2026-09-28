@@ -415,3 +415,91 @@ Datenbankzugriff.
 
 > Datenminimierung gilt für Datenbanken, Netzwerkverkehr, Logs und
 > Arbeitsspeicher.
+
+## 18. Fachliche Atomarität der Security-Events
+
+Dieser Abschnitt legt fest, **welche** sicherheitsrelevanten Vorgänge ein
+verbindliches Auditereignis in `security_events` erzeugen und **wie** dieses
+mit dem Sicherheitszustand verbunden sein muss. Festgehalten als `P-34`
+(HOCH) in `docs/Security.md`.
+
+**Geltungsbereich:** Die Regeln gelten für **sicherheitsrelevante
+Zustandswechsel in der lokalen Auth-DB**, nicht für jeden Vorgang, der eine
+Session betrifft. Der freiwillige Einzel-Logout über `/session/revoke` ist
+**ausdrücklich nicht** eingeschlossen; er bleibt nach `P-33` ein normaler
+Session-Lebenszyklusvorgang **ohne** dauerhaftes Ereignis. Die genaue
+Abgrenzung steht am Ende dieses Abschnitts.
+
+**Verbindliche Sollsemantik:**
+
+1. Ein **sicherheitsrelevanter lokaler Auth-DB-Zustandswechsel und sein
+   erforderliches `security_events`-Ereignis bilden eine fachlich atomare
+   Einheit.** Schlägt das Event-Schreiben fehl, muss die zugehörige
+   Zustandsänderung zurückgerollt werden.
+2. Dem Aufrufer darf **nur dann** ein Fehler gemeldet werden, wenn der
+   Sicherheitszustand ebenfalls nicht committet wurde. Ein bereits
+   vollzogener Zustandswechsel darf **nicht** nachträglich als vollständig
+   fehlgeschlagen dargestellt werden — insbesondere darf ein verbrauchter
+   Single-Use-Code nicht als fehlgeschlagene Anmeldung mit unverbrauchtem
+   Code erscheinen.
+3. Mehrteilige Vorgänge wie der **2FA-Reset** (neues Secret, neue
+   Recovery-Codes, 2FA aktivieren, Sessions widerrufen, Trusted Devices
+   widerrufen) sind **ein fachlicher Vorgang** und müssen entweder
+   vollständig wirksam oder vollständig unwirksam sein. Es darf kein
+   Zwischenzustand entstehen, in dem 2FA aktiviert ist, die Sessions aber
+   nicht widerrufen wurden.
+4. Das Event gehört dem **fachlichen Verbund**. **Generische Hilfsmethoden
+   bestimmen keine eigenen fachlichen Eventtypen.** `RevokeAllSessions`
+   und `RevokeAllTrustedDevices` werden von mehreren fachlichen Vorgängen
+   genutzt und dürfen deshalb **nicht** selbstständig einen Anlass erfinden;
+   der Anlass wird vom aufrufenden fachlichen Vorgang festgelegt und
+   innerhalb dessen Transaktion geschrieben.
+5. Vorgänge, die **außerhalb** der lokalen Auth-DB wirken, sind davon
+   getrennt zu behandeln und hier **nicht** festgelegt.
+6. **Keine sensiblen Eventfelder:** Das Schema von `security_events` bleibt
+   unverändert. Es werden **keine** neuen Spalten, **kein** Token, **kein**
+   Token-Hash, **keine** Session-ID, **keine** Roh-IP und **keine** weitere
+   personenbezogene Information ergänzt.
+7. Eventfehler werden **strukturiert protokolliert**, ohne Token,
+   Session-ID, Recovery-Code, TOTP-Secret, Roh-IP oder sensible Daten.
+
+**Bereits regelkonform** und damit Referenz für die Sollsemantik:
+Passwortänderung, Passwort-Reset/Recovery und die Bestätigung eines Trusted
+Device schreiben Zustand und Ereignis bereits in derselben Transaktion.
+
+### Abgrenzung: zwei verschiedene Arten von Session-Widerruf
+
+**1. Sicherheitsrelevanter accountweiter Widerruf — gehört in den
+fachlichen Verbund.** Ein accountweiter Session-Widerruf ist Bestandteil
+eines **sicherheitsrelevanten Gesamtvorgangs** und wird zusammen mit
+Zustandsänderung und Ereignis **innerhalb derselben fachlichen Einheit**
+behandelt. Das zugehörige Ereignis beschreibt dabei **den fachlichen
+Gesamtvorgang**, nicht den Widerruf als solchen:
+
+* **Passwortänderung** — Widerruf und `password_changed` bereits atomar.
+* **Passwort-Reset/Recovery** — Widerruf und `password_reset` bereits atomar.
+* **2FA-Reset** — Widerruf ist Teil des Reset-Vorgangs; derzeit **nicht**
+  atomar, siehe `P-34`.
+* **2FA-Deaktivierung** — widerruft im bestehenden Pfad **keine Sessions**
+  (`src/api/twofactor.go:191-193`: „sessions remain, per the revocation
+  policy“), sondern nur Trusted Devices. Sie ist deshalb hier **nicht** als
+  Session-Widerrufsvorgang aufgeführt; für die Deaktivierung selbst gilt
+  Regel 1 mit `two_factor_disabled`.
+
+Generische Hilfsmethoden wie `RevokeAllSessions` bestimmen **keinen** eigenen
+Anlass und **keinen** eigenen Eventtyp. **Ein eigener Eventtyp für einen
+Session-Widerruf wird nicht gefordert.**
+
+**2. Freiwilliger Einzel-Logout — ausdrücklich nicht Gegenstand.** Aus dem
+aktuellen Code gilt unverändert: `/session/revoke` wird **ausschließlich** vom
+freiwilligen Logout des Login-Dienstes genutzt; der Besitz des präsentierten
+Tokens autorisiert ihn. Dafür ist nach `P-33` **kein** dauerhafter
+`security_events`-Eintrag erforderlich. Der freiwillige Logout ist **kein**
+Bestandteil von `P-34`, und `P-34` verlangt für ihn **weder** ein Ereignis
+**noch** einen Eventtyp `session_revoked`. `P-34` fordert damit **nicht**, dass
+jeder Session-Widerruf ein atomar zu protokollierendes Sicherheitsereignis
+wird: Erforderlich sind nur die Sicherheitsvorgänge unter Ziffer 1.
+
+**Weitere Abgrenzungen:** Die best-effort-Parental-Ereignisse sind unter
+`P-35` getrennt geregelt. Dieser Abschnitt legt **keine** Go-Funktion,
+**keine** SQL-Transaktion und **keine** neue API fest.
