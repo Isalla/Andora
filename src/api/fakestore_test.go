@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -29,10 +30,13 @@ type fakeStore struct {
 	trustedDevices map[int]map[string]TrustedDevice
 	// recoverFailStage injects a RecoverPassword failure (0 = off).
 	recoverFailStage int
-	recoveryCodes    map[int]map[string]*RecoveryCode
-	securityEvents   map[int][]SecurityEvent
-	nextDeviceID     int
-	nextEventID      int
+	// opFailStage injects a failure at a numbered business step of one
+	// composite 2FA operation (0/absent = off); see failStepLocked.
+	opFailStage    map[string]int
+	recoveryCodes  map[int]map[string]*RecoveryCode
+	securityEvents map[int][]SecurityEvent
+	nextDeviceID   int
+	nextEventID    int
 	// Parental control (mirrors the parental_* tables).
 	parental      map[int]*ParentalControls
 	periods       map[int][]*ParentalPeriod
@@ -61,6 +65,7 @@ func newFakeStore() *fakeStore {
 		securityEvents: map[int][]SecurityEvent{},
 		nextDeviceID:   1,
 		nextEventID:    1,
+		opFailStage:    map[string]int{},
 		parental:       map[int]*ParentalControls{},
 		periods:        map[int][]*ParentalPeriod{},
 		nextPeriodID:   1,
@@ -589,6 +594,7 @@ func (f *fakeStore) TouchTrustedDevice(_ context.Context, accountID int, rawToke
 func (f *fakeStore) RevokeTrustedDevice(_ context.Context, accountID int, rawToken string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	snap := f.snapshotLocked(accountID)
 	devs := f.trustedDevices[accountID]
 	h := tokenHash(rawToken)
 	if devs == nil {
@@ -598,7 +604,13 @@ func (f *fakeStore) RevokeTrustedDevice(_ context.Context, accountID int, rawTok
 		return sql.ErrNoRows
 	}
 	delete(devs, h)
+	if err := f.failStepLocked(opRevokeDevice, accountID, snap, 1); err != nil {
+		return err
+	}
 	f.recordEventLocked(accountID, eventDeviceRevoked)
+	if err := f.failStepLocked(opRevokeDevice, accountID, snap, 2); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -647,6 +659,7 @@ func (f *fakeStore) SaveRecoveryCodes(_ context.Context, accountID int, codes []
 func (f *fakeStore) UseRecoveryCode(_ context.Context, accountID int, rawCode string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	snap := f.snapshotLocked(accountID)
 	store := f.recoveryCodes[accountID]
 	h := hashRecoveryCode(rawCode)
 	rc, ok := store[h]
@@ -655,7 +668,13 @@ func (f *fakeStore) UseRecoveryCode(_ context.Context, accountID int, rawCode st
 	}
 	now := time.Now()
 	rc.UsedAt = &now
+	if err := f.failStepLocked(opUseRecoveryCode, accountID, snap, 1); err != nil {
+		return err
+	}
 	f.recordEventLocked(accountID, eventRecoveryCodeUsed)
+	if err := f.failStepLocked(opUseRecoveryCode, accountID, snap, 2); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -704,6 +723,330 @@ func (f *fakeStore) recordEventLocked(accountID int, eventType string) {
 	e := SecurityEvent{ID: f.nextEventID, EventType: eventType, AccountID: &aid, CreatedAt: now}
 	f.nextEventID++
 	f.securityEvents[accountID] = append(f.securityEvents[accountID], e)
+}
+
+// --- P-34: transactional fake for the composite 2FA operations ---
+//
+// The fake used to be ATOMICER than the real store: it appended
+// device_revoked and recovery_code_used inside the same method call, and
+// recordEventLocked could not fail at all, which hid the production bug.
+// The helpers below give the composite operations the same step order, the
+// same conditional transitions and the same complete undo as the SQL store.
+
+// txSnapshot captures the business state one composite operation may
+// change, so a simulated rollback can undo all of it.
+//
+// nextEventID and nextDeviceID are deliberately NOT captured: an InnoDB
+// AUTO_INCREMENT counter is not rolled back either, so the fake must not
+// promise gapless event ids across a failure. Tests assert event COUNT,
+// type, account and commit, never id continuity.
+type txSnapshot struct {
+	secret        []byte
+	enabled       bool
+	lastCounter   *int
+	lastAt        *time.Time
+	recoveryCodes map[string]*RecoveryCode
+	devices       map[string]TrustedDevice
+	sessions      map[string]Session
+	events        []SecurityEvent
+}
+
+func (f *fakeStore) snapshotLocked(accountID int) txSnapshot {
+	acc := f.accounts[accountID]
+	snap := txSnapshot{
+		recoveryCodes: map[string]*RecoveryCode{},
+		devices:       map[string]TrustedDevice{},
+		sessions:      map[string]Session{},
+	}
+	if acc != nil {
+		snap.secret = append([]byte(nil), acc.TwoFactorSecret...)
+		snap.enabled = acc.TwoFactorEnabled
+		if acc.LastTOTPCounter != nil {
+			c := *acc.LastTOTPCounter
+			snap.lastCounter = &c
+		}
+		if acc.LastTOTPAt != nil {
+			t := *acc.LastTOTPAt
+			snap.lastAt = &t
+		}
+	}
+	for h, rc := range f.recoveryCodes[accountID] {
+		c := *rc
+		snap.recoveryCodes[h] = &c
+	}
+	for h, d := range f.trustedDevices[accountID] {
+		snap.devices[h] = d
+	}
+	for h, s := range f.sessions {
+		if s.AccountID == accountID {
+			snap.sessions[h] = s
+		}
+	}
+	snap.events = append([]SecurityEvent(nil), f.securityEvents[accountID]...)
+	return snap
+}
+
+// restoreLocked undoes everything since the snapshot, which is what
+// tx.Rollback() does in the SQL store.
+func (f *fakeStore) restoreLocked(accountID int, snap txSnapshot) {
+	if acc := f.accounts[accountID]; acc != nil {
+		acc.TwoFactorSecret = append([]byte(nil), snap.secret...)
+		if acc.TwoFactorSecret != nil && len(acc.TwoFactorSecret) == 0 {
+			acc.TwoFactorSecret = nil
+		}
+		acc.TwoFactorEnabled = snap.enabled
+		acc.LastTOTPCounter = snap.lastCounter
+		acc.LastTOTPAt = snap.lastAt
+	}
+	restored := map[string]*RecoveryCode{}
+	for h, rc := range snap.recoveryCodes {
+		restored[h] = rc
+	}
+	f.recoveryCodes[accountID] = restored
+	devices := map[string]TrustedDevice{}
+	for h, d := range snap.devices {
+		devices[h] = d
+	}
+	f.trustedDevices[accountID] = devices
+	for h, s := range f.sessions {
+		if s.AccountID == accountID {
+			if _, existed := snap.sessions[h]; !existed {
+				delete(f.sessions, h)
+			}
+		}
+	}
+	for h, s := range snap.sessions {
+		f.sessions[h] = s
+	}
+	f.securityEvents[accountID] = append([]SecurityEvent(nil), snap.events...)
+}
+
+// failStepLocked injects a failure at a numbered step of a composite
+// operation and completes the simulated rollback. 0 = no injection.
+func (f *fakeStore) failStepLocked(op string, accountID int, snap txSnapshot, stage int) error {
+	if f.opFailStage[op] != stage {
+		return nil
+	}
+	f.restoreLocked(accountID, snap)
+	return fmt.Errorf("injected %s failure at stage %d", op, stage)
+}
+
+// failStageAt injects a failure at the given numbered step of op. The step
+// numbers follow the order in store.go.
+func (f *fakeStore) failStageAt(op string, stage int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opFailStage[op] = stage
+}
+
+// failEventWriteAt injects a failure at the security-event write of op, so a
+// test can prove that a failing event rolls the whole operation back.
+func (f *fakeStore) failEventWriteAt(op string) {
+	f.failStageAt(op, fakeEventStage[op])
+}
+
+// fakeEventStage maps an operation to the step number of its security-event
+// write, mirroring the position of insertSecurityEventTx in store.go.
+var fakeEventStage = map[string]int{
+	opSetupTwoFactor:   4,
+	opEnableTwoFactor:  2,
+	opDisableTwoFactor: 5,
+	opResetTwoFactor:   7,
+	opUseRecoveryCode:  2,
+	opRevokeDevice:     2,
+}
+
+// fakeStageCount is the number of business steps per operation, including
+// the event write, so tests can loop over every step.
+var fakeStageCount = map[string]int{
+	opSetupTwoFactor:   4,
+	opEnableTwoFactor:  2,
+	opDisableTwoFactor: 5,
+	opResetTwoFactor:   7,
+	opUseRecoveryCode:  2,
+	opRevokeDevice:     2,
+}
+
+// Operation names used by the injection helper. They match the operation=
+// value the store logs.
+const (
+	opSetupTwoFactor   = "setup_two_factor"
+	opEnableTwoFactor  = "enable_two_factor"
+	opDisableTwoFactor = "disable_two_factor"
+	opResetTwoFactor   = "reset_two_factor"
+	opUseRecoveryCode  = "use_recovery_code"
+	opRevokeDevice     = "revoke_trusted_device"
+)
+
+// SetupTwoFactor mirrors sQLStore.SetupTwoFactor: gate, secret, codes,
+// event. The gate is decided inside the "transaction", never from a
+// handler-side pre-read.
+func (f *fakeStore) SetupTwoFactor(_ context.Context, accountID int, encryptedSecret []byte, codes []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return sql.ErrNoRows
+	}
+	snap := f.snapshotLocked(accountID)
+	// stage 1: conditional gate, only fires while 2FA is off
+	if !acc.TwoFactorEnabled {
+		acc.TwoFactorEnabled = true
+	} else {
+		f.restoreLocked(accountID, snap)
+		return ErrTwoFactorAlreadySetUp
+	}
+	if err := f.failStepLocked(opSetupTwoFactor, accountID, snap, 1); err != nil {
+		return err
+	}
+	// stage 2: secret
+	acc.TwoFactorSecret = append([]byte(nil), encryptedSecret...)
+	acc.LastTOTPCounter = nil
+	acc.LastTOTPAt = nil
+	if err := f.failStepLocked(opSetupTwoFactor, accountID, snap, 2); err != nil {
+		return err
+	}
+	// stage 3: recovery codes
+	store := map[string]*RecoveryCode{}
+	now := time.Now()
+	for _, c := range codes {
+		store[hashRecoveryCode(c)] = &RecoveryCode{TokenHash: hashRecoveryCode(c), AccountID: accountID, CreatedAt: now}
+	}
+	f.recoveryCodes[accountID] = store
+	if err := f.failStepLocked(opSetupTwoFactor, accountID, snap, 3); err != nil {
+		return err
+	}
+	// stage 4: security event (last business step)
+	f.recordEventLocked(accountID, eventTwoFactorEnabled)
+	if err := f.failStepLocked(opSetupTwoFactor, accountID, snap, 4); err != nil {
+		return err
+	}
+	return nil
+}
+
+// EnableTwoFactor decides the transition inside the transaction and writes
+// no event on a no-op.
+func (f *fakeStore) EnableTwoFactor(_ context.Context, accountID int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return false, sql.ErrNoRows
+	}
+	snap := f.snapshotLocked(accountID)
+	if acc.TwoFactorEnabled {
+		return false, nil
+	}
+	acc.TwoFactorEnabled = true
+	if err := f.failStepLocked(opEnableTwoFactor, accountID, snap, 1); err != nil {
+		return false, err
+	}
+	f.recordEventLocked(accountID, eventTwoFactorEnabled)
+	if err := f.failStepLocked(opEnableTwoFactor, accountID, snap, 2); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// DisableTwoFactor decides the transition inside the transaction, then
+// clears secret, codes and devices. Sessions deliberately stay active.
+func (f *fakeStore) DisableTwoFactor(_ context.Context, accountID int) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return false, sql.ErrNoRows
+	}
+	snap := f.snapshotLocked(accountID)
+	if !acc.TwoFactorEnabled {
+		return false, nil
+	}
+	acc.TwoFactorEnabled = false
+	if err := f.failStepLocked(opDisableTwoFactor, accountID, snap, 1); err != nil {
+		return false, err
+	}
+	acc.TwoFactorSecret = nil
+	acc.LastTOTPCounter = nil
+	acc.LastTOTPAt = nil
+	if err := f.failStepLocked(opDisableTwoFactor, accountID, snap, 2); err != nil {
+		return false, err
+	}
+	delete(f.recoveryCodes, accountID)
+	if err := f.failStepLocked(opDisableTwoFactor, accountID, snap, 3); err != nil {
+		return false, err
+	}
+	delete(f.trustedDevices, accountID)
+	if err := f.failStepLocked(opDisableTwoFactor, accountID, snap, 4); err != nil {
+		return false, err
+	}
+	f.recordEventLocked(accountID, eventTwoFactorDisabled)
+	if err := f.failStepLocked(opDisableTwoFactor, accountID, snap, 5); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResetTwoFactor mirrors the SQL store step for step, including the
+// compare-and-swap on the stored secret. Two requests that read the SAME
+// stored secret cannot both commit: the loser gets changed=false, a nil
+// error and has written nothing at all.
+func (f *fakeStore) ResetTwoFactor(_ context.Context, accountID int, expectedSecret, newSecret []byte, codes []string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	acc := f.accounts[accountID]
+	if acc == nil {
+		return false, sql.ErrNoRows
+	}
+	snap := f.snapshotLocked(accountID)
+	// stage 1: compare-and-swap on the previously stored secret. bytes.Equal
+	// plus a nil check is the Go equivalent of SQL's NULL-safe "<=>".
+	storedMatches := (acc.TwoFactorSecret == nil && expectedSecret == nil) ||
+		(acc.TwoFactorSecret != nil && expectedSecret != nil && bytes.Equal(acc.TwoFactorSecret, expectedSecret))
+	if !storedMatches {
+		return false, nil
+	}
+	acc.TwoFactorSecret = append([]byte(nil), newSecret...)
+	acc.LastTOTPCounter = nil
+	acc.LastTOTPAt = nil
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 1); err != nil {
+		return false, err
+	}
+	delete(f.recoveryCodes, accountID)
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 2); err != nil {
+		return false, err
+	}
+	store := map[string]*RecoveryCode{}
+	now := time.Now()
+	for _, c := range codes {
+		store[hashRecoveryCode(c)] = &RecoveryCode{TokenHash: hashRecoveryCode(c), AccountID: accountID, CreatedAt: now}
+	}
+	f.recoveryCodes[accountID] = store
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 3); err != nil {
+		return false, err
+	}
+	acc.TwoFactorEnabled = true
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 4); err != nil {
+		return false, err
+	}
+	revokeNow := time.Now()
+	for h, s := range f.sessions {
+		if s.AccountID == accountID && s.RevokedAt == nil {
+			s.RevokedAt = &revokeNow
+			f.sessions[h] = s
+		}
+	}
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 5); err != nil {
+		return false, err
+	}
+	delete(f.trustedDevices, accountID)
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 6); err != nil {
+		return false, err
+	}
+	f.recordEventLocked(accountID, eventTwoFactorReset)
+	if err := f.failStepLocked(opResetTwoFactor, accountID, snap, 7); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (f *fakeStore) RecordSecurityEvent(_ context.Context, eventType string, accountID *int) error {

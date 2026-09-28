@@ -28,7 +28,12 @@ import (
 
 func trimSpace(s string) string { return strings.TrimSpace(s) }
 
-// recordEvent logs a security event; it is never a hard failure.
+// recordEvent logs a best-effort security event; it is never a hard
+// failure. After P-34 it has NO 2FA caller left: the security-relevant 2FA
+// operations write their event inside their own transaction, so a failing
+// event write rolls the whole operation back. The remaining callers are the
+// Parental paths, whose best-effort semantics stay separate and are
+// documented as P-35.
 func (s *Server) recordEvent(ctx context.Context, eventType string, accountID int) {
 	_ = s.store.RecordSecurityEvent(ctx, eventType, &accountID)
 }
@@ -126,22 +131,17 @@ func (s *Server) handleTwofactorSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codes := newRecoveryCodes()
-	if err := s.store.SaveTwoFactorSecret(ctx, acc.ID, enc); err != nil {
-		dbError(w, err, "save two-factor secret failed")
+	// One transaction: secret, codes, enabled flag and the security event
+	// commit together. The store gate also decides the conflict, so the
+	// pre-read above is only a fast path (P-34).
+	if err := s.store.SetupTwoFactor(ctx, acc.ID, enc, codes); err != nil {
+		if err == ErrTwoFactorAlreadySetUp {
+			writeError(w, http.StatusConflict, "two-factor already enabled")
+			return
+		}
+		dbError(w, err, "setup two-factor failed")
 		return
 	}
-	if err := s.store.SaveRecoveryCodes(ctx, acc.ID, codes); err != nil {
-		_ = s.store.ClearTwoFactorSecret(ctx, acc.ID)
-		dbError(w, err, "save recovery codes failed")
-		return
-	}
-	if err := s.store.SetTwoFactorEnabled(ctx, acc.ID, true); err != nil {
-		_ = s.store.ClearTwoFactorSecret(ctx, acc.ID)
-		_ = s.store.ClearRecoveryCodes(ctx, acc.ID)
-		dbError(w, err, "enable two-factor failed")
-		return
-	}
-	s.recordEvent(ctx, eventTwoFactorEnabled, acc.ID)
 	writeJSON(w, http.StatusOK, twofactorSetupResponse{
 		Enabled:         true,
 		ProvisioningURI: provisioningURI(secretRaw, acc.ID),
@@ -176,12 +176,9 @@ func (s *Server) handleTwofactorEnable(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "account not found")
 		return
 	}
-	if !acc.TwoFactorEnabled {
-		if err := s.store.SetTwoFactorEnabled(ctx, acc.ID, true); err != nil {
-			dbError(w, err, "enable two-factor failed")
-			return
-		}
-		s.recordEvent(ctx, eventTwoFactorEnabled, acc.ID)
+	if _, err := s.store.EnableTwoFactor(ctx, acc.ID); err != nil {
+		dbError(w, err, "enable two-factor failed")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": true})
 }
@@ -189,8 +186,8 @@ func (s *Server) handleTwofactorEnable(w http.ResponseWriter, r *http.Request) {
 // --- /twofactor/disable ---
 
 // handleTwofactorDisable turns 2FA off and clears the secret, the
-// recovery codes and all trusted devices (sessions remain, per the
-// revocation policy).
+// recovery codes and all trusted devices in ONE transaction together with
+// the security event (sessions remain, per the revocation policy).
 func (s *Server) handleTwofactorDisable(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permAccountTwoFactor)
 	if !ok {
@@ -214,30 +211,25 @@ func (s *Server) handleTwofactorDisable(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "account not found")
 		return
 	}
-	if err := s.store.SetTwoFactorEnabled(ctx, acc.ID, false); err != nil {
+	if _, err := s.store.DisableTwoFactor(ctx, acc.ID); err != nil {
 		dbError(w, err, "disable two-factor failed")
 		return
 	}
-	if err := s.store.ClearTwoFactorSecret(ctx, acc.ID); err != nil {
-		dbError(w, err, "clear two-factor secret failed")
-		return
-	}
-	if err := s.store.ClearRecoveryCodes(ctx, acc.ID); err != nil {
-		dbError(w, err, "clear recovery codes failed")
-		return
-	}
-	if err := s.store.RevokeAllTrustedDevices(ctx, acc.ID); err != nil {
-		dbError(w, err, "revoke all trusted devices failed")
-		return
-	}
-	s.recordEvent(ctx, eventTwoFactorDisabled, acc.ID)
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": false})
 }
 
 // --- /twofactor/reset ---
 
 // handleTwofactorReset rotates the state completely: new secret, new
-// codes, revokes sessions + trusted devices, re-arms 2FA.
+// codes, revokes sessions + trusted devices, re-arms 2FA — all in ONE
+// transaction together with the security event (P-34).
+//
+// The encrypted secret read above is handed to the store as the expected
+// starting state (compare-and-swap). A second request that read the SAME
+// stored secret therefore loses with 409 and receives neither a
+// provisioning URI nor recovery codes. A reset that starts after the
+// previous commit read the already rotated secret and is a new valid
+// operation: last commit wins.
 func (s *Server) handleTwofactorReset(w http.ResponseWriter, r *http.Request) {
 	body, _, ok := s.authorize(w, r, permAccountTwoFactor)
 	if !ok {
@@ -272,27 +264,15 @@ func (s *Server) handleTwofactorReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	codes := newRecoveryCodes()
-	if err := s.store.SaveTwoFactorSecret(ctx, acc.ID, enc); err != nil {
-		dbError(w, err, "save two-factor secret failed")
+	changed, err := s.store.ResetTwoFactor(ctx, acc.ID, acc.TwoFactorSecret, enc, codes)
+	if err != nil {
+		dbError(w, err, "reset two-factor failed")
 		return
 	}
-	if err := s.store.SaveRecoveryCodes(ctx, acc.ID, codes); err != nil {
-		dbError(w, err, "save recovery codes failed")
+	if !changed {
+		writeError(w, http.StatusConflict, "two-factor state changed; retry")
 		return
 	}
-	if err := s.store.SetTwoFactorEnabled(ctx, acc.ID, true); err != nil {
-		dbError(w, err, "enable two-factor failed")
-		return
-	}
-	if err := s.store.RevokeAllSessions(ctx, acc.ID); err != nil {
-		dbError(w, err, "revoke sessions failed")
-		return
-	}
-	if err := s.store.RevokeAllTrustedDevices(ctx, acc.ID); err != nil {
-		dbError(w, err, "revoke all trusted devices failed")
-		return
-	}
-	s.recordEvent(ctx, eventTwoFactorReset, acc.ID)
 	writeJSON(w, http.StatusOK, twofactorSetupResponse{
 		Enabled:         true,
 		ProvisioningURI: provisioningURI(secretRaw, acc.ID),

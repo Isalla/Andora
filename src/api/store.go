@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -164,6 +165,28 @@ type AuthStore interface {
 	ClearTwoFactorSecret(ctx context.Context, accountID int) error
 	SetLastTOTP(ctx context.Context, accountID int, counter int, at time.Time) error
 
+	// SetupTwoFactor, EnableTwoFactor, DisableTwoFactor and ResetTwoFactor
+	// are the four business 2FA operations. Each is ONE transaction whose
+	// security state change and its security_events row commit together; a
+	// failing event write rolls the whole operation back (P-34). The
+	// single-column helpers above stay generic and never invent an event of
+	// their own; RevokeAllSessions and RevokeAllTrustedDevices likewise stay
+	// event-less (docs/Auth_API_Architektur.md §18).
+	//
+	// SetupTwoFactor reports a conflict via ErrTwoFactorAlreadySetUp.
+	// EnableTwoFactor and DisableTwoFactor return changed=false for a no-op
+	// (already enabled / already disabled) and write no event.
+	SetupTwoFactor(ctx context.Context, accountID int, encryptedSecret []byte, codes []string) error
+	EnableTwoFactor(ctx context.Context, accountID int) (changed bool, err error)
+	DisableTwoFactor(ctx context.Context, accountID int) (changed bool, err error)
+	// ResetTwoFactor rotates the whole 2FA state in one transaction. The
+	// CAS on expectedSecret keeps two requests that read the SAME stored
+	// secret from both committing: only the first gets changed=true, the
+	// loser gets changed=false, err == nil and no state, no event and no
+	// recovery codes. A later reset that read the already rotated state is
+	// a new valid operation and commits normally (last commit wins).
+	ResetTwoFactor(ctx context.Context, accountID int, expectedSecret, newSecret []byte, codes []string) (changed bool, err error)
+
 	// ChangePasswordRevokeAll swaps the password hash, revokes ALL
 	// sessions and ALL trusted-device tokens in one transaction and
 	// records the security event.
@@ -222,6 +245,11 @@ type AuthStore interface {
 // ErrMaxDevices reports that the 3-device limit is reached; it is the
 // service-level signal for the 409 max_devices_reached response.
 var ErrMaxDevices = fmt.Errorf("max trusted devices reached")
+
+// ErrTwoFactorAlreadySetUp reports that the transactional setup gate lost a
+// race: another setup committed first. The loser wrote no secret, no
+// recovery codes and no event; the handler maps it to the existing 409.
+var ErrTwoFactorAlreadySetUp = fmt.Errorf("two-factor already set up")
 
 // maxTrustedDevices is the service-level limit of confirmed devices per
 // account. It is enforced in AddTrustedDevice (not as a DB constraint)
@@ -979,6 +1007,318 @@ func (s *sQLStore) SetLastTOTP(ctx context.Context, accountID int, counter int, 
 	return nil
 }
 
+// --- P-34: transactional helpers for the business 2FA operations ---
+//
+// They all take an *sql.Tx, so a composite operation never nests a second
+// transaction (SaveRecoveryCodes with its own BeginTx must not be called
+// from inside one of them). Every composite writes its security event as
+// the last business step before Commit.
+
+// securityEventFailureLine builds the single log line for a failed
+// security-event write. It is a pure function so a test can prove that the
+// line carries no token, token hash, session id, recovery code, TOTP secret,
+// raw IP or database URL, and no driver text.
+func securityEventFailureLine(operation, eventType string, accountID *int) string {
+	aid := "none"
+	if accountID != nil {
+		aid = strconv.Itoa(*accountID)
+	}
+	return "security_event_write_failed operation=" + operation +
+		" event_type=" + eventType +
+		" account_id=" + aid +
+		" stage=event_write error_class=db_error"
+}
+
+// insertSecurityEventTx writes one security_events row inside tx. It is the
+// ONLY place that logs security_event_write_failed, so exactly one line is
+// written per failed operation (P-34).
+func insertSecurityEventTx(ctx context.Context, tx *sql.Tx, eventType string, accountID *int, operation string) error {
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO security_events (event_type, account_id, created_at) VALUES (?, ?, NOW())",
+		eventType, accountID); err != nil {
+		log.Print(securityEventFailureLine(operation, eventType, accountID))
+		return fmt.Errorf("record security event: %w", err)
+	}
+	return nil
+}
+
+// deleteRecoveryCodesTx drops every stored recovery code of an account.
+func deleteRecoveryCodesTx(ctx context.Context, tx *sql.Tx, accountID int) error {
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM recovery_codes WHERE account_id = ?", accountID); err != nil {
+		return fmt.Errorf("clear recovery codes: %w", err)
+	}
+	return nil
+}
+
+// saveRecoveryCodesTx replaces the account's recovery codes inside tx.
+func saveRecoveryCodesTx(ctx context.Context, tx *sql.Tx, accountID int, codes []string) error {
+	now := time.Now()
+	for _, c := range codes {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO recovery_codes (token_hash, account_id, created_at)
+			 VALUES (?, ?, ?)`,
+			hashRecoveryCode(c), accountID, now); err != nil {
+			return fmt.Errorf("insert recovery code: %w", err)
+		}
+	}
+	return nil
+}
+
+// setTwoFactorEnabledTx flips the account flag inside tx.
+func setTwoFactorEnabledTx(ctx context.Context, tx *sql.Tx, accountID int, enabled bool) error {
+	b := 0
+	if enabled {
+		b = 1
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_enabled = ? WHERE id = ?", b, accountID); err != nil {
+		return fmt.Errorf("set two_factor_enabled: %w", err)
+	}
+	return nil
+}
+
+// clearTwoFactorSecretTx drops the encrypted TOTP secret and the replay
+// counter inside tx.
+func clearTwoFactorSecretTx(ctx context.Context, tx *sql.Tx, accountID int) error {
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_secret = NULL, last_totp_counter = NULL, last_totp_at = NULL WHERE id = ?",
+		accountID); err != nil {
+		return fmt.Errorf("clear two_factor_secret: %w", err)
+	}
+	return nil
+}
+
+// revokeAllSessionsTx marks every live session of the account revoked inside
+// tx. It stays event-less: the event belongs to the calling operation
+// (docs/Auth_API_Architektur.md §18).
+func revokeAllSessionsTx(ctx context.Context, tx *sql.Tx, accountID int) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET revoked_at = NOW()
+		 WHERE account_id = ? AND revoked_at IS NULL`, accountID); err != nil {
+		return fmt.Errorf("revoke all sessions: %w", err)
+	}
+	return nil
+}
+
+// revokeAllTrustedDevicesTx deletes every device of the account inside tx.
+// It stays event-less for the same reason.
+func revokeAllTrustedDevicesTx(ctx context.Context, tx *sql.Tx, accountID int) error {
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM trusted_devices WHERE account_id = ?", accountID); err != nil {
+		return fmt.Errorf("revoke all trusted devices: %w", err)
+	}
+	return nil
+}
+
+// SetupTwoFactor stores the secret, issues the recovery codes and enables 2FA
+// in ONE transaction and records two_factor_enabled. Any failing step rolls
+// everything back, so the manual compensating calls the handler used to
+// issue are no longer needed (P-34).
+//
+// The first statement is the gate: it only fires while 2FA is not enabled.
+// If two setups race, exactly one commits; the loser changed nothing and
+// gets ErrTwoFactorAlreadySetUp, which the handler maps to the existing 409.
+func (s *sQLStore) SetupTwoFactor(ctx context.Context, accountID int, encryptedSecret []byte, codes []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin setup two_factor: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_enabled = 1 WHERE id = ? AND two_factor_enabled = 0", accountID)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("setup two_factor gate: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("setup two_factor gate: %w", err)
+	} else if n == 0 {
+		_ = tx.Rollback()
+		return ErrTwoFactorAlreadySetUp
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_secret = ?, last_totp_counter = NULL, last_totp_at = NULL WHERE id = ?",
+		encryptedSecret, accountID); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("setup two_factor secret: %w", err)
+	}
+	if err := saveRecoveryCodesTx(ctx, tx, accountID, codes); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := insertSecurityEventTx(ctx, tx, eventTwoFactorEnabled, &accountID, "setup_two_factor"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit setup two_factor: %w", err)
+	}
+	return nil
+}
+
+// EnableTwoFactor decides the disabled -> enabled transition INSIDE the
+// transaction: the conditional update only fires while 2FA is off, so two
+// racing enables produce at most one transition and at most one
+// two_factor_enabled event. A handler-side pre-read is only an optimisation;
+// it is not the security decision.
+func (s *sQLStore) EnableTwoFactor(ctx context.Context, accountID int) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin enable two_factor: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_enabled = 1 WHERE id = ? AND two_factor_enabled = 0", accountID)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("enable two_factor: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("enable two_factor: %w", err)
+	}
+	if n == 0 {
+		// Already enabled: a no-op, no event. Still commit so the
+		// transaction ends cleanly.
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("commit enable two_factor: %w", err)
+		}
+		return false, nil
+	}
+	if err := insertSecurityEventTx(ctx, tx, eventTwoFactorEnabled, &accountID, "enable_two_factor"); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit enable two_factor: %w", err)
+	}
+	return true, nil
+}
+
+// DisableTwoFactor decides the enabled -> disabled transition INSIDE the
+// transaction, then clears the secret, the recovery codes and every trusted
+// device and records two_factor_disabled — all in one transaction.
+//
+// Sessions deliberately stay active (per the current revocation policy):
+// no RevokeAllSessions, no session_revoked. A no-op on an already disabled
+// account changes nothing and writes no event.
+func (s *sQLStore) DisableTwoFactor(ctx context.Context, accountID int) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin disable two_factor: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		"UPDATE accounts SET two_factor_enabled = 0 WHERE id = ? AND two_factor_enabled = 1", accountID)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("disable two_factor: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("disable two_factor: %w", err)
+	}
+	if n == 0 {
+		if err := tx.Commit(); err != nil {
+			return false, fmt.Errorf("commit disable two_factor: %w", err)
+		}
+		return false, nil
+	}
+	if err := clearTwoFactorSecretTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := deleteRecoveryCodesTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := revokeAllTrustedDevicesTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := insertSecurityEventTx(ctx, tx, eventTwoFactorDisabled, &accountID, "disable_two_factor"); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit disable two_factor: %w", err)
+	}
+	return true, nil
+}
+
+// ResetTwoFactor rotates the whole 2FA state in ONE transaction: new secret,
+// new recovery codes, 2FA enabled, every session revoked, every trusted
+// device revoked, and two_factor_reset recorded. A failure at any step
+// leaves the previous secret, the previous codes, the previous sessions and
+// the previous devices untouched (P-34).
+//
+// The first statement is a compare-and-swap on the stored secret that the
+// caller read at request start. Only the first of two requests that read the
+// SAME stored secret gets changed=true; the loser gets changed=false with a
+// nil error and has written nothing at all — no secret, no codes, no session
+// revocation, no device revocation, no event — and the handler answers 409
+// without any provisioning URI or recovery codes.
+//
+// The CAS protects the same READ starting state only. A reset that starts
+// after the previous commit read the already rotated secret, is a new valid
+// operation and commits normally: last commit wins. The CAS is no guarantee
+// about how long an HTTP response takes to reach its client.
+func (s *sQLStore) ResetTwoFactor(ctx context.Context, accountID int, expectedSecret, newSecret []byte, codes []string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin reset two_factor: %w", err)
+	}
+	// <=> is the NULL-safe equal operator: it also matches while
+	// two_factor_secret IS NULL, so a first-ever setup CASes correctly.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE accounts
+		    SET two_factor_secret = ?, last_totp_counter = NULL, last_totp_at = NULL
+		  WHERE id = ? AND two_factor_secret <=> ?`,
+		newSecret, accountID, expectedSecret)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("reset two_factor cas: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("reset two_factor cas: %w", err)
+	}
+	if n == 0 {
+		_ = tx.Rollback()
+		return false, nil
+	}
+	if err := deleteRecoveryCodesTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := saveRecoveryCodesTx(ctx, tx, accountID, codes); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := setTwoFactorEnabledTx(ctx, tx, accountID, true); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := revokeAllSessionsTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := revokeAllTrustedDevicesTx(ctx, tx, accountID); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := insertSecurityEventTx(ctx, tx, eventTwoFactorReset, &accountID, "reset_two_factor"); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit reset two_factor: %w", err)
+	}
+	return true, nil
+}
+
 // ChangePasswordRevokeAll performs the full revocation policy in one
 // transaction: new password hash, revoke all sessions, revoke all
 // trusted devices, and record the security event (password_changed).
@@ -1135,21 +1475,32 @@ func (s *sQLStore) TouchTrustedDevice(ctx context.Context, accountID int, rawTok
 }
 
 func (s *sQLStore) RevokeTrustedDevice(ctx context.Context, accountID int, rawToken string) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin revoke trusted device: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
 		"DELETE FROM trusted_devices WHERE account_id = ? AND token_hash = ?",
 		accountID, tokenHash(rawToken))
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("revoke trusted device: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("revoke trusted device: %w", err)
 	}
 	if n == 0 {
+		_ = tx.Rollback()
 		return sql.ErrNoRows
 	}
-	if err := s.RecordSecurityEvent(ctx, eventDeviceRevoked, &accountID); err != nil {
-		return fmt.Errorf("record security event: %w", err)
+	if err := insertSecurityEventTx(ctx, tx, eventDeviceRevoked, &accountID, "revoke_trusted_device"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit revoke trusted device: %w", err)
 	}
 	return nil
 }
@@ -1205,25 +1556,38 @@ func (s *sQLStore) SaveRecoveryCodes(ctx context.Context, accountID int, codes [
 	return nil
 }
 
-// UseRecoveryCode marks the presented recovery code used (single-use).
-// Returns sql.ErrNoRows if the code is unknown or already consumed.
+// UseRecoveryCode marks the presented recovery code used (single-use) and
+// records recovery_code_used in the SAME transaction: either the code is
+// consumed AND the event exists, or neither happened (P-34). An event
+// failure therefore leaves the code usable again.
 func (s *sQLStore) UseRecoveryCode(ctx context.Context, accountID int, rawCode string) error {
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin use recovery code: %w", err)
+	}
+	res, err := tx.ExecContext(ctx,
 		`UPDATE recovery_codes SET used_at = NOW()
 		 WHERE account_id = ? AND token_hash = ? AND used_at IS NULL`,
 		accountID, hashRecoveryCode(rawCode))
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("use recovery code: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		_ = tx.Rollback()
 		return fmt.Errorf("use recovery code: %w", err)
 	}
 	if n == 0 {
+		_ = tx.Rollback()
 		return sql.ErrNoRows
 	}
-	if err := s.RecordSecurityEvent(ctx, eventRecoveryCodeUsed, &accountID); err != nil {
-		return fmt.Errorf("record security event: %w", err)
+	if err := insertSecurityEventTx(ctx, tx, eventRecoveryCodeUsed, &accountID, "use_recovery_code"); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit use recovery code: %w", err)
 	}
 	return nil
 }
