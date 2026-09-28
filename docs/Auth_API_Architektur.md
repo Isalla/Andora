@@ -500,6 +500,101 @@ Bestandteil von `P-34`, und `P-34` verlangt für ihn **weder** ein Ereignis
 jeder Session-Widerruf ein atomar zu protokollierendes Sicherheitsereignis
 wird: Erforderlich sind nur die Sicherheitsvorgänge unter Ziffer 1.
 
+### Umsetzungsstand (Commit `1eb38a7b33e0fda9ff1cf61640bc46b4bcb55a82`)
+
+Die oben festgelegte Sollsemantik ist umgesetzt und in `docs/Security.md`
+als `P-34` mit `ERLEDIGT` abgeschlossen. Die Regeln 1 bis 7 bleiben
+unverändert **in Kraft**; der folgende Abschnitt beschreibt nur, wie sie
+im Code umgesetzt sind.
+
+**Die sechs betroffenen Vorgänge, jeweils genau eine Transaktion:**
+
+| Vorgang | Transaktion in `src/api/store.go` | Ereignis (letzter Schritt) |
+|---|---|---|
+| `UseRecoveryCode` | bedingtes `UPDATE ... AND used_at IS NULL` (`:1563`) | `recovery_code_used` (`:1585`) |
+| `RevokeTrustedDevice` | `DELETE ... WHERE account_id = ? AND token_hash = ?` (`:1477`) | `device_revoked` (`:1498`) |
+| 2FA-Setup | Gate, Secret, Codes, Aktivierung (`:1122`) | `two_factor_enabled` (`:1150`) |
+| 2FA-Aktivierung | bedingtes `UPDATE ... AND two_factor_enabled = 0` (`:1165`) | `two_factor_enabled` (`:1189`) |
+| 2FA-Deaktivierung | bedingtes `UPDATE ... AND two_factor_enabled = 1`, Secret, Codes, Devices (`:1206`) | `two_factor_disabled` (`:1240`) |
+| 2FA-Reset | CAS, Secret, Codes, Aktivierung, Sessions, Devices (`:1267`) | `two_factor_reset` (`:1312`) |
+
+Das Ereignis ist in **allen sechs** Vorgängen der letzte fachliche
+Schreibschritt vor dem Commit; `insertSecurityEventTx` (`:1035`) hat genau
+sechs Aufrufer. Ein Ereignisfehler rollt den gesamten Vorgang zurück, und
+ein Fehler wird **nicht mehr** gemeldet, nachdem der Sicherheitszustand
+bereits committet wurde. Die generischen Einzelmethoden bleiben ohne
+eigenes Ereignis; die Verbünde verwenden die tx-Varianten
+`revokeAllSessionsTx` (`:1095`) und `revokeAllTrustedDevicesTx` (`:1106`).
+
+**Keine** Schemaänderung, **keine** Migration, **keine** neue Abhängigkeit
+und **keine** neue öffentliche API wurden eingeführt.
+
+### Die CAS-Grenze des 2FA-Resets
+
+Das erste Statement der Reset-Transaktion ist ein Compare-and-Swap auf dem
+verschlüsselten `two_factor_secret`, das der Handler beim Requestbeginn
+gelesen hat (`src/api/store.go:1274-1278`):
+
+``` sql
+UPDATE accounts
+   SET two_factor_secret = ?, last_totp_counter = NULL, last_totp_at = NULL
+ WHERE id = ? AND two_factor_secret <=> ?
+```
+
+`<=>` ist der NULL-sichere Gleichheitsoperator, damit der CAS auch greift,
+solange `two_factor_secret` noch `NULL` ist. Der Erwartungswert stammt aus
+dem **bereits vorhandenen** `Account.TwoFactorSecret`; es wurde **keine**
+Versionsspalte und **keine** neue Tabelle eingeführt.
+
+* **Gleicher gelesener Ausgangszustand:** Zwei Anfragen, die **denselben**
+  gespeicherten Secret-Zustand gelesen haben, können **nicht beide**
+  committen. Nur die Erste erhält `RowsAffected == 1`; die Zweite erhält
+  `0`, schreibt **nichts** — kein Secret, keine Codes, kein
+  Session-Widerruf, kein Device-Widerruf, kein Ereignis — und endet mit
+  Konflikt.
+* **Neuer Ausgangszustand:** Eine Anfrage, die **nach** dem vorherigen
+  Commit startet, liest das bereits rotierte Secret. Sie ist ein **neuer
+  gültiger Reset**, darf committen und erzeugt ein eigenes
+  `two_factor_reset`-Ereignis.
+* **Letzter Commit gewinnt:** Nach Commit B sind **ausschließlich** die
+  Codes von B aktuell. Die von A ausgegebenen Codes können durch B
+  **regulär** ungültig werden — auch dann, wenn Response A noch nicht
+  beim Client eingegangen oder verarbeitet ist. Das ist die normale
+  Semantik zweier erfolgreicher Reset-Vorgänge.
+* **Garantiegrenze:** Der CAS schützt **ausschließlich** den gelesenen
+  Ausgangszustand. Er ist **kein** Schutz gegen einen späteren Reset auf
+  Basis des bereits neuen Zustands und **keine** Garantie über die Dauer
+  oder Reihenfolge der HTTP-Antwortübertragung. Die
+  Auslieferungsreihenfolge ist **kein** Datenbankbeweis.
+
+### Neutrale Konfliktantwort
+
+Der CAS-Verlierer erhält HTTP `409` mit exakt der Meldung
+`two-factor state changed; retry` (`src/api/twofactor.go:273`). Die Meldung
+behauptet **nicht**, dass ein Reset noch laufe, und nennt weder Secret noch
+Codes noch den Gewinner. Der Konfliktfall liefert **weder**
+Provisioning-URI **noch** Recovery-Codes. Ein Konflikt ist **kein** Fehler:
+Er entsteht nur, wenn ein **anderer** Vorgang den Zustand bereits
+verändert hat, und ein erneuter Versuch ist der vorgesehene Weg.
+
+### Erhaltene Abgrenzungen
+
+* Der **freiwillige Einzel-Logout** `/session/revoke` bleibt unverändert
+  und ohne dauerhaftes Ereignis; es existiert **keine** Konstante
+  `session_revoked` im Code.
+* Die **best-effort-Parental-Pfade** bleiben unverändert und sind weiterhin
+  unter `P-35` getrennt geregelt; `src/api/parental_handlers.go` war nicht
+  Teil des Umsetzungscommits.
+*
+**MariaDB-/InnoDB-Integrationsgrenze:** Die Umsetzung ist über den
+FakeStore **logisch** verifiziert, die echte InnoDB-Atomarität des
+Reset-Verbunds (17 Datenbank-Statements, 18 Operationen inklusive Commit),
+ein echter Event-Insert-Fehler, `RowsAffected`, das NULL-sichere `<=>`,
+parallele Recovery-Code-Verwendung, Sperr-, Deadlock- und Lock-Wait-
+Verhalten, Massenupdates, Commitfehler und das 5-Sekunden-DB-Zeitbudget
+sind **nicht** gegen eine laufende Datenbank geprüft. Diese Grenzen sind
+in `docs/Security.md` unter `P-34` als Abschlussgrenze festgehalten.
+
 **Weitere Abgrenzungen:** Die best-effort-Parental-Ereignisse sind unter
 `P-35` getrennt geregelt. Dieser Abschnitt legt **keine** Go-Funktion,
 **keine** SQL-Transaktion und **keine** neue API fest.
