@@ -146,7 +146,31 @@ Anlassfälle, für die die API einen Widerruf auslösen muss:
 * **2FA-Reset** — die zweite Authentifizierungsstufe wurde zurückgesetzt, alle zugehörigen Anmeldungen sind zu beenden;
 * **weitere administrative Session-Widerrufe**, soweit die API solche anbietet.
 
-**IST-ABWEICHUNG (dokumentiert, nicht umgesetzt):** Der aktuelle Code beendet Sessions bei Passwortänderung und beim 2FA-Reset, **nicht** jedoch beim Passwort-Reset/Recovery. Der Recovery-Pfad setzt das Passwort zurück, ohne die zugehörigen Sessions zu widerrufen. Das widerspricht der oben festgelegten Sollsemantik und ist als Umsetzungsdefizit in `docs/Security.md` unter `AUTH-02b` geführt. Dieser Abschnitt beschreibt die **Soll**-Semantik; er behauptet nicht, dass der heutige Code sie bereits erfüllt.
+**Stand:** Beide Anlassfälle sind umgesetzt, einschließlich Passwort-Reset/Recovery. Die Umsetzung ist im folgenden Abschnitt mit Belegen beschrieben; dieser Abschnitt beschreibt die **Soll**-Semantik.
+
+### Stand der Umsetzung (Commit `38e1fbf8e405ce8c79c78199d9b476032f222d40`)
+
+Die oben festgelegte Sollsemantik ist umgesetzt. Belege aus dem Repository:
+
+**Persistenter Marker.** Migration `src/api/db/auth/migrations/014_sessions_revoked_at.sql` ergänzt `sessions.revoked_at TIMESTAMP NULL`; Bestandszeilen bleiben `NULL` und damit gültig. Ein Widerruf **markiert** die Zeile, statt sie zu löschen (`src/api/store.go:720`, `:903`, `:997`, `:1035`, jeweils `WHERE … AND revoked_at IS NULL`, also idempotent). Ein physisches `DELETE FROM sessions` existiert im produktiven Quellcode **nicht** mehr; verbleibender Löschweg ist ausschließlich der Foreign-Key-Cascade `fk_sessions_account … ON DELETE CASCADE` (`002_sessions.sql:12`).
+
+**Vier Statuswerte.** `SessionStatus` (`store.go:36-49`): `valid`, `expired`, `revoked`, `missing`. Die Klassifikation `sessionStatusOf` (`store.go:618`) prüft `revoked` **vor** dem Ablaufzeitpunkt, damit ein gleichzeitig abgelaufener Token nicht als bloßer Ablauf fehlklassifiziert wird.
+
+**Kompatibler Einzel-Validate-Pfad.** `POST /session/validate` meldet unverändert nur `valid: true` oder `valid: false`; der boolesche Vertrag und das Antwortformat bleiben unverändert. Der Status wird dort **nicht** ausgegeben.
+
+**Batchstatus-Endpunkt.** `POST /session/status/batch` (`endpoints.go:511`, Route `server.go:97`) gibt je Eintrag `index`, `status` und die **autoritative** `account_id` zurück. Die Zuordnung erfolgt über die Position (`index`), nicht über ein Geheimnis.
+
+**Berechtigung.** Es gilt die **bestehende** `permSessionValidate` (`endpoints.go:520`); es wurde **keine neue Permission** eingeführt. Das Mengengerüst des Endpunkts (`session.validate`) in Abschnitt 10 bleibt unverändert.
+
+**Anlassfälle.** Passwortänderung (`ChangePasswordRevokeAll`, `store.go:986`), Passwort-Reset/Recovery (`RecoverPassword`, `store.go:888`) und 2FA-Reset (`RevokeAllSessions` aus `twofactor.go`) markieren jeweils alle Sessions des Accounts. `RecoverPassword` schreibt zusätzlich das Security-Event `password_reset` (`store.go:254`, `:915`) — **nicht** `password_changed`.
+
+**Recovery-Transaktionswirkung.** Der gesamte Reset läuft in **einer** Transaktion in dieser Reihenfolge: Passwort und `ban_until` → Sessions markieren → Trusted Devices löschen → Security-Event → Recovery-Token verbrauchen → Commit. Jeder Fehlerzweig führt zum vollständigen Rollback, sodass altes Passwort, Sessions, Trusted Devices und die Wiederverwendbarkeit des Recovery-Tokens erhalten bleiben.
+
+**Grenzen.** Maximal `MaxSessionStatusBatch = 250` Einträge je Request (`endpoints.go:448`); eine Überschreitung wird mit HTTP 413 **fail-closed abgelehnt**, nie gekürzt. Ein Body über `maxSessionStatusBatchBytes` (32 KiB) wird bei bekannter `Content-Length` **vor** der Autorisierung abgelehnt, sodass er gar nicht erst gelesen wird. Das serverweite `maxBodyBytes` (64 KiB, `auth.go:20`) bleibt die äußere Schranke. Session-Tokens sind exakt 64 Hex-Zeichen (`isHexToken`, `store.go:1291`) und werden **vor** Hashing und Datenbankzugriff geprüft. Der Batchpfad führt **eine** `SELECT … WHERE token_hash IN (…)` aus (`store.go:676-678`), kein N+1.
+
+**Datenminimierung.** Tokens werden ausschließlich zum Hashen und für den Lookup verwendet, erscheinen in keiner Antwort und in keinem Log. Die von der Anforderung mitgelieferte `account_id` wird vom Server nicht für die Abfrage verwendet; die Antwort nennt stets die der Datenbank.
+
+**Noch nicht umgesetzt: Retention.** Abgelaufene **und** nun auch widerrufene Zeilen bleiben erhalten; ein Cleanup-Mechanismus existiert nicht. Das ist als eigener offener Punkt `P-33` in `docs/Security.md` geführt. Dieser Abschnitt stellt **keine** Retention als vorhanden dar.
 
 ### Ausfallverhalten der Auth-API
 

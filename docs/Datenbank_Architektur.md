@@ -799,6 +799,33 @@ src/realm-rs/migrations/
 
 Die tatsächliche Nummerierung richtet sich nach dem vorhandenen Migrationsstand.
 
+### `sessions.revoked_at` (Migration 014, Commit `38e1fbf8e405ce8c79c78199d9b476032f222d40`)
+
+Die Tabelle `sessions` der Auth-Datenbank besitzt zusätzlich die **nullable** Spalte
+
+```text
+revoked_at TIMESTAMP NULL
+```
+
+`002_sessions.sql` legt weiterhin nur `token_hash`, `account_id`, `created_at` und `expires_at` an; die neue Spalte kommt über die inkrementelle Migration `src/api/db/auth/migrations/014_sessions_revoked_at.sql` hinzu. **Bestandszeilen erhalten `NULL`** und gelten damit ausdrücklich nicht als widerrufen.
+
+Ein Widerruf **markiert** die Zeile, statt sie zu löschen:
+
+```text
+UPDATE sessions SET revoked_at = NOW() WHERE … AND revoked_at IS NULL
+```
+
+Das ist bewusst so gewählt, weil nur so ein ausdrücklicher Widerruf von einem regulären Ablauf unterscheidbar bleibt. Vorher führte jeder Widerrufspfad ein `DELETE FROM sessions` aus, wodurch „widerrufen" von „unbekannt" und von „abgelaufen" nicht unterscheidbar war. Ein physisches `DELETE FROM sessions` existiert im produktiven Quellcode nicht mehr. Der einzige verbleibende Löschweg ist der Foreign-Key-Cascade `fk_sessions_account … ON DELETE CASCADE` auf `accounts` (`002_sessions.sql`).
+
+**Aktueller Stand der Datenlebenszyklus — ausdrücklich unvollständig:**
+
+* Regulär **abgelaufene** Zeilen bleiben erhalten. Eine Bereinigung über `expires_at` findet **nicht** statt.
+* **Widerrufene** Zeilen bleiben seit dieser Migration ebenfalls erhalten, weil nur markiert und nicht gelöscht wird. Das erhöht das langfristige Tabellenwachstum gegenüber dem vorherigen Stand.
+* Ein **Retention- oder Cleanup-Mechanismus existiert nicht.** Es gibt keinen Hintergrundtask und keinen geplanten Löschlauf.
+* Der Index `idx_sessions_expires` auf `expires_at` besteht, wird aber von **keiner** Anweisung für eine Bereinigung verwendet.
+
+Diese Lücke ist als eigener offener Punkt `P-33` in `docs/Security.md` geführt. Bis zu ihrer Entscheidung ist dieses Dokument **keine** Beschreibung einer vorhandenen Retention.
+
 Bereits angewendete Migrationen werden nicht nachträglich umnummeriert oder verändert.
 
 ---

@@ -1007,6 +1007,27 @@ VERBINDLICH gilt für die Verfügbarkeit:
 * Dieses Verhalten ist ein **bewusst akzeptiertes Restrisiko** und darf **nicht** als Revocation-Garantie während eines Ausfalls beschrieben werden. Es ist ausdrücklich eine Entscheidung zugunsten der Verfügbarkeit bereits laufender Verbindungen.
 * Fehler und die Wiederherstellung werden ohne Session-ID, Token und Roh-IP protokolliert (siehe Abschnitt 21, Abschnitt „Schutz sensibler Daten").
 
+### Umsetzung des Widerrufs im Realm (Commit `38e1fbf8e405ce8c79c78199d9b476032f222d40`)
+
+Die oben festgelegte Regel ist umgesetzt. Der Realm verwendet einen **eigenen zentralen Task** (`src/realm-rs/src/session_watch.rs`, gestartet in `main.rs`, Abbruch über `JoinHandle::abort`). Er ist **kein** Bestandteil der Elternkontrolle: deren Poller hat eine eigene fachliche Semantik, läuft nur bei gesetzter `AUTHAPI_URL` und übermittelt nur beaufsichtigte Spieler.
+
+VERBINDLICH für den Betrieb dieses Tasks:
+
+* **Takt:** 10 Sekunden (`INTERVAL`), mit `MissedTickBehavior::Skip`, damit ein verzögerter Durchlauf nicht in einem Burst nachläuft. Worst case für eine einzelne Verbindung: ein voller Takt plus ein Request (vorhandener Auth-API-Timeout von 5 s).
+* **Batchgröße:** höchstens 250 Einträge je Anfrage (`MAX_BATCH`), passend zum serverseitigen Limit.
+* **Parallelität:** höchstens vier Batchrequests gleichzeitig (`MAX_PARALLEL`).
+  * **Wellen:** Alle Batches einer Runde werden vollständig verarbeitet. Die Schleife läuft über **alle** Batches, nicht nur über die ersten `MAX_PARALLEL × MAX_BATCH`; ein Abbruch- oder Überspringpfad existiert nicht. Es gibt daher keinen Starvation-Pfad: jede aktive Verbindung wird in jeder Runde geprüft. **Pro paralleler Welle** werden höchstens vier Batches zu jeweils 250 Sessions und damit höchstens **1000** Sessions verarbeitet. Bei mehr als 1000 aktiven Verbindungen folgen **weitere begrenzte Wellen**; keine Verbindung wird allein wegen der Anzahl übersprungen. **1000 ist damit eine Wellen-, keine absolute Kapazitätsgrenze des Pollers.**
+  * **Kausalität:** Für das Projektziel von bis zu 500 aktiven Verbindungen sind **zwei** Batches in **einer** Welle erforderlich. Die oben abgeleitete Frist richtet sich nach der Zahl der Wellen: bis 1000 Verbindungen eine Welle, 1001 bis 2000 zwei, 2001 bis 3000 drei, 3001 bis 4000 vier; **oberhalb von 4000 Verbindungen ist keine 30-Sekunden-Frist zugesichert**. Alle Batches werden auch darüber vollständig verarbeitet. Der Poller gibt oberhalb von 1000 aktiven Verbindungen eine **Last- und Wellenwarnung** aus; sie ist **kein** Hinweis auf ausgelassene Einträge.
+* **Stale- und Takeover-Sicherung:** Nach dem Netzwerkaufruf wird unter dem World-Lock erneut geprüft, dass der Charakter existiert, ein Owner vorhanden ist und `player.session_id` **exakt** der Session-ID aus dem Snapshot entspricht. Da der Takeover `session_id` auf die neue Sitzung umschreibt, kann ein altes Poller-Ergebnis niemals den neuen Owner schließen.
+* **Close-Pfad:** Die Trennung erfolgt ausschließlich über den bestehenden `close_conn`-Mechanismus, also denselben Weg wie HELLO-Ablehnung und Takeover. Der Disconnect-Pfad in `net.rs` räumt danach regulär auf; der Poller bereinigt die Registry nicht selbst.
+* **Kein Lock über Netzwerk-`await`:** Der Snapshot wird unter dem World-Lock genommen, der Lock vollständig freigegeben und erst nach der Antwort erneut genommen.
+* **Fail-open bei Auth-API-Transportfehlern:** Transport-, HTTP- und Parsefehler trennen **keine** Verbindung. Sie werden pro fehlgeschlagenem Batchrequest protokolliert, nicht pro Session, und der nächste erfolgreiche Durchlauf wertet normal aus. Ein Erreichbarkeitsproblem ist kein Sicherheitsereignis.
+* **Neue Logins bleiben fail-closed:** Der Einstiegspfad ist unverändert; eine Auth-API-Störung verhindert den Einstieg weiterhin, beendet aber keine laufende Sitzung.
+* **Regulärer TTL-Ablauf trennt weiterhin nicht:** `expired` und `valid` lösen keine Trennung aus; nur `revoked` und `missing` schließen.
+* **Datenminimierung:** Die neuen Logausgaben enthalten ausschließlich Zähler und Fehlertexte — keine Session-ID, kein Token, keine Roh-IP, keine Datenbank-URL.
+
+Die Reichweite der Umsetzung ist begrenzt durch die fehlende Retention in der Auth-Datenbank (offener Punkt `P-33` in `docs/Security.md`).
+
 ### Abgrenzung zur Elternkontrolle
 
 Der regelmäßige Poller der Elternkontrolle ist **kein** allgemeiner Session-Widerruf-Mechanismus. Dass er heute eine Session mitübermittelt und eine nicht mehr gültige Session erkennt, macht ihn nicht zum Revocation-Kanal; die Elternkontrollsemantik in `parental_control.md` bleibt davon unberührt. Ob vorhandene Infrastruktur für die Umsetzung der 30-Sekunden-Regel wiederverwendet werden kann, ist **erst im Coding-Plan** zu prüfen und wird hier nicht entschieden.
