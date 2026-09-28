@@ -39,10 +39,14 @@ pub const MAX_BATCH: usize = 250;
 /// verhindert, dass ein Durchlauf unbegrenzt viele Sockets aufmacht.
 pub const MAX_PARALLEL: usize = 4;
 
-/// Nachweisbare Kapazitätsgrenze dieser Batch-/Parallelitätskombination:
-/// `MAX_PARALLEL` × `MAX_BATCH` = 1000 geprüfte Verbindungen pro Runde. Für den
-/// geforderten Bereich bis 500 aktiver Verbindungen bedeutet das **genau zwei**
-/// Batches in **einer** Welle.
+/// Sessions pro **paralleler Welle**: `MAX_PARALLEL` × `MAX_BATCH` = 1000.
+/// Das ist **keine** absolute Kapazitätsgrenze des Pollers, sondern nur die
+/// Zahl, die in einer Welle parallel geprüft wird: `poll_once` verarbeitet
+/// **alle** Batches und folgt bei mehr als 1000 Einträgen weiteren begrenzten
+/// Wellen, wobei keine Verbindung allein wegen ihrer Position übersprungen
+/// wird. Das Projektziel bis 500 aktiver Verbindungen braucht genau zwei
+/// Batches in einer Welle. Die 30-S-Frist gilt bis 4000 Verbindungen nur
+/// rechnerisch aus Takt und Timeout abgeleitet, nicht als Lastmesswert.
 pub const MAX_PER_ROUND: usize = MAX_PARALLEL * MAX_BATCH;
 
 /// Ein Snapshot-Eintrag: die zum Snapshot-Zeitpunkt gültigen Daten.
