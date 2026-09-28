@@ -824,7 +824,12 @@ Das ist bewusst so gewählt, weil nur so ein ausdrücklicher Widerruf von einem 
 * Ein **Retention- oder Cleanup-Mechanismus existiert nicht.** Es gibt keinen Hintergrundtask und keinen geplanten Löschlauf.
 * Der Index `idx_sessions_expires` auf `expires_at` besteht, wird aber von **keiner** Anweisung für eine Bereinigung verwendet.
 
-Diese Lücke ist als `BESTÄTIGT` unter `P-33` in `docs/Security.md` geführt, Priorität `GERING`. Festgehalten ist dort:
+Diese Lücke ist als `BESTÄTIGT` unter `P-33` in `docs/Security.md` geführt, Priorität `GERING`.
+
+**Bedeutung von `revoked_at` (VERBINDLICH):** `revoked_at` ist ein **technischer Laufzeitmarker**, kein dauerhaftes Auditprotokoll. Er trennt für die Auth-API `revoked` von `valid` und `expired` und ist für `AUTH-02b` erforderlich, **solange die Zeile existiert**. Der einzige produktive Auslöser des Markers ist heute der **freiwillige Logout** des Login-Dienstes (`src/login/handlers.go:62`); ein administrativer oder sicherheitsmotivierter Einzelwiderruf existiert nicht, und für den Logout wird **kein** `security_events`-Eintrag geschrieben. Wird die Zeile später gelöscht, **entfällt der Marker vollständig und ist nicht rekonstruierbar** — das ist für den heutigen Logout fachlich akzeptiert, weil dafür kein dauerhafter Nachweis verlangt wird. Der Marker selbst darf **nicht** entfernt werden: ohne ihn fiele jeder widerrufene Token auf `expired` zurück und `AUTH-02b` würde gebrochen.
+
+Festgehalten ist dort weiterhin:
+
 
 * **Widerrufene Zeilen sind technisch grundsätzlich bereinigbar.** Nach ihrer Löschung liefert der Status `missing`, was für aktive Realm-Verbindungen fail-closed ist und dieselbe Trennwirkung wie `revoked` hat. **Offen** bleibt die Audit-Semantik, weil `/session/revoke` keinen eigenen Eintrag in `security_events` erzeugt und `revoked_at` damit heute der einzige persistente Nachweis eines Einzelwiderrufs ist.
 * **Abgelaufene, nicht widerrufene Zeilen dürfen nicht automatisch gelöscht werden.** Nach einer Löschung lieferte der Batch `missing`; der Realm behandelt `missing` wie einen Widerruf und würde damit eine nach `AUTH-02a` weiterhin zulässige Verbindung schließen. Erforderlich wäre ein zuverlässiger Nachweis, dass keine aktive Realm-Verbindung die Session mehr verwendet — dieser ist technisch offen.
