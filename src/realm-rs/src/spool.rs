@@ -35,7 +35,7 @@ use crate::persist::PersistSnapshot;
 /// Aktuelle Drahtformat-Version der Spool-Dateien.
 pub const FORMAT_VERSION: u16 = 1;
 
-/// Aufbewahrungsfrist für superseded-/Archiv-Dateien (docs §32).
+/// Aufbewahrungsfrist für superseded-/Archiv-Dateien (docs §33).
 const RETENTION_SECS: u64 = 30 * 24 * 60 * 60;
 
 /// Status der Spieler-Persistenz (docs §34/§36): RECOVERING blockiert Logins
@@ -217,7 +217,7 @@ impl PersistRuntime {
         Ok(total)
     }
 
-    /// Retention: superseded-/Archiv-Dateien über 30 Tage (docs §32).
+    /// Retention: superseded-/Archiv-Dateien über 30 Tage (docs §33).
     pub fn run_retention(&self) -> Result<(), String> {
         self.spool.run_retention()
     }
@@ -465,8 +465,10 @@ impl Spool {
         Ok(())
     }
 
-    /// Retention (docs §32): superseded/Archiv-Dateien > 30 Tage löschen;
-    /// Quarantäne-open-Dateien > 30 Tage nach archive verschieben.
+    /// Retention (docs §33): superseded-/Archiv-Dateien > 30 Tage löschen.
+    /// `quarantine/open/` wird NICHT angefasst: offene Fälle bleiben
+    /// unabhängig von ihrem Alter in `open/` und werden erst nach manueller
+    /// beziehungsweise operativer Bearbeitung nach `archive/` überführt.
     pub fn run_retention(&self) -> Result<(), String> {
         self.run_retention_at(now_secs())
     }
@@ -478,21 +480,7 @@ impl Spool {
         // (rename behält die mtime) dürfen nicht im selben Lauf sofort
         // wieder gelöscht werden — sonst wäre das Archiv zwecklos.
         prune_older_than(&self.quarantine_archive_dir(), now_secs)?;
-        let open = list_json_files(&self.quarantine_open_dir())?;
-        for f in open {
-            if file_modified_age_secs(&f, now_secs) > RETENTION_SECS {
-                let dst = self.quarantine_archive_dir().join(
-                    f.file_name()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                );
-                if !dst.exists() {
-                    move_file(&f, &dst)?;
-                } else {
-                    remove_file(&f)?;
-                }
-            }
-        }
+        // Kein automatischer Eingriff in `quarantine/open/` (docs §33).
         Ok(())
     }
 }
@@ -566,19 +554,6 @@ fn remove_file(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|e| format!("Spool Datei entfernen {path:?}: {e}"))
 }
 
-/// Sekunden der Datei-Änderungszeit relativ zu `now_secs`.
-fn file_modified_age_secs(path: &Path, now_secs: u64) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|m| {
-            m.duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-        })
-        .map(|modified| now_secs.saturating_sub(modified))
-        .unwrap_or(0)
-}
-
 /// Löscht `.json`-Dateien älter als `RETENTION_SECS` (modifizierte Zeit).
 fn prune_older_than(dir: &Path, now_secs: u64) -> Result<(), String> {
     let files = list_json_files(dir)?;
@@ -603,7 +578,7 @@ mod tests {
     use super::*;
     use crate::inventory::InventoryState;
     use std::collections::{BTreeMap, HashSet};
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -691,6 +666,47 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// Retention-Zeitpunkt für eine Datei: der aus `mtime` abgeleitete
+    /// Sekundenzeitpunkt, auf den `run_retention_at` angesetzt wird, damit die
+    /// Datei exakt `RETENTION_SECS` alt ist.
+    fn mtime_secs(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(|m| {
+                m.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Setzt die Änderungszeit einer Datei auf `secs_ago` Sekunden in der
+    /// Vergangenheit, damit Altersverhältnisse ohne Zeitreise im Dateisystem
+    /// steuerbar sind.
+    fn age_file(path: &Path, secs_ago: u64) {
+        let t = SystemTime::now() - Duration::from_secs(secs_ago);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// Zählt die `.json`-Dateien in einem Verzeichnis (ohne `.tmp-`-Reste).
+    fn count_json(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.path().extension().and_then(|x| x.to_str()) == Some("json")
+                            && !e.file_name().to_string_lossy().starts_with(".tmp-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     #[test]
     fn retention_only_prunes_old_files() {
         let base = temp_dir("ret");
@@ -713,30 +729,164 @@ mod tests {
         std::fs::remove_dir_all(&base).unwrap();
     }
 
+    /// docs/Player_Persistenz.md §33: offene Fälle in `quarantine/open/` werden
+    /// NIEMALS aufgrund ihres Alters automatisch gelöscht und nicht automatisch
+    /// archiviert. Retention-Zeitsteuerung weiterhin über `run_retention_at`.
     #[test]
-    fn retention_moves_old_open_quarantine_to_archive() {
+    fn retention_keeps_old_open_quarantine_untouched() {
         let base = temp_dir("retq");
         let s = spool(&base);
         s.ensure_dirs().unwrap();
         let qdir = s.quarantine_open_dir();
         let f = qdir.join("x.json");
-        std::fs::write(&f, "{}").unwrap();
-        // Retention-Semantik (Player_Persistenz.md §32): Alter = now − mtime.
-        // `now` in der ZUKUNFT (mtime + 30 Tage + Puffer) → Alter > Retention.
-        let mtime = std::fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .map(|m| {
-                m.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            })
-            .unwrap_or(0);
-        let future = mtime + RETENTION_SECS + 10;
+        let body = r#"{"format_version":1,"offener":"fall"}"#;
+        std::fs::write(&f, body).unwrap();
+        // `now` so weit in der ZUKUNFT, dass die Datei weit überfällig wäre.
+        let future = mtime_secs(&f) + RETENTION_SECS + 10;
         s.run_retention_at(future).unwrap();
-        assert!(!f.exists(), "open-Quarantäne verschoben");
+        assert!(f.exists(), "offene Quarantäne bleibt in open/ liegen");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            body,
+            "Inhalt byte-identisch"
+        );
         assert!(
-            s.quarantine_archive_dir().join("x.json").exists(),
-            "im Archiv gelandet"
+            !s.quarantine_archive_dir().join("x.json").exists(),
+            "kein automatischer Eintrag im Archiv"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §33: ein jüngerer offener Fall bleibt ebenfalls unverändert.
+    #[test]
+    fn retention_keeps_young_open_quarantine_untouched() {
+        let base = temp_dir("retqy");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let f = s.quarantine_open_dir().join("y.json");
+        let body = r#"{"offener":"junger fall"}"#;
+        std::fs::write(&f, body).unwrap();
+        s.run_retention_at(mtime_secs(&f) + 1).unwrap();
+        assert!(f.exists(), "junge offene Quarantäne bleibt");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), body);
+        assert_eq!(count_json(&s.quarantine_archive_dir()), 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §33: bei gleichnamigem Archivziel mit IDENTISCHEM Inhalt bleiben beide
+    /// Dateien bestehen — es wird nichts automatisch gelöscht oder verschoben.
+    /// Der offene Fall ist bewusst überfällig (40 Tage), das Archivziel jung:
+    /// nur so ist das Archivziel nicht selbst von der Archiv-Retention betroffen
+    /// und der Nachweis eindeutig.
+    #[test]
+    fn retention_keeps_open_when_archive_target_is_identical() {
+        let base = temp_dir("retqi");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let body = r#"{"offener":"fall"}"#;
+        let open = s.quarantine_open_dir().join("z.json");
+        let archived = s.quarantine_archive_dir().join("z.json");
+        std::fs::write(&open, body).unwrap();
+        std::fs::write(&archived, body).unwrap();
+        age_file(&open, 40 * 86_400);
+        age_file(&archived, 0);
+        s.run_retention_at(now_secs()).unwrap();
+        assert!(open.exists(), "offene Datei bleibt bestehen");
+        assert_eq!(std::fs::read_to_string(&open).unwrap(), body);
+        assert!(archived.exists(), "Archivdatei bleibt bestehen");
+        assert_eq!(std::fs::read_to_string(&archived).unwrap(), body);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §33: bei gleichnamigem Archivziel mit ABWEICHENDEM Inhalt bleiben beide
+    /// Dateien bestehen. Vor dem Fix löschte dieser Pfad die offene Datei
+    /// ungeprüft; genau das ist ausgeschlossen.
+    #[test]
+    fn retention_keeps_open_when_archive_target_differs() {
+        let base = temp_dir("retqd");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let open_body = r#"{"offener":"fall mit diagnoseinhalt"}"#;
+        let archive_body = r#"{"abweichender":"archivstand"}"#;
+        let open = s.quarantine_open_dir().join("w.json");
+        let archived = s.quarantine_archive_dir().join("w.json");
+        std::fs::write(&open, open_body).unwrap();
+        std::fs::write(&archived, archive_body).unwrap();
+        age_file(&open, 40 * 86_400);
+        age_file(&archived, 0);
+        s.run_retention_at(now_secs()).unwrap();
+        assert!(
+            open.exists(),
+            "offene Datei bleibt trotz abweichendem Archiv"
+        );
+        assert_eq!(std::fs::read_to_string(&open).unwrap(), open_body);
+        assert!(archived.exists(), "Archivdatei bleibt bestehen");
+        assert_eq!(std::fs::read_to_string(&archived).unwrap(), archive_body);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §33: wiederholte Retention-Läufe verändern offene Fälle nicht.
+    #[test]
+    fn retention_repeated_runs_leave_open_quarantine_untouched() {
+        let base = temp_dir("retqr");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let f = s.quarantine_open_dir().join("r.json");
+        let body = r#"{"offener":"fall"}"#;
+        std::fs::write(&f, body).unwrap();
+        let future = mtime_secs(&f) + RETENTION_SECS + 10;
+        for _ in 0..3 {
+            s.run_retention_at(future).unwrap();
+            assert!(f.exists(), "offener Fall bleibt über mehrere Läufe");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), body);
+            assert_eq!(count_json(&s.quarantine_archive_dir()), 0);
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §33: die 30-Tage-Retention für ARCHIVIERTE Fälle bleibt erhalten —
+    /// alte werden entfernt, junge bleiben.
+    #[test]
+    fn retention_still_prunes_old_archive_but_keeps_young() {
+        let base = temp_dir("reta");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let old = s.quarantine_archive_dir().join("alt.json");
+        let fresh = s.quarantine_archive_dir().join("jung.json");
+        std::fs::write(&old, "{}").unwrap();
+        std::fs::write(&fresh, "{}").unwrap();
+        let now = now_secs();
+        s.run_retention_at(now).unwrap();
+        assert!(
+            old.exists() && fresh.exists(),
+            "frische Archivdateien bleiben"
+        );
+        s.run_retention_at(now + RETENTION_SECS + 1).unwrap();
+        assert!(
+            !old.exists() && !fresh.exists(),
+            "überfällige Archivdateien gelöscht"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// §34: superseded behält seine 30-Tage-Retention ohne manuelle Freigabe.
+    /// Nachgewiesen in `retention_only_prunes_old_files` (oben).
+    #[test]
+    fn retention_superseded_needs_no_manual_release() {
+        let base = temp_dir("rets");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let old = s.superseded_dir().join("s-alt-r1.json");
+        let fresh = s.superseded_dir().join("s-jung-r2.json");
+        std::fs::write(&old, "{}").unwrap();
+        std::fs::write(&fresh, "{}").unwrap();
+        let now = now_secs();
+        s.run_retention_at(now).unwrap();
+        assert!(old.exists() && fresh.exists(), "junge superseded bleiben");
+        s.run_retention_at(now + RETENTION_SECS + 1).unwrap();
+        assert!(
+            !old.exists() && !fresh.exists(),
+            "überfällige superseded gelöscht"
         );
         std::fs::remove_dir_all(&base).unwrap();
     }

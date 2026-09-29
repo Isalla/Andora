@@ -348,7 +348,7 @@ async fn async_main() -> Result<(), String> {
     });
 
     // Stufe B: periodischer DB-Drain (älteste Spool-Batch auf die DB, §36)
-    // + tägliche Retention der superseded-/Archiv-Dateien (§32).
+    // + tägliche Retention der superseded-/Archiv-Dateien (§33).
     let drain_ms = cfg.persist.drain_interval_ms.max(1);
     let retention_every = (86_400_000_u64 / drain_ms).max(1);
     let drain_pool = pool.clone();
