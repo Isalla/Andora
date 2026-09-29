@@ -973,6 +973,78 @@ Die Frist beginnt NICHT beim ursprünglichen Snapshot-Zeitpunkt.
 
 Dadurch bleiben ungefähr 30 Tage bereits bearbeiteter Fehlerfälle für Statistik, Vergleich und Regressionsanalyse verfügbar.
 
+### Verbindliche Zielregel: charakterbezogene Quarantäne-Sperre
+
+VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachweis ausstehend. Die folgenden Aussagen beschreiben die beschlossene Zielsemantik, **nicht** den aktuellen Codezustand. Der aktuelle Stand ist in `docs/Security.md` unter `P-30` dokumentiert.
+
+**Dirty-Zustand und Folgesnapshot** (heute bereits verifiziert, siehe `P-30` und `P-36`):
+
+* Schlägt ein Save fehl, werden die ungesicherten persistenten Änderungen **nicht verworfen**.
+* Die betroffenen Dirty-Komponenten bleiben im RAM dirty.
+* Der nächste Save berücksichtigt diesen bestehenden Dirty-Zustand **auch dann**, wenn am Charakter seitdem keine weitere persistente Änderung erfolgt ist.
+* Der Snapshot ist nach dem aktuell verifizierten Modell ein **vollständiger Charakterzustand und kein Delta**.
+* Weitere Änderungen dürfen bis zum nächsten Save hinzukommen und werden gemeinsam im neueren vollständigen Snapshot abgebildet.
+* Ein lediglich im RAM oder im normalen Spool vorhandener neuerer Snapshot gilt **noch nicht** als erfolgreiche Ablösung.
+* Erst eine nachweislich erfolgreiche und dauerhafte Datenbankübernahme löst den technischen Quarantänefall fachlich ab.
+
+**Charakterbezogene Sperre:**
+
+* Ein ungelöster, **sicher zuordenbarer** Quarantänefall sperrt **ausschließlich den betroffenen Charakter**.
+* Die **Kontoanmeldung bleibt möglich**.
+* Die **Charakterauswahl bleibt möglich**.
+* **Andere Charaktere desselben Kontos bleiben spielbar.**
+* Andere Konten und der Realm bleiben unberührt.
+* Der Server prüft den Status beim **tatsächlichen Charakterbeitritt erneut autoritativ**.
+* Eine Clientanzeige allein ist **keine** Sicherheitsgrenze.
+
+**Clientdarstellung (Zielregel, noch nicht implementiert):** Für einen technisch gesperrten Charakter ist folgende Zielanzeige festgelegt:
+
+* Charakter in der Auswahl **ausgegraut**,
+* Spielen-/Betreten-Schaltfläche für diesen Charakter **deaktiviert**,
+* Status: `Spielstand wird geprüft`,
+* Erklärung: `Dieser Charakter ist vorübergehend nicht verfügbar. Deine gespeicherten Daten bleiben erhalten. Bitte versuche es später erneut.`
+
+Dabei dürfen **keine** internen Pfade, Dateinamen, Revisionen, Datenbankfehler, Rohfehler oder internen IDs an den Client ausgegeben werden. Die Charakterauswahl ist im aktuellen Repository **noch nicht implementiert**; dieser Clientteil ist ausdrücklich **noch ausstehende Clientintegration** und keine vorhandene Funktion.
+
+**Sichere automatische Freigabe:** Die Zielregel lautet:
+
+```text
+database_revision >= quarantine_revision
+```
+
+Diese Beziehung darf nur dann als Ablösungsnachweis gelten, solange die bereits verifizierten Voraussetzungen bestehen: Snapshots enthalten einen **vollständigen** Charakterzustand, Revisionen sind **pro Charakter monoton**, und Spielerzustand und Revision werden **atomar** in die Datenbank übernommen. Ändert sich das Persistenzformat später zu Deltas oder Komponenten-Snapshots, muss die Ablösungsregel **neu geprüft** werden.
+
+**Analyselebenszyklus (Zielregel):**
+
+* Ungelöste Fälle liegen unter `quarantine/open/`.
+* Ein sicher durch einen DB-bestätigten neueren Stand abgelöster oder manuell technisch geklärter Fall wechselt nach `quarantine/archive/`.
+* Der ursprüngliche Quarantäneinhalt bleibt als **Analysebeleg** unverändert erhalten.
+* Eine minimale Kennzeichnung hält fest, dass der Fall abgelöst wurde und **durch welche bestätigte Revision**.
+* Für `quarantine/archive/` gilt weiterhin die **bestehende 30-Tage-Retention** dieses Abschnitts.
+* Nicht sicher zuordenbare Fälle bleiben Analyse- und Betreiberfälle, dürfen aber **keine** globale Konto-, Spieler- oder Realm-Sperre auslösen.
+
+**Technischer Fehler ist keine Sanktion:**
+
+* Quarantäne ist zunächst ein **technischer Persistenz- und Analysefall**.
+* Quarantäne ist **kein Betrugsnachweis**.
+* Ein technischer Save-Fehler darf **nicht automatisch** zu einer dauerhaften Charakter- oder Kontosperre führen.
+* Ein Betrugsverdacht wird **getrennt** untersucht.
+* Erst **bestätigter** Betrug kann durch eine bewusste, autorisierte administrative Entscheidung zu einer dauerhaften Charaktersperre führen.
+* Eine **Kontosperre** ist wiederum eine **gesonderte** administrative Entscheidung.
+* Der technische Status `save_recovery_pending` und eine administrative Sperre dürfen **nicht vermischt** werden.
+
+Fachliche Zustände:
+
+```text
+available
+save_recovery_pending
+administratively_locked
+```
+
+`P-30` behandelt ausschließlich `save_recovery_pending`. Ein vollständiges **administratives Bannsystem ist nicht automatisch Bestandteil von `P-30`**.
+
+**Shutdown und Neustart:** Bei kontrollierter Abschaltung wird der aktuelle persistente RAM-Zustand der Onlinecharaktere zunächst durable in den Spool geschrieben (dieser Teil ist heute verifiziert). Nach einem Neustart verarbeitet die Recovery den gespeicherten normalen Spool vor der READY-Freigabe (ebenso heute verifiziert). **Zielregel, noch nicht implementiert:** Quarantänefälle werden **getrennt** bewertet, und ein ungelöster Fall blockiert **nur den zugehörigen Charakter**, nicht die allgemeine READY-Freigabe des Realms.
+
 ---
 
 ## 34. Stufe B – Superseded-Snapshots

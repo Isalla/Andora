@@ -245,6 +245,17 @@ VERBINDLICH für den Realm-Einstieg:
 
 Ein Charakter, der zu einem anderen Account oder zu keinem Account gehört, wird vom Realm nicht geladen und nicht erzeugt.
 
+### Verfügbarkeitsstatus im Auswahl- und Erstellungsschritt
+
+VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachweis ausstehend. Die normative Persistenzregel steht in `docs/Player_Persistenz.md` Abschnitt 33, der Sicherheitsbefund in `docs/Security.md` unter `P-30`.
+
+Der vorgelagerte Auswahl- und Erstellungsschritt (Abschnitt 20) übermittelt **pro Charakter** einen Verfügbarkeitsstatus. Fachliche Zustände sind `available`, `save_recovery_pending` (vorübergehende technische Charaktersperre wegen eines ungelösten Quarantänefalls) und `administratively_locked` (gesonderte administrative Entscheidung). `P-30` betrifft ausschließlich `save_recovery_pending`.
+
+* **Auswahl:** Ein Charakter mit `save_recovery_pending` wird **ausgegraut** dargestellt; die Spielen-/Betreten-Schaltfläche ist für diesen Charakter **deaktiviert**. **Andere Charaktere desselben Kontos bleiben auswählbar und spielbar**, die Kontoanmeldung bleibt möglich.
+* **Neutrale Meldung:** Status `Spielstand wird geprüft`, Erklärung `Dieser Charakter ist vorübergehend nicht verfügbar. Deine gespeicherten Daten bleiben erhalten. Bitte versuche es später erneut.`
+* **Keine internen Daten zum Client:** Es werden **keine** Quarantänepfade, Dateinamen, Revisionen, Datenbank- oder Rohfehler und keine internen IDs übermittelt.
+* **Server bleibt maßgeblich:** Die Clientdarstellung ist **Bedienkomfort und keine Sicherheitsgrenze**. Der Realm prüft den Status beim **tatsächlichen Charakterbeitritt erneut autoritativ** und weist einen gesperrten Charakter serverseitig ab; ein manipulierter Client kann die Sperre **nicht** umgehen.
+
 ## Erfolgszeitpunkt des Realm-Logins
 
 VERBINDLICH für die fachliche Bewertung eines Einstiegs:
