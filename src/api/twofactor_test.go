@@ -1327,24 +1327,52 @@ func TestP34VoluntaryLogoutAndAtomicPathsUnchanged(t *testing.T) {
 // 21) P-35 stays separate: the parental events remain best-effort and are
 // NOT written transactionally. A lost parental event must not roll back the
 // parental state.
+// P-34/P-35 boundary: the Parental paths stay best-effort. This test uses
+// testServer, whose svc-all actually HOLDS the parental permissions — the
+// previous tfTestServer did not, so the /parental/setup call ended in 403 and
+// the assertion was satisfied vacuously. It now drives the real handler path
+// with parental authorisation and proves that a failed history write neither
+// rolls back the parental state nor turns the success answer into an error.
 func TestP34ParentalStaysBestEffort(t *testing.T) {
-	srv := tfTestServer(t)
+	srv := testServer(t)
 	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}
 	fs := srv.store.(*fakeStore)
 	id := addAccount(t, fs, "p34parental", "longenough1", "p34parental@example.com", false).ID
-	if err := fs.CreateParentalControl(context.Background(), &ParentalControls{AccountID: id}); err != nil {
-		t.Fatal(err)
+
+	// The parental permission is really required: a credential WITHOUT it is
+	// rejected with 403, while svc-all passes. This proves the handler path is
+	// reached instead of a permission short-circuit.
+	limited := &apiClient{s: srv, cred: srv.cfg.Services["svc-limited"]}
+	rec := limited.post(t, "/parental/setup", map[string]any{
+		"account_id": id, "parent_pin": "1234"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a credential without parental.manage must be 403, got %d %s", rec.Code, rec.Body.String())
 	}
-	rec := client.post(t, "/parental/setup", map[string]any{"account_id": id, "child_username": "p34kid"})
-	if rec.Code == http.StatusOK || rec.Code == http.StatusCreated {
-		t.Fatalf("setup with a missing child must fail, got %d %s", rec.Code, rec.Body.String())
+
+	// Real supervision through the handler.
+	p := map[string]any{
+		"account_id": id, "parent_pin": "1234",
+		"chat_enabled": true, "voice_enabled": false, "warning_minutes": 30,
 	}
-	// the fake's recordEventLocked is not used by the parental path, so a
-	// direct check: the best-effort helper still swallows its error.
-	before := len(fs.securityEvents[id])
-	srv.recordEvent(context.Background(), eventParentalSetup, id)
-	if len(fs.securityEvents[id]) != before+1 {
-		t.Fatal("best-effort helper must still record when the store succeeds")
+	rec = client.post(t, "/parental/setup", p)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("setup: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Best effort: a failing history write leaves the parental state committed
+	// and keeps the successful answer. No rollback, no error (P-35).
+	fs.failSecurityEventWrite(true)
+	fs.failParentalNotification(true)
+	rec = client.post(t, "/parental/pin/change", map[string]any{
+		"account_id": id, "old_pin": "1234", "new_pin": "4321"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("best-effort write failure must not fail the request, got %d %s", rec.Code, rec.Body.String())
+	}
+	if !p35ParentalEnabled(t, fs, id) {
+		t.Fatal("authoritative parental state must stay enabled, no rollback")
+	}
+	if n := p35EventCount(t, fs, id, eventParentalPinChanged); n != 0 {
+		t.Fatalf("no event may exist after the failed write, got %d", n)
 	}
 }
 

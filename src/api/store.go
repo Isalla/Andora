@@ -1029,6 +1029,22 @@ func securityEventFailureLine(operation, eventType string, accountID *int) strin
 		" stage=event_write error_class=db_error"
 }
 
+// parentalHistoryFailureLine builds the single WARN line for a lost
+// best-effort Parental history write (P-35). Like
+// securityEventFailureLine it is a pure function and takes NO error value, so
+// a test can prove the line carries no driver text, no PIN, no e-mail address,
+// no token, session id or raw IP, and no setting/old_value/new_value.
+//
+// stage is set by the CALLING HELPER and is what distinguishes the two
+// history targets: stage=event_write is the failed write to security_events,
+// stage=notification_write is the failed write to parental_notifications. No
+// extra target field is needed.
+func parentalHistoryFailureLine(eventType string, accountID int, stage string) string {
+	return "WARN parental_history_write_failed event_type=" + eventType +
+		" account_id=" + strconv.Itoa(accountID) +
+		" stage=" + stage + " error_class=db_error"
+}
+
 // insertSecurityEventTx writes one security_events row inside tx. It is the
 // ONLY place that logs security_event_write_failed, so exactly one line is
 // written per failed operation (P-34).

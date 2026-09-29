@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
@@ -68,16 +69,25 @@ func parseParentalDate(s string) (time.Time, bool) {
 // notifyParental enqueues one change receipt; it is never a hard
 // failure (best effort, like security events). Without a recipient
 // address there is nothing to deliver to.
+//
+// P-35: a lost receipt no longer stays silent — exactly one structured WARN
+// per failed write, while the parental state change stays committed. No
+// rollback, no error answer, no retry. The early return without a recipient
+// remains a silent, error-free no-op. The stage is fixed to
+// notification_write, which denotes the write to parental_notifications; it
+// is what tells this history apart from security_events.
 func (s *Server) notifyParental(ctx context.Context, accountID int, eventType, setting, oldVal, newVal string, recipientEnc []byte) {
 	if len(recipientEnc) == 0 {
 		return
 	}
 	oldVal = truncateNotify(oldVal)
 	newVal = truncateNotify(newVal)
-	_, _ = s.store.CreateParentalNotification(ctx, &ParentalNotification{
+	if _, err := s.store.CreateParentalNotification(ctx, &ParentalNotification{
 		AccountID: accountID, EventType: eventType, SettingName: setting,
 		OldValue: oldVal, NewValue: newVal, RecipientEmailEnc: recipientEnc,
-	})
+	}); err != nil {
+		log.Print(parentalHistoryFailureLine(eventType, accountID, "notification_write"))
+	}
 }
 
 func truncateNotify(v string) string {

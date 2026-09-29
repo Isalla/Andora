@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -34,8 +35,16 @@ func trimSpace(s string) string { return strings.TrimSpace(s) }
 // event write rolls the whole operation back. The remaining callers are the
 // Parental paths, whose best-effort semantics stay separate and are
 // documented as P-35.
+//
+// P-35: the write still never fails the caller, but a lost history row is no
+// longer silent. Exactly one structured WARN is emitted per failed write and
+// the parental state change stays committed — no rollback, no error answer,
+// no retry. The stage is fixed to event_write, which denotes the write to
+// security_events.
 func (s *Server) recordEvent(ctx context.Context, eventType string, accountID int) {
-	_ = s.store.RecordSecurityEvent(ctx, eventType, &accountID)
+	if err := s.store.RecordSecurityEvent(ctx, eventType, &accountID); err != nil {
+		log.Print(parentalHistoryFailureLine(eventType, accountID, "event_write"))
+	}
 }
 
 // --- /twofactor/status ---

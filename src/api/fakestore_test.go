@@ -46,6 +46,12 @@ type fakeStore struct {
 	usage         map[int]map[string]*ParentalDailyUsage
 	notifications map[int][]*ParentalNotification
 	nextNotifID   int
+	// P-35: the two best-effort history writes can fail independently.
+	// Unlike opFailStage there is deliberately NO snapshot/restore: a lost
+	// best-effort row must NOT undo the state change, so an injected
+	// failure simply returns an error and writes nothing.
+	securityEventWriteFail bool
+	parentalNotifWriteFail bool
 }
 
 func newFakeStore() *fakeStore {
@@ -1052,6 +1058,9 @@ func (f *fakeStore) ResetTwoFactor(_ context.Context, accountID int, expectedSec
 func (f *fakeStore) RecordSecurityEvent(_ context.Context, eventType string, accountID *int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.securityEventWriteFail {
+		return errors.New("injected security_events write failure")
+	}
 	aid := 0
 	if accountID != nil {
 		aid = *accountID
@@ -1329,6 +1338,9 @@ func (f *fakeStore) UseParentalExtension(_ context.Context, accountID int, date 
 func (f *fakeStore) CreateParentalNotification(_ context.Context, n *ParentalNotification) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.parentalNotifWriteFail {
+		return 0, errors.New("injected parental_notifications write failure")
+	}
 	cp := *n
 	cp.ID = f.nextNotifID
 	f.nextNotifID++
@@ -1336,6 +1348,22 @@ func (f *fakeStore) CreateParentalNotification(_ context.Context, n *ParentalNot
 	cp.RecipientEmailEnc = copyBytes(n.RecipientEmailEnc)
 	f.notifications[n.AccountID] = append(f.notifications[n.AccountID], &cp)
 	return cp.ID, nil
+}
+
+// failSecurityEventWrite switches the security_events write to failing (P-35
+// test seam). 0 = off, 1 = on.
+func (f *fakeStore) failSecurityEventWrite(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.securityEventWriteFail = on
+}
+
+// failParentalNotification switches the parental_notifications write to
+// failing (P-35 test seam). 0 = off, 1 = on.
+func (f *fakeStore) failParentalNotification(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.parentalNotifWriteFail = on
 }
 
 func (f *fakeStore) ListPendingParentalNotifications(_ context.Context, accountID int) ([]ParentalNotification, error) {
