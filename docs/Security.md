@@ -350,16 +350,16 @@
 
 ### P-35 – Undokumentierte Best-effort-Semantik der Parental-Ereignisse
 
-- **Status:** `BESTÄTIGT`
-- **Priorität:** `GERING` — sachlich begründet: Der autoritative Kontrollzustand liegt in `parental_controls`; ein verlorenes Event verändert diesen Zustand **nicht** und gefährdet **keine** Sicherheitsgarantie. Betroffen sind Nachvollziehbarkeit und Historie, nicht die Durchsetzung der Elternkontrolle.
+- **Status:** `ERLEDIGT`
 - **Betroffener Bereich:** Parental-Schreibpfade (`src/api/parental_handlers.go`, `src/api/parental.go`), `security_events` und `parental_notifications`.
-- **Bekannte Ausgangslage (verifiziert gegen `6318aa1a8834e2ec41c7a62101552eb39c8817e7`):**
-  - `parental_setup`, `parental_settings`, `parental_removed` und `parental_pin_changed` schreiben **nach** der Zustandsänderung **best-effort** nach `security_events` (`src/api/parental_handlers.go:296`, `:422`, `:467`, `:518`, jeweils nach dem jeweiligen `Set*`-Aufruf). Fehler werden **vollständig verworfen** und **nicht protokolliert** (0 Log-Aufrufe in `src/api/parental_handlers.go`).
-  - Weitere `parental_*`-Konstanten schreiben **nicht** nach `security_events`, sondern nach **`parental_notifications`**: `parental_email_changed`, `parental_email_removed`, `parental_period` und `parental_exception` (`src/api/parental.go:48-51`) gehen über `notifyParental` → `CreateParentalNotification` (`src/api/parental_handlers.go:68-81`, Aufrufer `:382`, `:397`, `:717`, `:760`, `:829`, `:876`), dessen Fehler mit `_, _ =` verworfen werden.
-  - Die **Namensähnlichkeit** (`eventParental…` für beide Ziele) **verdeckt zwei unterschiedliche Ziele und Semantiken**: `security_events` ist der Security-Event-Verlauf, `parental_notifications` der Benachrichtigungs-/Quittungsweg.
+- **Historischer Befund – Ausgangszustand vor Commit `b9622edad914a53fb61c5bec2cb3b0ee9f3abc79`:** Die folgenden Aussagen und Zeilenangaben beschreiben den **Vorzustand** (zuletzt verifiziert gegen `6318aa1a8834e2ec41c7a62101552eb39c8817e7`). Sie sind **kein** Beleg für den aktuellen Code; die aktuellen Belege stehen unter „Abgeschlossene Garantien" und „Testnachweis".
+  - `parental_setup`, `parental_settings`, `parental_removed` und `parental_pin_changed` schrieben **nach** der Zustandsänderung **best-effort** nach `security_events` (historisch `src/api/parental_handlers.go:296`, `:422`, `:467`, `:518`). Fehler wurden **vollständig verworfen** und **nicht protokolliert** (0 Log-Aufrufe in `src/api/parental_handlers.go`).
+  - Vier Typen wurden **ausschließlich** nach `parental_notifications` geschrieben: `parental_email_changed`, `parental_email_removed`, `parental_period` und `parental_exception` (historisch `src/api/parental.go:48-51`; Aufrufer `src/api/parental_handlers.go:382`, `:397`, `:717`, `:760`, `:829`, `:876`), deren Fehler mit `_, _ =` verworfen wurden.
+  - **Historisch unvollständig dargestellt:** Die Beschreibung nannte nur diese vier notification-only Typen. Tatsächlich wurden **auch** `parental_setup`, `parental_settings`, `parental_removed` und `parental_pin_changed` **sowohl** nach `security_events` **als auch** nach `parental_notifications` geschrieben; `parental_notifications` enthielt **acht** Typen.
+  - Die **Namensähnlichkeit** (`eventParental…` für beide Ziele) **verdeckte zwei unterschiedliche Ziele und Semantiken**: `security_events` ist der Security-Event-Verlauf, `parental_notifications` der Benachrichtigungs-/Quittungsweg.
   - Der **autoritative Kontrollzustand** liegt in `parental_controls`; ein **verlorenes Event verändert diesen Zustand nicht**. Ein fehlendes `parental_removed`-Event verhindert keine aktive Kontrolle.
-  - **Kein `parental_*`-Eventtyp ist in `docs/` benannt**; die Semantik der gesamten Gruppe ist undokumentiert. Der Kopfkommentar der Migration `011_security_events.sql:2-6` listet **keine** `parental_*`-Typen.
-  - **Kein Test** prüft einen `parental_*`-Event über `security_events`; `src/api/parental_test.go:417` liest das Feld `notifications` und belegt damit nur den Quittungsweg, nicht das Security-Event.
+  - **Historischer Vorzustand:** Es war **kein** `parental_*`-Eventtyp in `docs/` benannt, und der Kopfkommentar der Migration `011_security_events.sql:2-6` listete **keine** `parental_*`-Typen.
+  - **Historischer Vorzustand:** **Kein Test** prüfte einen `parental_*`-Event über `security_events`; `src/api/parental_test.go:417` las das Feld `notifications` und belegte damit nur den Quittungsweg.
   - **Kein erfolgreicher Angriff ist nachgewiesen.** Belegt ist ausschließlich die statische Fehlersemantik.
 - **Verbindliche Sollsemantik:**
   1. Die genannten Parental-Ereignisse und Benachrichtigungen sind **informativ und best-effort**.
@@ -368,11 +368,30 @@
   4. Fehler müssen **strukturiert protokolliert** werden — ohne PIN, E-Mail-Adresse, Token, Session-ID, Roh-IP oder andere sensible Inhalte.
   5. `security_events` und `parental_notifications` müssen **dokumentarisch klar getrennt** werden.
   6. Es wird **keine** Outbox-, Retry-, Queue-, Tabellen- oder Taskarchitektur vorweggenommen.
-  7. Die **veraltete Aufzählung** im Kopf der Migration `011` wird als **Code-/Migrationskommentar-Befund** festgehalten, aber in diesem Dokumentationsauftrag **nicht geändert**.
+  7. Die **veraltete Aufzählung** im Kopf der Migration `011` wird als **Code-/Migrationskommentar-Befund** festgehalten, aber in diesem Dokumentationsauftrag **nicht** geändert**.
 - **Abgrenzung (VERBINDLICH):** Dieser Punkt wird **nicht** an den Transaktionsumbau von `P-34` gekoppelt und **nicht** gemeinsam mit `P-34` umgesetzt. Er fordert **keine** Atomarität für Parental-Ereignisse, weil dort kein Sicherheitszustand ohne Nachweis entsteht.
-- **Verifizierte Belege:** `src/api/parental.go:44-51`; `src/api/parental_handlers.go:68-81`, `:296`, `:382`, `:397`, `:417`(Test), `:422`, `:467`, `:518`, `:717`, `:760`, `:829`, `:876`; `src/api/parental_test.go:408-421`; `src/api/db/auth/migrations/011_security_events.sql:2-6`; `src/api/twofactor.go:31-33` (gemeinsamer verworfener Helfer, dort unter `P-34` erfasst).
-- **Nächster zulässiger Schritt:** Ein **separater kleiner Coding-Plan** zur sichtbaren best-effort-Fehlerprotokollierung und zur begrifflichen Trennung von `security_events` und `parental_notifications`. **Keine Kopplung an den `P-34`-Transaktionsumbau.**
-- **Abschlussnachweis:** ausstehend (der Befund ist bestätigt, die Dokumentations- und Protokollierungsanpassung ist nicht beauftragt).
+- **Abgeschlossene Garantien (Belege verifiziert gegen `b9622edad914a53fb61c5bec2cb3b0ee9f3abc79`):**
+  1. Fehlgeschlagene Writes nach `security_events` erzeugen **genau eine** strukturierte Warnung (`src/api/twofactor.go:44-47`, Log-Aufruf `:46`).
+  2. Fehlgeschlagene Writes nach `parental_notifications` erzeugen **genau eine** strukturierte Warnung (`src/api/parental_handlers.go:79-91`, Log-Aufruf `:89`).
+  3. `stage=event_write` bezeichnet `security_events`; `stage=notification_write` bezeichnet `parental_notifications`.
+  4. `event_type` stammt aus **internen Konstanten** (`src/api/parental.go:44-51`); alle 17 Aufrufer übergeben eine `eventParental*`-Konstante.
+  5. `account_id` ist die **einzige fachliche Kennung** in der Warnung.
+  6. **Fehler- und Treibertext werden nicht ausgegeben**; die Formatfunktion `parentalHistoryFailureLine` (`src/api/store.go:1042-1046`) nimmt keinen Fehlerparameter entgegen und setzt `error_class=db_error` fest.
+  7. **PIN, PIN-Hash, E-Mail-Adresse, Token, Session-ID, Roh-IP, SQL, DB-URL und Parental-Inhalte werden nicht ausgegeben.**
+  8. Der **autoritative Zustand bleibt** bei Historienfehlern geändert; **kein Rollback**, **kein Retry**, **keine** Outbox, Queue, Hintergrundaufgabe, Dirty-Markierung oder spätere Reparatur.
+  9. Die **HTTP-Erfolgsantwort bleibt unverändert**; die Semantik führt **keine** `P-34`-Atomarität ein.
+  10. `security_events` und `parental_notifications` bleiben **getrennte Ziele**; `notifyParental` kehrt ohne Empfänger **unverändert still** zurück (`src/api/parental_handlers.go:80`).
+  11. Fehlende Historieneinträge werden **sichtbar gemacht, aber nicht verhindert**.
+  12. Die Store-Schreibpfade selbst sind **unverändert**: `RecordSecurityEvent` (`src/api/store.go:1630`) und `CreateParentalNotification` (`src/api/parental.go:656`) propagieren ihre Fehler wie zuvor.
+- **Warnformat (exakt, eine Zeile):**
+  ```text
+  WARN parental_history_write_failed event_type=<const> account_id=<id> stage=<event_write|notification_write> error_class=db_error
+  ```
+- **Migration 011:** Der Kommentar des Kopfes nennt die **16** derzeit im Code vorhandenen Typkonstanten – **acht** aus `store.go` und **acht** aus `parental.go` (`src/api/db/auth/migrations/011_security_events.sql:1-17`). Die Liste ist **keine** schemaerzwungene abgeschlossene Menge; `event_type` bleibt `VARCHAR(32)` **ohne** CHECK oder ENUM. **Keine ausführbare SQL-Zeile wurde geändert**, es gibt **keine neue Migration** und **keine Schemaänderung**.
+- **Testnachweis:** 107 Top-Level-Go-Tests bestanden, 0 fehlgeschlagen, 0 übersprungen, 40 Subtests bestanden; davon 9 neue P-35-Top-Level-Tests und 14 P-35-Subtests. `go vet ./...` sauber, `gofmt -l .` leer. Nachweisbare Abdeckung: die vier `security_events`-Parental-Typen; die **acht** eindeutigen `parental_notifications`-Typen; 16 Formatfälle aus acht Typen und zwei Stages; Zustand und 2xx-Antwort bleiben bei Write-Fehler erhalten; genau eine Warnung je fehlgeschlagenem Write; vier Write-Fehler ergeben vier Warnungen; Erfolg erzeugt keine P-35-Warnung; fehlender Empfänger bleibt ein stiller, erfolgreicher Frühabbruch; beide Ziele bleiben über `stage` unterscheidbar; korrigierter Handlernachweis in `TestP34ParentalStaysBestEffort` (`src/api/twofactor_test.go:1336`). Teststellen: `src/api/parental_test.go:693`, `:806`, `:883`, `:1038`, `:1072`, `:1117`, `:1136`, `:1177`, `:1217`.
+- **Abschlussgrenze (bleibt sichtbar):** 1. Kein **echter** MariaDB-Insertfehler getestet. 2. Kein **reales** Logging während eines Datenbankausfalls getestet. 3. **Keine garantierte Logzustellung.** 4. **Keine garantierte Logpersistenz.** 5. **Keine** MariaDB-Aussage zu Nebenläufigkeit, Lock oder Deadlock. 6. **Kein Race-Test-Nachweis** in dieser Umgebung, weil ThreadSanitizer vor Teststart mit `unsupported VMA range` scheitert. Diese Punkte sind **Integrations- beziehungsweise Nachweisgrenzen**, **keine offene fachliche Entscheidung** und **keine bekannte Abweichung** der implementierten P-35-Semantik; sie werden beim späteren Release-Sicherheitsaudit erneut geprüft. Es entsteht dafür **keine neue P-ID**.
+- **Nächster zulässiger Schritt:** Keine weitere Maßnahme an der P-35-Implementierung. `P-35` ist abgeschlossen. Die dokumentierten Integrations- und Nachweisgrenzen werden beim späteren Release-Sicherheitsaudit erneut geprüft.
+- **Abschlussnachweis:** Commit `b9622edad914a53fb61c5bec2cb3b0ee9f3abc79`: 107 Top-Level-Go-Tests bestanden, 0 fehlgeschlagen, 0 übersprungen, 40 Subtests bestanden; davon 9 neue P-35-Tests und 14 P-35-Subtests in `src/api/parental_test.go` und `src/api/fakestore_test.go`; `go vet ./...` sauber; `gofmt -l .` in `src/api` leer; keine Migration, keine ausführbare SQL-Änderung, keine Schemaänderung, keine neue Abhängigkeit.
 
 ## 4. Noch ausstehendes Sicherheits-Audit
 

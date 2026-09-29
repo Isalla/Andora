@@ -478,14 +478,22 @@ Die verbindliche Entscheidung und Durchsetzung erfolgt auf dem Server.
 ## Zwei getrennte Historien: `security_events` und `parental_notifications`
 
 Die Elternkontrolle schreibt an zwei **getrennte** Ziele, die **nicht**
-verwechselt werden dürfen. Festgehalten als `P-35` (GERING) in
+verwechselt werden dürfen. Festgehalten als `P-35` (`ERLEDIGT`) in
 `docs/Security.md`.
 
 | | `security_events` | `parental_notifications` |
 |---|---|---|
 | Zweck | Security-Event-Verlauf der Auth-DB | Benachrichtigungs- und Quittungsweg |
-| Betroffene Ereignisse | `parental_setup`, `parental_settings`, `parental_removed`, `parental_pin_changed` | `parental_email_changed`, `parental_email_removed`, `parental_period`, `parental_exception` |
+| Betroffene Ereignisse | `parental_setup`, `parental_settings`, `parental_removed`, `parental_pin_changed` | `parental_setup`, `parental_settings`, `parental_removed`, `parental_pin_changed`, `parental_email_changed`, `parental_email_removed`, `parental_period`, `parental_exception` |
 | Verbindlichkeit | **informativ und best-effort** | **informativ und best-effort** |
+
+**Die ersten vier Typen (`parental_setup`, `parental_settings`,
+`parental_removed`, `parental_pin_changed`) werden in beide Ziele
+geschrieben.** Die letzten vier (`parental_email_changed`,
+`parental_email_removed`, `parental_period`, `parental_exception`) gehen
+**ausschließlich** nach `parental_notifications`. **Kein** Parental-Typ wird
+ausschließlich nach `security_events` geschrieben; `parental_notifications`
+umfasst **acht** Typen.
 
 **Beide Pfade sind best-effort.** Ihr Fehlschlag darf eine bereits
 erfolgreiche Zustandsänderung **nicht zurückrollen** und dem Benutzer
@@ -499,18 +507,38 @@ dadurch aufgehoben, undeutlich oder umgangen, dass ihr Verlaufseintrag
 fehlt. Betroffen sind **Nachvollziehbarkeit und Historie**, nicht die
 Durchsetzung.
 
-**Der Verlust darf nicht vollständig unsichtbar bleiben.** Fehler beim
-Schreiben dieser Historien- und Benachrichtigungspfade werden
-**strukturiert protokolliert**. Die Protokollierung verändert das
-fachliche Ergebnis **nicht** nachträglich — sie macht lediglich sichtbar,
-dass eine Zustandsänderung ohne ihren Verlaufseintrag stattgefunden hat.
+**Der Verlust darf nicht vollständig unsichtbar bleiben.** Je
+fehlgeschlagenem Historien-Write entsteht **genau eine strukturierte
+Warnung**; das Ziel wird über `stage` unterschieden
+(`stage=event_write` für `security_events`, `stage=notification_write` für
+`parental_notifications`). Das Format lautet:
 
-**Keine sensiblen Inhalte in Protokollen.** Protokolliert werden dürfen
-weder die PIN, noch die E-Mail-Adresse, noch Token, Session-ID, Roh-IP oder
-andere sensible Inhalte.
+```text
+WARN parental_history_write_failed event_type=<const> account_id=<id> stage=<event_write|notification_write> error_class=db_error
+```
+
+**Keine sensiblen Werte, keine Fehlertexte.** Weder PIN, PIN-Hash,
+E-Mail-Adresse, Token, Session-ID, Roh-IP, SQL, DB-URL noch Parental-Inhalte
+und weder Fehler- noch Treibertext werden ausgegeben; `account_id` ist die
+einzige fachliche Kennung.
+
+Die Protokollierung verändert das fachliche Ergebnis **nicht** nachträglich –
+sie macht lediglich sichtbar, dass eine Zustandsänderung ohne ihren
+Verlaufseintrag stattgefunden hat. **Verlorene Einträge werden sichtbar, nicht
+verhindert.** Es erfolgt **keine Rückabwicklung** und **keine Änderung** der
+erfolgreichen Clientantwort.
 
 **Abgrenzung:** Diese Semantik ist bewusst **getrennt** von der Atomarität
 der Auth-Sicherheitsereignisse (`P-34`). Hier wird **keine** Atomarität
 gefordert, weil hier kein Sicherheitszustand ohne Nachweis entsteht; dort
 wird sie gefordert, weil ein Zustandswechsel sonst ohne Nachweis bliebe.
 Diese Regelung wird **nicht** an den `P-34`-Transaktionsumbau gekoppelt.
+
+**Abschlussgrenzen:** Der vollständige Abschluss einschließlich der sechs
+Integrations- und Nachweisgrenzen (kein echter MariaDB-Insertfehler, kein
+reales Logging während eines Datenbankausfalls, keine garantierte
+Logzustellung, keine garantierte Logpersistenz, keine MariaDB-Aussage zu
+Nebenläufigkeit, Lock oder Deadlock, kein Race-Test-Nachweis) steht in
+`docs/Security.md` unter `P-35`. Sie sind **keine offene fachliche
+Entscheidung** und werden beim späteren Release-Sicherheitsaudit erneut
+geprüft.

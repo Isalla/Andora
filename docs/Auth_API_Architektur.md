@@ -583,8 +583,10 @@ verändert hat, und ein erneuter Versuch ist der vorgesehene Weg.
   und ohne dauerhaftes Ereignis; es existiert **keine** Konstante
   `session_revoked` im Code.
 * Die **best-effort-Parental-Pfade** bleiben unverändert und sind weiterhin
-  unter `P-35` getrennt geregelt; `src/api/parental_handlers.go` war nicht
-  Teil des Umsetzungscommits.
+  unter `P-35` geregelt. `src/api/parental_handlers.go` war **nicht** Teil
+  des **P-34**-Umsetzungscommits `1eb38a7b33e0fda9ff1cf61640bc46b4bcb55a82`;
+  die getrennte P-35-Sichtbarmachung erfolgte später in
+  `b9622edad914a53fb61c5bec2cb3b0ee9f3abc79`.
 *
 **MariaDB-/InnoDB-Integrationsgrenze:** Die Umsetzung ist über den
 FakeStore **logisch** verifiziert, die echte InnoDB-Atomarität des
@@ -595,6 +597,10 @@ Verhalten, Massenupdates, Commitfehler und das 5-Sekunden-DB-Zeitbudget
 sind **nicht** gegen eine laufende Datenbank geprüft. Diese Grenzen sind
 in `docs/Security.md` unter `P-34` als Abschlussgrenze festgehalten.
 
-**Weitere Abgrenzungen:** Die best-effort-Parental-Ereignisse sind unter
-`P-35` getrennt geregelt. Dieser Abschnitt legt **keine** Go-Funktion,
-**keine** SQL-Transaktion und **keine** neue API fest.
+**Weitere Abgrenzungen:** `P-35` ist **abgeschlossen** und unter
+`docs/Security.md` vollständig dokumentiert. Es protokolliert fehlgeschlagene
+best-effort-Historien-Writes als strukturierte Warnung, führt aber **keine**
+`P-34`-Atomarität ein: der autoritative Parental-Zustand und die erfolgreiche
+Clientantwort bleiben bestehen, und beide Historienziele bleiben getrennt.
+Verlorene Einträge werden **sichtbar, nicht verhindert**. Dieser Abschnitt legt
+**keine** Go-Funktion, **keine** SQL-Transaktion und **keine** neue API fest.
