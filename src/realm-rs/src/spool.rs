@@ -475,13 +475,25 @@ impl Spool {
 
     /// Testbarer Kern der Retention: `now_secs` ist die angenommene Jetzt-Zeit.
     fn run_retention_at(&self, now_secs: u64) -> Result<(), String> {
-        prune_older_than(&self.superseded_dir(), now_secs)?;
+        // Beide Ziele werden garantiert bearbeitet: die Fehlerzähler werden
+        // addiert statt per `?` propagiert, damit ein Fehler in einem
+        // Verzeichnis das andere nicht blockiert.
         // Archiv ZUERST beschneiden: Neu archivierte Dateien dieses Laufs
         // (rename behält die mtime) dürfen nicht im selben Lauf sofort
         // wieder gelöscht werden — sonst wäre das Archiv zwecklos.
-        prune_older_than(&self.quarantine_archive_dir(), now_secs)?;
+        let mut failures = PruneFailures::default();
+        failures.absorb(prune_older_than(&self.superseded_dir(), now_secs));
+        failures.absorb(prune_older_than(&self.quarantine_archive_dir(), now_secs));
         // Kein automatischer Eingriff in `quarantine/open/` (docs §33).
-        Ok(())
+        if failures.is_empty() {
+            return Ok(());
+        }
+        // Sichere, deterministische Meldung: ausschließlich Zähler, keine
+        // Pfade, Dateinamen, Inhalte oder rohen Betriebssystemfehler.
+        Err(format!(
+            "prune failed: list_errors={} metadata_errors={} remove_errors={}",
+            failures.list_errors, failures.metadata_errors, failures.remove_errors
+        ))
     }
 }
 
@@ -554,23 +566,69 @@ fn remove_file(path: &Path) -> Result<(), String> {
     std::fs::remove_file(path).map_err(|e| format!("Spool Datei entfernen {path:?}: {e}"))
 }
 
+/// Zähler der Pruning-Dateifehler. Speichert ausschließlich Zähler — keine
+/// Pfade, Dateinamen, Inhalte oder rohen Betriebssystemfehler.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PruneFailures {
+    list_errors: usize,
+    metadata_errors: usize,
+    remove_errors: usize,
+}
+
+impl PruneFailures {
+    /// Addiert die Zähler eines weiteren Zielverzeichnisses.
+    fn absorb(&mut self, other: Self) {
+        self.list_errors += other.list_errors;
+        self.metadata_errors += other.metadata_errors;
+        self.remove_errors += other.remove_errors;
+    }
+
+    /// Kein Fehler in irgendeiner Klasse aufgetreten.
+    fn is_empty(&self) -> bool {
+        self.list_errors == 0 && self.metadata_errors == 0 && self.remove_errors == 0
+    }
+}
+
+/// Sekunden seit der Unix-Epoche oder `None`, wenn der Zeitpunkt nicht
+/// zuverlässig ermittelbar ist: `metadata()`, `modified()` oder
+/// `duration_since(UNIX_EPOCH)` (Zeitstempel vor der Epoche) können
+/// scheitern. Kein Ersatzwert `0` — ein echter Zeitwert exakt `0` ergibt
+/// dagegen `Some(0)` und ist ein gültiger Wert.
+fn modified_secs(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+}
+
 /// Löscht `.json`-Dateien älter als `RETENTION_SECS` (modifizierte Zeit).
-fn prune_older_than(dir: &Path, now_secs: u64) -> Result<(), String> {
-    let files = list_json_files(dir)?;
+/// Bearbeitet jede erfolgreich gelistete Datei genau einmal und zählt
+/// Dateifehler, ohne sie abzubrechen: ein nicht zuverlässig datierbarer
+/// Eintrag wird nicht gelöscht, ein fehlgeschlagenes Entfernen bleibt
+/// erhalten. Keine Wiederholungsschleife, kein Retry.
+fn prune_older_than(dir: &Path, now_secs: u64) -> PruneFailures {
+    let mut failures = PruneFailures::default();
+    let files = match list_json_files(dir) {
+        Ok(files) => files,
+        Err(_) => {
+            // Listenfehler nur als Zähler; kein Pfad, kein io::Error-Text.
+            failures.list_errors += 1;
+            return failures;
+        }
+    };
     for f in files {
-        let modified = std::fs::metadata(&f)
-            .and_then(|m| m.modified())
-            .map(|m| {
-                m.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            })
-            .unwrap_or(0);
-        if now_secs.saturating_sub(modified) > RETENTION_SECS {
-            let _ = std::fs::remove_file(&f);
+        let Some(modified) = modified_secs(&f) else {
+            failures.metadata_errors += 1;
+            continue;
+        };
+        if now_secs.saturating_sub(modified) > RETENTION_SECS && std::fs::remove_file(&f).is_err() {
+            failures.remove_errors += 1;
         }
     }
-    Ok(())
+    failures
 }
 
 #[cfg(test)]
@@ -888,6 +946,334 @@ mod tests {
             !old.exists() && !fresh.exists(),
             "überfällige superseded gelöscht"
         );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Setzt die Änderungszeit eines Verzeichnisses. Nötig, weil `age_file`
+    /// mit Schreibrechten öffnet und an Verzeichnissen scheitert.
+    #[cfg(unix)]
+    fn age_dir(path: &Path, secs_ago: u64) {
+        let t = SystemTime::now() - Duration::from_secs(secs_ago);
+        std::fs::File::open(path).unwrap().set_modified(t).unwrap();
+    }
+
+    /// Hängender Symlink mit `.json`-Endung: `metadata()` folgt Symlinks und
+    /// schlägt am toten Ziel fehl ⇒ Metadatenfehler ohne Rechteabhängigkeit.
+    #[cfg(unix)]
+    fn dangling_json(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::os::unix::fs::symlink("/p36-nicht-vorhanden/ziel", &p).unwrap();
+        p
+    }
+
+    /// Altes Verzeichnis mit `.json`-Endung: `metadata()` gelingt, das
+    /// Entfernen scheitert ⇒ Löschfehler ohne Rechteabhängigkeit.
+    #[cfg(unix)]
+    fn old_dir_json(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        age_dir(&p, 40 * 86_400);
+        p
+    }
+
+    /// Erwarteter Rückgabestring der Retention — bewusst OHNE das Präfix
+    /// `Spool-Retention:`, das ausschließlich der Logger in `main.rs` ergänzt.
+    fn expect_prune_err(l: usize, m: usize, r: usize) -> String {
+        format!("prune failed: list_errors={l} metadata_errors={m} remove_errors={r}")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_metadata_error_does_not_delete() {
+        let base = temp_dir("p36m1");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let sym = dangling_json(&s.superseded_dir(), "sym.json");
+        s.run_retention_at(now_secs()).unwrap_err();
+        // `Path::exists` folgt dem Symlink und wäre bei einem hängenden
+        // Symlink immer `false` — der Link selbst wird über `symlink_metadata`
+        // geprüft.
+        assert!(
+            std::fs::symlink_metadata(&sym).is_ok(),
+            "Metadatenfehler darf den Eintrag nicht löschen"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_metadata_error_is_reported() {
+        let base = temp_dir("p36m2");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 0));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_continues_after_error() {
+        let base = temp_dir("p36m3");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        let old = s.superseded_dir().join("alt.json");
+        std::fs::write(&old, "{}").unwrap();
+        age_file(&old, 40 * 86_400);
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 0));
+        assert!(!old.exists(), "unabhängige alte Datei wird entfernt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_remove_error_is_reported() {
+        let base = temp_dir("p36m4");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let d = old_dir_json(&s.superseded_dir(), "dir.json");
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 0, 1));
+        assert!(d.exists(), "Verzeichnis bleibt erhalten");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_error_counts_are_exact() {
+        let base = temp_dir("p36m5");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        old_dir_json(&s.superseded_dir(), "dir.json");
+        let old = s.superseded_dir().join("alt.json");
+        std::fs::write(&old, "{}").unwrap();
+        age_file(&old, 40 * 86_400);
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 1));
+        assert!(
+            !old.exists(),
+            "alte reguläre Datei wird trotz Fehlern entfernt"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_keeps_young_and_removes_old_regular_file() {
+        let base = temp_dir("p36m6");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let young = s.superseded_dir().join("jung.json");
+        let old = s.superseded_dir().join("alt.json");
+        std::fs::write(&young, "{\"a\":1}").unwrap();
+        std::fs::write(&old, "{\"a\":2}").unwrap();
+        age_file(&young, 0);
+        age_file(&old, 40 * 86_400);
+        s.run_retention_at(now_secs()).unwrap();
+        assert!(young.exists(), "junge Datei bleibt");
+        assert!(!old.exists(), "alte Datei entfernt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_superseded_error_does_not_block_archive() {
+        let base = temp_dir("p36m7");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        let arch = s.quarantine_archive_dir().join("alt.json");
+        std::fs::write(&arch, "{}").unwrap();
+        age_file(&arch, 40 * 86_400);
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 0));
+        assert!(
+            !arch.exists(),
+            "Archiv wird trotz Fehler in superseded/ bereinigt"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_archive_error_does_not_undo_superseded() {
+        let base = temp_dir("p36m8");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let sup = s.superseded_dir().join("alt.json");
+        std::fs::write(&sup, "{}").unwrap();
+        age_file(&sup, 40 * 86_400);
+        dangling_json(&s.quarantine_archive_dir(), "sym.json");
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 0));
+        assert!(!sup.exists(), "superseded-Bereinigung bleibt wirksam");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_aggregates_failures_across_directories() {
+        let base = temp_dir("p36m9");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        old_dir_json(&s.superseded_dir(), "dir.json");
+        dangling_json(&s.quarantine_archive_dir(), "sym.json");
+        old_dir_json(&s.quarantine_archive_dir(), "dir.json");
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 2, 2));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_list_error_in_superseded_does_not_block_archive() {
+        let base = temp_dir("p36m10");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let arch = s.quarantine_archive_dir().join("alt.json");
+        std::fs::write(&arch, "{}").unwrap();
+        age_file(&arch, 40 * 86_400);
+        std::fs::remove_dir_all(s.superseded_dir()).unwrap();
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(1, 0, 0));
+        assert!(!arch.exists(), "Archivbereinigung läuft trotz Listenfehler");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_list_error_in_archive_keeps_superseded_result() {
+        let base = temp_dir("p36m11");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let sup = s.superseded_dir().join("alt.json");
+        std::fs::write(&sup, "{}").unwrap();
+        age_file(&sup, 40 * 86_400);
+        std::fs::remove_dir_all(s.quarantine_archive_dir()).unwrap();
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(1, 0, 0));
+        assert!(!sup.exists(), "Superseded-Ergebnis bleibt erhalten");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_two_list_errors_count_two() {
+        let base = temp_dir("p36m12");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        std::fs::remove_dir_all(s.superseded_dir()).unwrap();
+        std::fs::remove_dir_all(s.quarantine_archive_dir()).unwrap();
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(2, 0, 0));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_error_message_has_no_path_or_name() {
+        let base = temp_dir("p36m13");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let d = old_dir_json(&s.superseded_dir(), "P36Marker_dir.json");
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 0, 1));
+        assert!(!err.contains("P36Marker"), "kein Markername");
+        assert!(!err.contains("json"), "keine Dateiendung");
+        assert!(
+            !err.contains(&base.to_string_lossy().to_string()),
+            "kein Basisverzeichnis"
+        );
+        assert!(
+            !err.contains("No such file"),
+            "kein roher Betriebssystemfehler"
+        );
+        assert!(
+            !err.contains("Is a directory"),
+            "kein roher Betriebssystemfehler"
+        );
+        assert!(!err.contains("Spool-Retention"), "kein doppeltes Präfix");
+        assert!(d.exists(), "Verzeichnis bleibt erhalten");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_leaves_open_quarantine_untouched() {
+        let base = temp_dir("p36m14");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let jung = s.quarantine_open_dir().join("jung.json");
+        let alt = s.quarantine_open_dir().join("alt.json");
+        let body = "{\"offen\":1}";
+        std::fs::write(&jung, body).unwrap();
+        std::fs::write(&alt, body).unwrap();
+        age_file(&jung, 0);
+        age_file(&alt, 40 * 86_400);
+        s.run_retention_at(now_secs()).unwrap();
+        assert!(jung.exists() && alt.exists(), "offene Fälle bleiben");
+        assert_eq!(std::fs::read_to_string(&alt).unwrap(), body);
+        assert_eq!(
+            count_json(&s.quarantine_archive_dir()),
+            0,
+            "kein Auto-Archivieren"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn retention_prune_epoch_zero_timestamp_is_valid() {
+        let base = temp_dir("p36m15");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let p = s.superseded_dir().join("epoche.json");
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+        s.run_retention_at(now_secs()).unwrap();
+        assert!(
+            !p.exists(),
+            "echter Zeitwert 0 ist gültig und wird als alte Datei entfernt"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_pre_epoch_timestamp_is_not_deleted() {
+        let base = temp_dir("p36m16");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let p = s.superseded_dir().join("praepoche.json");
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH - Duration::from_secs(1))
+            .unwrap();
+        let err = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(err, expect_prune_err(0, 1, 0));
+        assert!(p.exists(), "Vor-Epoche-Zeitstempel wird nicht gelöscht");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_prune_repeated_run_is_deterministic() {
+        let base = temp_dir("p36m17");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        dangling_json(&s.superseded_dir(), "sym.json");
+        old_dir_json(&s.superseded_dir(), "dir.json");
+        let first = s.run_retention_at(now_secs()).unwrap_err();
+        let second = s.run_retention_at(now_secs()).unwrap_err();
+        assert_eq!(first, second, "wiederholte Läufe sind deterministisch");
+        assert_eq!(first, expect_prune_err(0, 1, 1));
         std::fs::remove_dir_all(&base).unwrap();
     }
 
