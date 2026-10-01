@@ -975,7 +975,7 @@ Dadurch bleiben ungefähr 30 Tage bereits bearbeiteter Fehlerfälle für Statist
 
 ### Verbindliche Zielregel: charakterbezogene Quarantäne-Sperre
 
-VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachweis ausstehend. Die folgenden Aussagen beschreiben die beschlossene Zielsemantik, **nicht** den aktuellen Codezustand. Der aktuelle Stand ist in `docs/Security.md` unter `P-30` dokumentiert.
+VERBINDLICHE ZIELREGEL – **serverseitig umgesetzt und getestet** in `9196224a9978b4ec09100f140e8ac40bbc27c9c8`; die **Clientdarstellung bleibt ausstehende Clientintegration**. Die folgenden Aussagen beschreiben die beschlossene Zielsemantik und deren Umsetzungsstand. Der belegende Nachweis steht in `docs/Security.md` unter `P-30` und im Abschnitt „Nachweis" dieses Dokuments.
 
 **Dirty-Zustand und Folgesnapshot** (heute bereits verifiziert, siehe `P-30` und `P-36`):
 
@@ -997,7 +997,7 @@ VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachw
 * Der Server prüft den Status beim **tatsächlichen Charakterbeitritt erneut autoritativ**.
 * Eine Clientanzeige allein ist **keine** Sicherheitsgrenze.
 
-**Clientdarstellung (Zielregel, noch nicht implementiert):** Für einen technisch gesperrten Charakter ist folgende Zielanzeige festgelegt:
+**Clientdarstellung (Zielregel, noch nicht implementiert – ausstehende Clientintegration):** Für einen technisch gesperrten Charakter ist folgende Zielanzeige festgelegt:
 
 * Charakter in der Auswahl **ausgegraut**,
 * Spielen-/Betreten-Schaltfläche für diesen Charakter **deaktiviert**,
@@ -1005,6 +1005,15 @@ VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachw
 * Erklärung: `Dieser Charakter ist vorübergehend nicht verfügbar. Deine gespeicherten Daten bleiben erhalten. Bitte versuche es später erneut.`
 
 Dabei dürfen **keine** internen Pfade, Dateinamen, Revisionen, Datenbankfehler, Rohfehler oder internen IDs an den Client ausgegeben werden. Die Charakterauswahl ist im aktuellen Repository **noch nicht implementiert**; dieser Clientteil ist ausdrücklich **noch ausstehende Clientintegration** und keine vorhandene Funktion.
+
+**Nachweis (serverseitiger Teil, Commit `9196224a9978b4ec09100f140e8ac40bbc27c9c8`):**
+
+* `550 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
+* Baseline vor `P-30`: `502`; **netto +48** Top-Level-Tests, davon `42` in `src/realm-rs/src/spool.rs` und `6` in `src/realm-rs/src/handlers.rs`; **0** bestehende Tests entfernt.
+* Clippy: **keine neue** Warnung.
+* Die Attributions-, Gate- und Doppel-Drain-Tests rufen die echte Produktionsfunktion `drain_one` auf; ihre Detektionskraft ist per Mutationstest belegt.
+* Umgesetzt sind damit **alle** serverseitigen Punkte dieser Zielregel: charakterbezogene Sperre, autoritative Prüfung beim Beitritt, andere Charaktere bleiben spielbar, automatische Freigabe über `database_revision >= quarantine_revision`, Archivierung abgelöster Fälle mit minimaler Kennzeichnung, Betreiberzähler und datenfreie Logausgabe.
+* **Nicht** Bestandteil dieses Nachweises und weiterhin **offen**: die ausgegraute Charakterauswahl, die deaktivierte Betreten-Schaltfläche sowie Status- und Erklärungstext.
 
 **Sichere automatische Freigabe:** Die Zielregel lautet:
 
@@ -1043,7 +1052,7 @@ administratively_locked
 
 `P-30` behandelt ausschließlich `save_recovery_pending`. Ein vollständiges **administratives Bannsystem ist nicht automatisch Bestandteil von `P-30`**.
 
-**Shutdown und Neustart:** Bei kontrollierter Abschaltung wird der aktuelle persistente RAM-Zustand der Onlinecharaktere zunächst durable in den Spool geschrieben (dieser Teil ist heute verifiziert). Nach einem Neustart verarbeitet die Recovery den gespeicherten normalen Spool vor der READY-Freigabe (ebenso heute verifiziert). **Zielregel, noch nicht implementiert:** Quarantänefälle werden **getrennt** bewertet, und ein ungelöster Fall blockiert **nur den zugehörigen Charakter**, nicht die allgemeine READY-Freigabe des Realms.
+**Shutdown und Neustart (umgesetzt):** Bei kontrollierter Abschaltung wird der aktuelle persistente RAM-Zustand der Onlinecharaktere zunächst durable in den Spool geschrieben (dieser Teil ist heute verifiziert). Nach einem Neustart verarbeitet die Recovery den gespeicherten normalen Spool vor der READY-Freigabe (ebenso heute verifiziert). Quarantänefälle werden **getrennt** bewertet: `recover` liest ausschließlich den normalen Spool (`src/realm-rs/src/spool.rs:234-244`), und die Charakterbewertung erfolgt erst beim Charakterbeitritt. Ein ungelöster Quarantänefall blockiert damit **nur den zugehörigen Charakter** und **nicht** die allgemeine READY-Freigabe des Realms.
 
 ---
 

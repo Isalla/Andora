@@ -247,7 +247,7 @@ Ein Charakter, der zu einem anderen Account oder zu keinem Account gehört, wird
 
 ### Verfügbarkeitsstatus im Auswahl- und Erstellungsschritt
 
-VERBINDLICHE ZIELREGEL – **noch nicht implementiert**, Umsetzung und Testnachweis ausstehend. Die normative Persistenzregel steht in `docs/Player_Persistenz.md` Abschnitt 33, der Sicherheitsbefund in `docs/Security.md` unter `P-30`.
+VERBINDLICHE ZIELREGEL – **serverseitig umgesetzt und getestet** in `9196224a9978b4ec09100f140e8ac40bbc27c9c8`; die **Ausgrauung in der Charakterauswahl bleibt ausstehende Clientintegration** und ist keine vorhandene Funktion. Die normative Persistenzregel steht in `docs/Player_Persistenz.md` Abschnitt 33, der Sicherheitsbefund und der Nachweis in `docs/Security.md` unter `P-30`.
 
 Der vorgelagerte Auswahl- und Erstellungsschritt (Abschnitt 20) übermittelt **pro Charakter** einen Verfügbarkeitsstatus. Fachliche Zustände sind `available`, `save_recovery_pending` (vorübergehende technische Charaktersperre wegen eines ungelösten Quarantänefalls) und `administratively_locked` (gesonderte administrative Entscheidung). `P-30` betrifft ausschließlich `save_recovery_pending`.
 
