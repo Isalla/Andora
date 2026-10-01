@@ -533,6 +533,21 @@ pub fn config_path(args: &[String]) -> PathBuf {
     exe.join("config.env")
 }
 
+/// Ermittelt den Ollama-Endpunkt aus dem Rohwert von `OLLAMA_URL`.
+///
+/// Reiner, seiteneffektfreier Pfad: leerer (nicht gesetzter) Wert ergibt den
+/// anonymen Loopback-Standard `http://127.0.0.1:11434` — bewusst keine interne
+/// LAN-Adresse, damit der Beispielwert öffentlich bleibt und lokal läuft.
+/// Jeder gesetzte Wert bleibt maßgeblich und wird unverändert über
+/// `bracket_url_host` normalisiert (IPv6-Klammerung).
+fn ollama_url_or_default(raw: &str) -> String {
+    if raw.is_empty() {
+        "http://127.0.0.1:11434".to_string()
+    } else {
+        bracket_url_host(raw.trim())
+    }
+}
+
 pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
     let env = load_env(path);
     let g = |k: &str| env.get(k).cloned().unwrap_or_default();
@@ -566,14 +581,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         tick_ms: num(&env, "TICK_MS", 100),
         aofb_radius: num(&env, "AOFB_RADIUS", 20) as f64,
         render_cap: num(&env, "RENDER_CAP_DEFAULT", 64) as u32,
-        ollama_url: {
-            let u = g("OLLAMA_URL");
-            if u.is_empty() {
-                "http://192.168.1.32:11434".to_string()
-            } else {
-                bracket_url_host(&u.trim().to_string())
-            }
-        },
+        ollama_url: ollama_url_or_default(&g("OLLAMA_URL")),
         auth_api: AuthApiConfig {
             url: bracket_url_host(&g("AUTHAPI_URL").trim_end_matches('/').to_string()),
             service_id: g("AUTHAPI_SERVICE_ID"),
@@ -673,6 +681,46 @@ mod tests {
         assert_eq!(bracket_host("db"), "db");
         assert_eq!(bracket_host("2001:db8::1"), "[2001:db8::1]");
         assert_eq!(bracket_host("[::1]"), "[::1]");
+    }
+
+    /// Sichert den anonymen Loopback-Standard des Ollama-Fallbacks ab.
+    ///
+    /// Deckt beide Vertragsrichtungen der reinen Funktion ab: leerer Wert
+    /// ergibt `http://127.0.0.1:11434`, ein gesetzter Wert bleibt maßgeblich
+    /// und wird nur über `bracket_url_host` normalisiert. Ohne diesen Test
+    /// könnte eine interne LAN-Adresse unbemerkt zurückkehren.
+    #[test]
+    fn ollama_url_uses_loopback_default_when_unset() {
+        // Nicht gesetzt: anonymer, lokal lauffähiger Standard.
+        let fallback = ollama_url_or_default("");
+        assert_eq!(fallback, "http://127.0.0.1:11434");
+        // Der Fallback muss auf Loopback zeigen. Bewusst ohne Nennung privater
+        // Adressbereiche im Quelltext: die exakte Gleichheitsprüfung oben
+        // fixiert den Wert bereits, und ein Verbot als Literal würde die
+        // private Adresse selbst wieder in die versionierten Quellen bringen.
+        assert!(
+            fallback.starts_with("http://127.0.0.1:"),
+            "Ollama-Fallback muss Loopback sein, war: {fallback}"
+        );
+        assert!(fallback.contains("11434"), "Standardport 11434");
+
+        // Gesetzter Wert bleibt maßgeblich.
+        assert_eq!(
+            ollama_url_or_default("http://ollama.intern:11434"),
+            "http://ollama.intern:11434"
+        );
+        assert_eq!(
+            ollama_url_or_default("http://127.0.0.1:11434/"),
+            "http://127.0.0.1:11434/"
+        );
+        // Normalisierung unverändert: IPv6 wird geklammert.
+        assert_eq!(
+            ollama_url_or_default("http://::1:11434"),
+            "http://[::1]:11434"
+        );
+        // Bestehende Semantik für reine Whitespace-Werte bleibt erhalten:
+        // der Wert gilt als gesetzt, normalisiert also zu "".
+        assert_eq!(ollama_url_or_default("   "), "");
     }
 
     #[test]
