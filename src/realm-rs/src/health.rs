@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config::Config;
+use crate::spool::PersistRuntime;
 use crate::world::Shared;
 
 fn body_for(
@@ -16,6 +17,7 @@ fn body_for(
     player_count: usize,
     uptime_s: u64,
     tick: (f64, f64, u64),
+    quarantine_unattributed: Option<usize>,
 ) -> (u16, serde_json::Value) {
     match path {
         "/health" => (
@@ -37,6 +39,9 @@ fn body_for(
                     "avg_ms": (tick.1 * 100.0).round() / 100.0,
                     "count": tick.2,
                 },
+                // P-30: Zahl der nicht zuordenbaren Quarantänedateien.
+                // `null` = Bestand nicht ermittelbar (nicht "keine Fälle").
+                "quarantine_unattributed": quarantine_unattributed,
             }),
         ),
         "/players" => (200, serde_json::json!({"players": players_json})),
@@ -58,7 +63,11 @@ fn response(status: u16, body: &serde_json::Value) -> String {
     )
 }
 
-pub async fn serve(cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
+pub async fn serve(
+    cfg: Arc<Config>,
+    shared: Shared,
+    persist: Arc<PersistRuntime>,
+) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.health_bind_host, cfg.health_port)?;
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
@@ -73,8 +82,9 @@ pub async fn serve(cfg: Arc<Config>, shared: Shared) -> Result<(), String> {
     for listener in listeners {
         let cfg = cfg.clone();
         let shared = shared.clone();
+        let persist = persist.clone();
         tasks.push(tokio::spawn(async move {
-            accept_loop(listener, cfg, shared).await
+            accept_loop(listener, cfg, shared, persist).await
         }));
     }
     let (res, _, rest) = futures_util::future::select_all(tasks).await;
@@ -92,6 +102,7 @@ async fn accept_loop(
     listener: tokio::net::TcpListener,
     cfg: Arc<Config>,
     shared: Shared,
+    persist: Arc<PersistRuntime>,
 ) -> Result<(), String> {
     loop {
         let (mut sock, _) = listener
@@ -100,6 +111,7 @@ async fn accept_loop(
             .map_err(|e| format!("health accept: {e}"))?;
         let cfg = cfg.clone();
         let shared = shared.clone();
+        let persist = persist.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
             let Ok(n) = sock.read(&mut buf).await else {
@@ -136,6 +148,9 @@ async fn accept_loop(
                 })
                 .collect();
             drop(world);
+            // P-30: ein reiner Lese-Scan je /status, kein Cache, keine
+            // Mutation, keine Archivierung, keine Logausgabe, keine Sperre.
+            let quarantine_unattributed = persist.unattributed_quarantine_count();
             let (status, body) = body_for(
                 path,
                 &cfg,
@@ -143,6 +158,7 @@ async fn accept_loop(
                 player_count,
                 uptime_s,
                 tick,
+                quarantine_unattributed,
             );
             let _ = sock.write_all(response(status, &body).as_bytes()).await;
         });
@@ -197,15 +213,15 @@ mod tests {
     fn health_shapes() {
         let c = cfg();
         let empty = serde_json::json!([]);
-        let (s, b) = body_for("/health", &c, &empty, 0, 42, (0.0, 0.0, 0));
+        let (s, b) = body_for("/health", &c, &empty, 0, 42, (0.0, 0.0, 0), None);
         assert_eq!(s, 200);
         assert_eq!(b["ok"], true);
         assert_eq!(b["realm_id"], 1);
-        let (s, b) = body_for("/status", &c, &empty, 3, 42, (1.234, 1.1, 7));
+        let (s, b) = body_for("/status", &c, &empty, 3, 42, (1.234, 1.1, 7), Some(0));
         assert_eq!(s, 200);
         assert_eq!(b["players"], 3);
         assert_eq!(b["tick"]["count"], 7);
-        let (s, _) = body_for("/nope", &c, &empty, 0, 0, (0.0, 0.0, 0));
+        let (s, _) = body_for("/nope", &c, &empty, 0, 0, (0.0, 0.0, 0), None);
         assert_eq!(s, 404);
     }
 }

@@ -275,6 +275,29 @@ pub async fn handle_hello(
     // preisgegeben wird. Es wird kein Charakter angelegt.
     let c = resolve_character_lookup(db::load_character(&ctx.db, account_id, char_id_db).await)?;
 
+    // P-30 (docs/Player_Persistenz.md §33): Quarantäne-Sperre ist
+    // **charakterbezogen**. Sie läuft unter dem bereits gehaltenen
+    // `player_gate` (siehe oben), nach erfolgreichem Ownership-Load und vor
+    // jedem RAM-Aufbau. Ein ungelöster Fall sperrt ausschließlich diesen
+    // Charakter; andere Charaktere desselben Kontos bleiben spielbar.
+    //
+    // `CheckFailed` bedeutet: der Bestand war nicht zuverlässig lesbar. Dann
+    // wird **fail-closed** für genau diesen Charakter abgelehnt — sonst könnte
+    // bei einem Prüfversagen eine ältere DB-Zeile geladen werden. Das ist
+    // keine Sanktion und keine dauerhafte Sperre.
+    match ctx
+        .persist
+        .evaluate_character_availability(&c.id, c.persist_revision)
+    {
+        crate::spool::CharacterAvailability::Available => {}
+        crate::spool::CharacterAvailability::SaveRecoveryPending => {
+            return Err(crate::spool::SAVE_RECOVERY_PENDING.to_string());
+        }
+        crate::spool::CharacterAvailability::CheckFailed => {
+            return Err(crate::spool::SAVE_RECOVERY_CHECK_FAILED.to_string());
+        }
+    }
+
     // AUTH-03 (Restzustand nach Disconnect): Liegt im Spool ein NEUERER
     // Snapshot als die gerade geladene DB-Zeile, ist der DB-Stand veraltet
     // (der Spool-Batch ist noch nicht gedraint). Dann darf KEIN aus der
@@ -288,6 +311,15 @@ pub async fn handle_hello(
         }
         return Err("character state still in spool — retry later".into());
     }
+
+    // P-30: Bereits DB-bestätigt abgelöste Fälle best-effort archivieren.
+    // Notwendig für Altbestände und für Fälle, deren erfolgreicher Drain vor
+    // Einführung der Archivlogik lag. Gate-frei, weil `player_gate` bereits
+    // gehalten wird. Ein Archivierungsfehler ist **nur** eine Betreiberwarnung
+    // und lässt den Charakter spielbar; die Sperrentscheidung oben steht bereits.
+    let _ = ctx
+        .persist
+        .archive_resolved_quarantine_cases_inner(&c.id, c.persist_revision);
 
     let weapon_skill = db::load_weapon_skill(&ctx.db, &c.id, &ctx.cfg.combat.weapon_skill_id).await;
     let learned_abilities: std::collections::HashSet<String> =
@@ -1574,6 +1606,42 @@ mod tests {
         })
     }
 
+    fn p30_temp_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d =
+            std::env::temp_dir().join(format!("realmrs-p30-{tag}-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn p30_snapshot(id: &str, rev: i64) -> crate::persist::PersistSnapshot {
+        crate::persist::PersistSnapshot {
+            player_id: id.to_string(),
+            persist_revision: rev,
+            captured_at_ms: 1_700_000_000_000 + rev,
+            x: 1.0,
+            y: 1.0,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            hp: 100,
+            mana: 50,
+            attributes: Default::default(),
+            char_class: "Adventurer".into(),
+            faction_transition: false,
+            weapon_skill: 1,
+            learned_abilities: vec![],
+            inventory: crate::inventory::InventoryState::default(),
+            generation: 0,
+            dirty: crate::persist::PersistDirty::default(),
+        }
+    }
+
     fn hello_frame(char_id: &str) -> serde_json::Value {
         serde_json::json!({
             "t": "hello",
@@ -1892,6 +1960,161 @@ mod tests {
         assert_eq!(world.players.len(), 1);
         assert_eq!(world.players.get("1").unwrap().account_id, 7);
         assert_eq!(world.by_conn.len(), 0);
+    }
+
+    // ===== P-30: charakterbezogene Quarantäne-Sperre im Eintrittspfad =====
+
+    /// Die HELLO-Entscheidung wird ausschließlich aus der serverseitigen
+    /// Bestandsbewertung abgeleitet und in stabile Gründe übersetzt. Ein
+    /// nicht kanonischer Einzelfall sperrt niemanden, ein Scanfehler sperrt
+    /// ausschließlich den angefragten Charakter.
+    #[test]
+    fn p30_availability_maps_to_stable_server_side_reasons() {
+        use crate::spool::CharacterAvailability as A;
+        let dir = p30_temp_dir("p30h1");
+        let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
+        // Leerer Bestand.
+        assert_eq!(s.evaluate_character_availability("42", 1), A::Available);
+        // Kanonischer, ungelöster Fall.
+        std::fs::write(
+            dir.join("quarantine")
+                .join("open")
+                .join("1700000000000-42-r17.json--malformed.json"),
+            "{x}",
+        )
+        .unwrap();
+        assert_eq!(
+            s.evaluate_character_availability("42", 16),
+            A::SaveRecoveryPending
+        );
+        // Anderer Charakter bleibt spielbar.
+        assert_eq!(s.evaluate_character_availability("7", 16), A::Available);
+        // DB-bestätigt abgelöst.
+        assert_eq!(s.evaluate_character_availability("42", 17), A::Available);
+        // Scanfehler ⇒ CheckFailed, keine Zuordnung.
+        std::fs::remove_dir_all(dir.join("quarantine").join("open")).unwrap();
+        assert_eq!(s.evaluate_character_availability("42", 1), A::CheckFailed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Die Ablehnungsgründe sind exakt und tragen keine Leerzeichen, keine ID,
+    /// keine Revision, keinen Pfad und keinen Rohfehler.
+    #[test]
+    fn p30_rejection_reasons_are_exact_and_data_free() {
+        assert_eq!(crate::spool::SAVE_RECOVERY_PENDING, "save_recovery_pending");
+        assert_eq!(
+            crate::spool::SAVE_RECOVERY_CHECK_FAILED,
+            "save_recovery_check_failed"
+        );
+        for grund in [
+            crate::spool::SAVE_RECOVERY_PENDING,
+            crate::spool::SAVE_RECOVERY_CHECK_FAILED,
+        ] {
+            assert!(!grund.contains(' '), "keine Leerzeichen: {grund}");
+            assert!(!grund.contains('/'), "kein Pfad: {grund}");
+            assert!(!grund.contains(".json"), "kein Dateiname: {grund}");
+            assert!(
+                !grund.chars().any(|c| c.is_ascii_digit()),
+                "keine ID: {grund}"
+            );
+        }
+    }
+
+    /// Ein einzelner nicht kanonischer Einzelfall erzeugt **keine**
+    /// Charaktersperre und **keine** Konto-/Realm-Sperre.
+    #[test]
+    fn p30_single_non_canonical_file_blocks_nobody() {
+        use crate::spool::CharacterAvailability as A;
+        let dir = p30_temp_dir("p30h2");
+        let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
+        let open = dir.join("quarantine").join("open");
+        std::fs::write(open.join("handgelegt.json"), "{y}").unwrap();
+        for pid in ["7", "8", "9"] {
+            assert_eq!(
+                s.evaluate_character_availability(pid, 1),
+                A::Available,
+                "{pid} bleibt spielbar"
+            );
+        }
+        assert_eq!(s.unattributed_quarantine_count(), Some(1));
+        // Der Einzelfall bleibt zur Analyse erhalten.
+        assert!(open.join("handgelegt.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ein Scanfehler sperrt weder Konto noch Realm: nur der angefragte
+    /// Charakter wird fail-closed abgelehnt, der Realm-Zustand bleibt Ready.
+    #[test]
+    fn p30_scan_error_is_character_scoped_and_never_global() {
+        use crate::spool::CharacterAvailability as A;
+        let dir = p30_temp_dir("p30h3");
+        let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
+        s.set_status(crate::spool::PersistStatus::Ready);
+        std::fs::remove_dir_all(dir.join("quarantine").join("open")).unwrap();
+        assert_eq!(s.evaluate_character_availability("8", 1), A::CheckFailed);
+        // Kein globaler Sperrzustand: Runtime bleibt Ready (Login möglich).
+        assert_eq!(s.status(), crate::spool::PersistStatus::Ready);
+        assert_eq!(s.unattributed_quarantine_count(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// HELLO hält das per-character Gate über die Bestandsprüfung hinweg:
+    /// während das Gate gehalten wird, sieht `pending_revision` einen
+    /// wartenden Batch und der Charakter wäre fail-closed. Kein Sleep: der
+    /// Nachweis läuft über eine kontrollierte Reihenfolge.
+    #[tokio::test]
+    async fn p30_hello_holds_gate_while_pending_spool_batch_is_visible() {
+        let dir = p30_temp_dir("p30h4");
+        let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
+        let snap = p30_snapshot("42", 18);
+        s.spool().write_batch(&snap).unwrap();
+        let gate = s.player_gate("42").await;
+        let guard = gate.lock_owned().await;
+        // Unter dem Gate: der wartende Batch ist sichtbar ⇒ fail-closed.
+        assert_eq!(s.pending_revision("42"), Ok(Some(18)));
+        assert!(crate::world::db_row_is_stale(17, s.pending_revision("42")));
+        // Ein zweiter Versuch am selben Gate wartet (nicht reentrant).
+        let s2 = s.clone();
+        let waiter = tokio::spawn(async move {
+            let g = s2.player_gate("42").await;
+            let _held = g.lock().await;
+            "durch"
+        });
+        // Deterministisch: der Wartende kann erst nach dem Freigeben laufen.
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "Gate ist nicht reentrant");
+        drop(guard);
+        assert_eq!(waiter.await.unwrap(), "durch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ein anderer Charakter desselben Kontos ist **nicht** vom Gate oder vom
+    /// Quarantänefall des gesperrten Charakters betroffen.
+    #[tokio::test]
+    async fn p30_other_character_of_same_account_is_playable() {
+        let dir = p30_temp_dir("p30h5");
+        let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
+        std::fs::write(
+            dir.join("quarantine")
+                .join("open")
+                .join("1700000000000-8-r30.json--malformed.json"),
+            "{x}",
+        )
+        .unwrap();
+        use crate::spool::CharacterAvailability as A;
+        let a = s.player_gate("8").await;
+        let b = s.player_gate("9").await;
+        assert!(
+            !Arc::ptr_eq(&a, &b),
+            "verschiedene Charaktere, verschiedene Gates"
+        );
+        let _held = a.lock().await;
+        assert_eq!(
+            s.evaluate_character_availability("8", 1),
+            A::SaveRecoveryPending
+        );
+        assert_eq!(s.evaluate_character_availability("9", 1), A::Available);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Erreicht die kanonische ID Gate, World- und DB-Schritt, und ist der

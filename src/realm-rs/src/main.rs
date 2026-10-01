@@ -117,8 +117,10 @@ async fn async_main() -> Result<(), String> {
 
     let health_task = {
         let (cfg, shared) = (cfg.clone(), shared.clone());
+        // P-30: die bestehende Runtime weiterreichen (keine neue im Health-Pfad).
+        let health_persist = persist.clone();
         tokio::spawn(async move {
-            if let Err(e) = health::serve(cfg, shared).await {
+            if let Err(e) = health::serve(cfg, shared, health_persist).await {
                 log::error!("health: {e}");
             }
         })
