@@ -49,8 +49,29 @@ pub enum PersistStatus {
     Degraded,
 }
 
+/// Gemeinsame Batch-Datei **eines Persistenzlaufs** (docs §35, `P-12`).
+///
+/// Enthält ausschließlich die dirty Player-Snapshots dieses Laufs. Jeder
+/// Eintrag ist ein vollständiger persistenter Einzelsnapshot im unveränderten
+/// V1-Einzelformat und bleibt unabhängig verarbeitbar (§36).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpoolBatch {
+    pub format_version: u16,
+    /// Laufkennung, unabhängig von `persist_revision` (§29/§35).
+    pub batch_id: String,
+    pub entries: Vec<SpoolEntry>,
+}
+
+/// Fassung des Batch-Umschlags. Der Eintrag selbst trägt weiterhin seine
+/// eigene `format_version` (`SpoolEntry`).
+pub const BATCH_FORMAT_VERSION: u16 = 1;
+
 /// Eine (deterministisch beschreibbare) Spool-Datei: einzelner Player-Snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `PartialEq` vergleicht **alle** Felder einschließlich des vollständigen
+/// `PersistSnapshot` und ist damit die Grundlage des Inhaltsvergleichs
+/// `batch_content_eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpoolEntry {
     pub format_version: u16,
     #[serde(flatten)]
@@ -189,6 +210,32 @@ impl PersistRuntime {
     ) -> Result<(), String> {
         match crate::persist::persist_player(&self.spool, shared, player_id, force).await {
             Ok(()) => Ok(()),
+            Err(e) => {
+                self.set_status(PersistStatus::Degraded);
+                Err(e)
+            }
+        }
+    }
+
+    /// `P-12`/§35: ein Persistenzlauf über mehrere Spieler erzeugt **eine**
+    /// gemeinsame Batch-Datei. Der aufrufende Lauf gibt den reservierten
+    /// Snapshot-Speicher nach der dauerhaften Veröffentlichung frei, ohne auf
+    /// die DB-Verarbeitung zu warten.
+    ///
+    /// Rückgabe: Anzahl der in die Batch-Datei übernommenen Snapshots; `0`
+    /// bedeutet: leere Dirty-Menge, es wurde **keine** Datei erzeugt.
+    pub async fn persist_dirty_run(
+        &self,
+        shared: &crate::world::Shared,
+        player_ids: &[String],
+    ) -> Result<u32, String> {
+        let spool = self.spool.clone();
+        match crate::persist::persist_dirty_run(shared, player_ids, |snapshots| async move {
+            spool.write_batch_run(snapshots).map(|_| ())
+        })
+        .await
+        {
+            Ok(n) => Ok(n),
             Err(e) => {
                 self.set_status(PersistStatus::Degraded);
                 Err(e)
@@ -490,26 +537,101 @@ impl Spool {
             let Ok(raw) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let Ok(entry) = serde_json::from_str::<SpoolEntry>(&raw) else {
+            // `P-12`: gemeinsames Batch **und** alte Einzeldatei berücksichtigen.
+            // Andernfalls wäre eine im neuen Format gesicherte Revision für die
+            // Fail-closed-Vorabprüfung unsichtbar — die P-30-Garantie wäre
+            // ausgehebelt.
+            let Some(entries) = entries_in_file(&raw) else {
                 continue;
             };
-            if entry.snapshot.player_id == player_id {
-                let rev = entry.snapshot.persist_revision;
-                if max.is_none_or(|m| rev > m) {
-                    max = Some(rev);
+            for entry in entries {
+                if entry.player_id == player_id && max.is_none_or(|m| entry.persist_revision > m)
+                {
+                    max = Some(entry.persist_revision);
                 }
             }
         }
         Ok(max)
     }
 
-    /// Durable-Write eines vollständigen Player-Snapshots: JSON in eine
-    /// Temp-Datei schreiben, fsync, atomarer Rename in `spool/`. Erst nach
-    /// dem Rename gilt der Batch als gesichert (§21).
+    /// `P-12`/§35: **ein** Persistenzlauf erzeugt **eine** gemeinsame
+    /// Batch-Datei mit **ausschließlich** den dirty Player-Snapshots dieses
+    /// Laufs. Eine leere Snapshot-Menge erzeugt **keine** Datei.
     ///
-    /// Dateiname: `<captured_at_ms:013>-<player_id>-r<revision>.json` —
-    /// lexikografisch = chronologisch (älteste zuerst beim Drain).
+    /// Rückgabe: `Some(pfad)` wenn eine Batch-Datei veröffentlicht wurde,
+    /// `None` wenn die Dirty-Menge leer war. Der aufrufende Lauf gibt den
+    /// reservierten Snapshot-Speicher unmittelbar danach frei — ohne auf die
+    /// DB-Verarbeitung zu warten.
+    pub fn write_batch_run(
+        &self,
+        snapshots: Vec<PersistSnapshot>,
+    ) -> Result<Option<PathBuf>, String> {
+        if snapshots.is_empty() {
+            return Ok(None);
+        }
+        // Kanonische Reihenfolge VOR Namensbildung und Serialisierung: der
+        // Name und der serialisierte Inhalt hängen dann nicht von der
+        // Eingabereihenfolge ab.
+        let entries: Vec<SpoolEntry> = canonicalize_entries(
+            snapshots
+                .into_iter()
+                .map(|snapshot| SpoolEntry {
+                    format_version: FORMAT_VERSION,
+                    snapshot,
+                })
+                .collect(),
+        )?;
+        let captured_at_ms = entries
+            .iter()
+            .map(|e| e.snapshot.captured_at_ms)
+            .min()
+            .unwrap_or(0);
+        let file_name = batch_file_name(captured_at_ms, batch_digest(&entries));
+        let batch = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: file_name.trim_end_matches(".json").to_string(),
+            entries,
+        };
+        let body = serde_json::to_string(&batch)
+            .map_err(|e| format!("Spool-Batch serialisieren: {e}"))?;
+        let target = self.spool_dir().join(&file_name);
+
+        // `target.exists()` allein bestaetigt **keinen** erfolgreichen Write.
+        // Der Wiederholungsfall laeuft ueber `confirm_existing_publication`:
+        // das bestaetigt den **Inhalt** der vorhandenen Datei und wiederholt
+        // den Verzeichnis-Sync, bevor der Zustand als dauerhaft gilt. Das ist
+        // genau der Fall "Sync-Fehler, Datei lag bereits vor" (§40).
+        if target.exists() {
+            return confirm_existing_publication(&target, &batch).map(|()| Some(target));
+        }
+
+        // Atomar veroeffentlichen OHNE Ueberschreiben: Inhalt vollstaendig
+        // unter dem temporaeren Namen, dann `hard_link` auf den finalen Namen
+        // (`publish_new_file`). Ein Renennen-Rennen scheitert dort, statt eine
+        // fremde Datei zu verdraengen.
+        let tmp = self.spool_dir().join(format!(".tmp-{file_name}"));
+        match write_atomic_if_absent(&tmp, &target, body.as_bytes()) {
+            Ok(true) => Ok(Some(target)),
+            Ok(false) => {
+                // Konkurrierende Veroeffentlichung: derselbe echte
+                // Bestaetigungspfad — Inhalt **und** Dauerhaftigkeit pruefen.
+                confirm_existing_publication(&target, &batch).map(|()| Some(target))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Durable-Write eines vollständigen Player-Snapshots als **Ein-Eintrag-
+    /// Batch** (ein Persistenzlauf mit genau einem dirty Spieler, §35).
     pub fn write_batch(&self, snapshot: &PersistSnapshot) -> Result<(), String> {
+        self.write_batch_run(vec![snapshot.clone()]).map(|_| ())
+    }
+
+    /// Alte, nicht mehr erzeugte Schreibweise: erzeugt **eine** Datei mit
+    /// **einem** Snapshot im V1-Einzelformat. Nur für Kompatibilitätsprüfungen
+    /// bestehender veröffentlichter Dateien.
+    #[cfg(test)]
+    pub fn write_legacy_single(&self, snapshot: &PersistSnapshot) -> Result<(), String> {
         let entry = SpoolEntry {
             format_version: FORMAT_VERSION,
             snapshot: snapshot.clone(),
@@ -522,12 +644,12 @@ impl Spool {
         );
         let target = self.spool_dir().join(&file_name);
         if target.exists() {
-            // Gleiche Datei (identische Zeit/Revision) bereits durable — kein
-            // zweiter Write nötig (Idempotenz, §38).
             return Ok(());
         }
         let tmp = self.spool_dir().join(format!(".tmp-{file_name}"));
-        write_atomic(&tmp, &target, body.as_bytes())?;
+        if publish_new_file(&tmp, &target, body.as_bytes())? != PublishOutcome::Published {
+            return Err(format!("Spool Zieldatei bereits belegt: {:?}", target));
+        }
         Ok(())
     }
 
@@ -560,6 +682,21 @@ impl Spool {
             .map(|f| f.to_string_lossy().into_owned())
             .unwrap_or_default();
         let raw = std::fs::read_to_string(&batch_path).ok();
+
+        // `P-12`: Das gemeinsame Batch-Format wird am **Inhalt** erkannt
+        // (`entries`-Feld), nicht am Dateinamen. Damit bleiben bereits
+        // veröffentlichte Einzeldateien (V1) unverändert lesbar und der
+        // bestehende `P-30`-Pfad darunter unangetastet.
+        let is_shared_batch = raw
+            .as_deref()
+            .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
+            .map(|v| v.get("entries").is_some())
+            .unwrap_or(false);
+        if is_shared_batch {
+            return self
+                .drain_shared_batch(db, weapon_skill_id, &batch_path, &file_name, raw)
+                .await;
+        }
 
         // P-30 Attribution (fail-safe): Wenn **beide** Seiten eine Charakter-ID
         // liefern, müssen beide kanonisch identisch sein. Der DB-Write schreibt
@@ -704,6 +841,204 @@ impl Spool {
             }
             report.batches_processed = 1;
         }
+        Ok(Some(report))
+    }
+
+    /// `P-12`: schreibt **einen** Batch-Eintrag dauerhaft als eigene
+    /// Ein-Eintrag-Batch-Datei in `dir`. Wird für die **eintragsweise**
+    /// Quarantäne und für superseded-Einträge eines gemeinsamen Batches
+    /// verwendet, damit die übrigen Einträge weiterverarbeitet werden können.
+    ///
+    /// Der Dateiname folgt dem kanonischen Quarantäneschema
+    /// `<ts:013>-<player_id>-r<rev>.json--<reason>.json`, damit die bestehende
+    /// P-30-Zuordnung (`parse_quarantine_file_name`) greift.
+    fn write_entry_to_dir(
+        &self,
+        entry: &SpoolEntry,
+        dir: &Path,
+        key: &str,
+    ) -> Result<(), String> {
+        let snap = &entry.snapshot;
+        let stem = format!(
+            "{:013}-{}-r{}.json",
+            snap.captured_at_ms, snap.player_id, snap.persist_revision
+        );
+        let name = format!("{stem}--{key}.json");
+        self.write_entry_to_dir_as(entry, dir, &name)
+    }
+
+    /// Gemeinsame Sicherung eines einzelnen Eintrags als Ein-Eintrag-Batch.
+    /// `stem_suffix` ist der Namensrest; die Datei ist genau eine Batch-Datei
+    /// und damit jederzeit wieder lesbar.
+    fn write_entry_to_dir_as(
+        &self,
+        entry: &SpoolEntry,
+        dir: &Path,
+        file_name: &str,
+    ) -> Result<(), String> {
+        let file_name = file_name.to_string();
+        let target = dir.join(&file_name);
+        if target.exists() {
+            return Ok(()); // bereits durable (idempotent)
+        }
+        let body = serde_json::to_string(&SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: file_name.trim_end_matches(".json").to_string(),
+            entries: vec![entry.clone()],
+        })
+        .map_err(|e| format!("Spool-Eintrag serialisieren: {e}"))?;
+        let tmp = dir.join(format!(".tmp-{file_name}"));
+        if publish_new_file(&tmp, &target, body.as_bytes())? != PublishOutcome::Published {
+            return Err(format!("Spool Zieldatei bereits belegt: {:?}", target));
+        }
+        Ok(())
+    }
+
+    /// `P-12`: quarantänisiert **einen** eindeutig zuordenbaren Eintrag eines
+    /// gemeinsamen Batches dauerhaft. Die restlichen Einträge bleiben
+    /// bearbeitbar. Schlägt die Sicherung fehl, gilt der Eintrag als **nicht**
+    /// erledigt (der Aufrufer lässt die Datei liegen).
+    fn quarantine_entry(
+        &self,
+        entry: &SpoolEntry,
+        reason: QuarantineReason,
+    ) -> Result<(), String> {
+        self.write_entry_to_dir(entry, &self.quarantine_open_dir(), &reason.key())
+    }
+
+    /// `P-12`/§35: verarbeitet das **gemeinsame Batch-Format** eines
+    /// Persistenzlaufs eintragsweise.
+    ///
+    /// Kernregeln: die DB-Bestätigung gilt **je Eintrag**; ein problematischer,
+    /// eindeutig zuordenbarer Eintrag wird zuerst dauerhaft quarantänisiert und
+    /// die übrigen Einträge laufen weiter; die Datei wird **erst** entfernt,
+    /// wenn jeder Eintrag DB-bestätigt oder dauerhaft quarantänisiert ist.
+    /// Schlägt eine Quarantänesicherung fehl, bleibt die Datei liegen und der
+    /// Eintrag gilt als nicht erledigt.
+    ///
+    /// `P-30` bleibt wirksam: je Eintrag wird das **Charakter-Gate** geholt
+    /// (Gate → DB, nie World), und die Datei wird nach dem Lesen reverifiziert,
+    /// sodass ein zwischenzeitlich veränderter Batch nicht verarbeitet wird.
+    async fn drain_shared_batch<D: DrainDb>(
+        &self,
+        db: &D,
+        weapon_skill_id: &str,
+        batch_path: &Path,
+        file_name: &str,
+        raw: Option<String>,
+    ) -> Result<Option<DrainReport>, String> {
+        let mut report = DrainReport::default();
+        let text = match raw {
+            Some(t) => t,
+            None => {
+                self.quarantine(batch_path, QuarantineReason::Unreadable, "unreadable")?;
+                report.batches_quarantined = 1;
+                return Ok(Some(report));
+            }
+        };
+        let batch: SpoolBatch = match serde_json::from_str(&text) {
+            Ok(b) => b,
+            Err(_e) => {
+                self.quarantine(batch_path, QuarantineReason::Malformed, "malformed")?;
+                report.batches_quarantined = 1;
+                return Ok(Some(report));
+            }
+        };
+        if batch.format_version != BATCH_FORMAT_VERSION {
+            self.quarantine(
+                batch_path,
+                QuarantineReason::UnknownFormat(batch.format_version),
+                "batch format_version != aktuelle",
+            )?;
+            report.batches_quarantined = 1;
+            return Ok(Some(report));
+        }
+        if batch.entries.is_empty() {
+            // Leerer Batch: nichts zu verarbeiten, kein Artefakt nötig.
+            remove_file(batch_path)?;
+            return Ok(None);
+        }
+        // Reverify: nur die seit dem Lesen unveränderte Datei abarbeiten.
+        match std::fs::read_to_string(batch_path) {
+            Ok(now) if now == text => {}
+            _ => return Ok(None),
+        }
+
+        // Fail-safe, **vor** dem ersten DB-Zugriff: Ein nicht eindeutig
+        // zuordenbarer oder unbekannter Eintrag darf keinen Teilbatch erzeugen.
+        // Deshalb wird die gesamte Datei vorab geprüft — sonst könnten die
+        // vorherigen Einträge bereits geschrieben sein, bevor die Prüfung den
+        // problematischen Eintrag sieht. Es wird keine Zuordnung erfunden; die
+        // Datei geht als nicht zuordenbarer Analysefall in die Quarantäne.
+        if batch
+            .entries
+            .iter()
+            .any(|e| {
+                e.format_version != FORMAT_VERSION
+                    || canonical_player_id(&e.snapshot.player_id).is_none()
+            })
+        {
+            self.quarantine(
+                batch_path,
+                QuarantineReason::Malformed,
+                "batch entry nicht zuordenbar",
+            )?;
+            report.batches_quarantined = 1;
+            return Ok(Some(report));
+        }
+
+        for entry in &batch.entries {
+            let player_id = entry.snapshot.player_id.clone();
+            // P-30: Charakter-Gate je Eintrag, vor jeder Mutation.
+            let _entry_gate = self.player_gate(&player_id).await.lock_owned().await;
+            // Reverify **nach** dem Gate und **vor** jedem DB-Zugriff: nur die
+            // seit dem Lesen unveränderte Datei abarbeiten. Damit erkennt ein
+            // zweiter Aufrufer die zwischenzeitliche Mutation und beendet sich
+            // endlich, ohne einen zweiten Apply oder DB-Lesevorgang zu erzeugen.
+            match std::fs::read_to_string(batch_path) {
+                Ok(now) if now == text => {}
+                _ => return Ok(None),
+            }
+            let db_rev = match db.load_persist_revision(&player_id).await {
+                Ok(Some(rev)) => rev,
+                Ok(None) => {
+                    // Kein Charakter-Datensatz: nur dieser Eintrag wird
+                    // dauerhaft quarantänisiert, die übrigen laufen weiter.
+                    self.quarantine_entry(entry, QuarantineReason::UnknownCharacter)?;
+                    report.batches_quarantined += 1;
+                    continue;
+                }
+                Err(e) => return Err(format!("Drain {file_name}: {e}")),
+            };
+            match db_rev.cmp(&entry.snapshot.persist_revision) {
+                std::cmp::Ordering::Equal => {
+                    // Bereits committet: idempotent, kein zweiter Apply (§38).
+                    report.entries_skipped += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    // Übertroffen: nur dieser Eintrag wird superseded abgelegt.
+                    // Namensschema wie bisher: `{player_id}-r{revision}.json`.
+                    let stem = format!(
+                        "{}-r{}",
+                        entry.snapshot.player_id, entry.snapshot.persist_revision
+                    );
+                    let name = format!("{stem}.json");
+                    self.write_entry_to_dir_as(entry, &self.superseded_dir(), &name)?;
+                    report.entries_superseded += 1;
+                }
+                std::cmp::Ordering::Less => {
+                    db.apply_snapshot(&entry.snapshot, weapon_skill_id).await?;
+                    report.entries_applied += 1;
+                    let _ = self.archive_resolved_quarantine_cases_inner(
+                        &player_id,
+                        entry.snapshot.persist_revision,
+                    );
+                }
+            }
+        }
+        // Erst jetzt ist jeder Eintrag erledigt: die Datei darf entfernt werden.
+        remove_file(batch_path)?;
+        report.batches_processed = 1;
         Ok(Some(report))
     }
 
@@ -884,6 +1219,155 @@ fn canonical_player_id(raw: &str) -> Option<String> {
 
 /// Parst `{TS}-{PID}-r{REV}.json` und liefert die kanonische Charakter-ID.
 /// Genau die Form des Producer-Formatters; keine heuristische Teilzuordnung.
+///
+/// Batch-Dateiname eines Persistenzlaufs: `<captured_at_ms:013>-b<digest:012>.json`.
+/// Der Name enthält bewusst **keine** Charakter-ID; die Zuordnung erfolgt
+/// ausschließlich über die Einträge.
+/// `P-12`: Batch-Dateiname `<ts:013>-b<digest:012>.json`.
+///
+/// **Was den Dateinamen bestimmt:** ausschließlich
+/// 1. `min(captured_at_ms)` aller Einträge (Zeit-Präfix) und
+/// 2. `batch_digest` über die **kanonisch geordneten** Einträge.
+///
+/// Der Digest ist ein **Namensteil, kein Inhaltsnachweis**. Er ist über
+/// `player_id` + `persist_revision` je Eintrag gebildet und damit kein
+/// kollisionsfreier Nachweis der Snapshot-Inhalte. Die inhaltliche
+/// Gleichheit zweier Batches wird deshalb **immer zusätzlich** über einen
+/// vollständigen Byte- oder Strukturvergleich geprüft
+/// (`batch_content_eq`), nie allein über den Digest.
+///
+/// Das Zeit-Präfix erhält die lexikografische Reihenfolge = chronologische
+/// Drain-Reihenfolge (§36).
+fn batch_file_name(captured_at_ms: i64, digest: u64) -> String {
+    format!("{captured_at_ms:013}-b{digest:012}.json")
+}
+
+/// FNV-1a (64 Bit) über die Inhaltskennung der **kanonisch geordneten**
+/// Einträge (`player_id` + `persist_revision`). Bewusst ohne `DefaultHasher`:
+/// die Zuordnung muss über Prozess- und Compilerläufe hinweg stabil bleiben.
+///
+/// Der Wert dient der Namensbildung. Er ist **kein** Nachweis, dass zwei
+/// Batches inhaltlich gleich sind — siehe `batch_content_eq`.
+fn batch_digest(entries: &[SpoolEntry]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut mix = |bytes: &[u8]| {
+        for b in bytes {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    for e in entries {
+        mix(e.snapshot.player_id.as_bytes());
+        mix(&e.snapshot.persist_revision.to_le_bytes());
+    }
+    h
+}
+
+/// Vollständiger Inhaltsvergleich zweier Batches.
+///
+/// `Ok(true)` nur, wenn **beide** Dateien als `SpoolBatch` lesbar sind und
+/// **jeder** persistentierte Feldwert übereinstimmt (`SpoolEntry` leitet
+/// `PartialEq` aus allen Feldern ab, einschließlich der vollständigen
+/// `PersistSnapshot`). Der Vergleich ist bewusst strukturell und nicht
+/// namensbasiert: er soll einen echten Inhaltsunterschied finden können,
+/// auch wenn der Dateiname identisch ist.
+///
+/// Lesefehler oder fremde Formate gelten **nicht** als Gleichheit.
+fn batch_content_eq(path: &Path, batch: &SpoolBatch) -> bool {
+    let Ok(raw) = std::fs::read(path) else {
+        return false;
+    };
+    let Ok(existing) = serde_json::from_slice::<SpoolBatch>(&raw) else {
+        return false;
+    };
+    existing == *batch
+}
+
+/// `P-12`/§35: bringt die Einträge eines Batches in die **kanonische**
+/// Reihenfolge, bevor Name und serialisierter Inhalt gebildet werden.
+///
+/// Sortiert wird nach `player_id`; die Identität ist damit die stabile
+/// Reihenfolgegrundlage. Der Name eines Batches und sein serialisierter Inhalt
+/// hängen dadurch **nicht** mehr von der Eingabereihenfolge ab: derselbe
+/// vollständige Batch erzeugt bei vertauschter Eingabe denselben Namen und
+/// dieselbe Datei.
+///
+/// Doppelte `player_id` werden **nicht** stillschweigend verdrängt: `build_snapshot`
+/// vergibt je Lauf eine eigene Revision, zwei Einträge derselben Identität in einem
+/// Batch sind daher ein Fehlerbild und kein Normalfall.
+fn canonicalize_entries(mut entries: Vec<SpoolEntry>) -> Result<Vec<SpoolEntry>, String> {
+    entries.sort_by(|a, b| a.snapshot.player_id.cmp(&b.snapshot.player_id));
+    for w in entries.windows(2) {
+        if w[0].snapshot.player_id == w[1].snapshot.player_id {
+            return Err(format!(
+                "Spool-Batch mehrfach dieselbe Spieleridentität im selben Batch: {}",
+                w[0].snapshot.player_id
+            ));
+        }
+    }
+    Ok(entries)
+}
+
+/// `P-12`/§35: `sync`-Fehler an der Dauerhaftigkeitsgrenze **wiederholen**.
+///
+/// Nach einem fehlgeschlagenen Verzeichnis-Sync kann bereits eine finale Datei
+/// vorliegen. Ein erneuter Versuch darf sie weder blind überschreiben noch
+/// ihre Dauerhaftigkeit ungeprüft annehmen: Der Inhalt wird vollständig
+/// verglichen **und** der Verzeichnis-Sync erneut ausgeführt. Erst danach gilt
+/// der Zustand als dauerhaft bestätigt.
+///
+/// Produktionspfad: `write_batch_run` ruft diese Funktion in **beiden**
+/// Wiederholungsfaellen — vorhandene Datei vor dem Schreibversuch und
+/// Konkurrenz während der Veröffentlichung.
+fn confirm_existing_publication(target: &Path, batch: &SpoolBatch) -> Result<(), String> {
+    if !target.exists() {
+        return Err("Spool Bestätigung: Zieldatei fehlt".to_string());
+    }
+    if !batch_content_eq(target, batch) {
+        return Err(format!(
+            "Spool Batch-Konflikt: {} existiert bereits mit abweichendem Inhalt",
+            target
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<unbekannt>".into())
+        ));
+    }
+    // Inhalt stimmt; die Dauerhaftigkeit wird dennoch erneut bestätigt.
+    sync_dir(target)
+}
+
+/// `P-12`: liefert die Snapshots **einer** Spool-Datei unabhängig vom Format.
+/// Unterstützt das gemeinsame Batch-Format (`entries`) und die alte
+/// Einzeldatei (V1). `None` = nicht lesbar bzw. kein bekanntes Format.
+fn entries_in_file(raw: &str) -> Option<Vec<PersistSnapshot>> {
+    if serde_json::from_str::<serde_json::Value>(raw)
+        .map(|v| v.get("entries").is_some())
+        .unwrap_or(false)
+    {
+        return serde_json::from_str::<SpoolBatch>(raw)
+            .ok()
+            .map(|b| b.entries.into_iter().map(|e| e.snapshot).collect());
+    }
+    serde_json::from_str::<SpoolEntry>(raw)
+        .ok()
+        .map(|e| vec![e.snapshot])
+}
+
+/// Parst einen Batch-Dateinamen streng kanonisch. `None` = kein Batchname.
+/// Der Batch-Name trägt bewusst **keine** Charakter-ID (§35); die Zuordnung
+/// erfolgt ausschließlich über die Einträge.
+#[cfg_attr(not(test), allow(dead_code))]
+fn parse_batch_file_name(name: &str) -> Option<i64> {
+    let stem = name.strip_suffix(".json")?;
+    let (ts, seq) = stem.rsplit_once("-b")?;
+    if seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    canonical_ts(ts)
+}
+
 fn parse_spool_file_name(name: &str) -> Option<String> {
     let stem = name.strip_suffix(".json")?;
     let (head, rev) = stem.rsplit_once("-r")?;
@@ -974,14 +1458,100 @@ fn list_json_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-/// Temp-Datei schreiben, fsync, atomar auf `target` verschieben (§21).
-fn write_atomic(tmp: &Path, target: &Path, bytes: &[u8]) -> Result<(), String> {
-    let mut f = std::fs::File::create(tmp).map_err(|e| format!("Spool Temp {tmp:?}: {e}"))?;
-    std::io::Write::write_all(&mut f, bytes).map_err(|e| format!("Spool schreiben: {e}"))?;
-    f.sync_all().map_err(|e| format!("Spool fsync: {e}"))?;
-    drop(f);
-    std::fs::rename(tmp, target).map_err(|e| format!("Spool rename {target:?}: {e}"))?;
-    Ok(())
+/// Dauerhaftes **atomares** Veröffentlichen einer neuen Datei `target`.
+///
+/// Reihenfolge und Bedeutung (`P-12`/§35, Safe-Write §25):
+/// 1. Der **vollständige** Inhalt wird ausschließlich unter dem temporären
+///    Namen `tmp` geschrieben und `fsync`iert. Unter dem finalen Namen wird
+///    zu diesem Zeitpunkt **nichts** angelegt oder geschrieben — er ist für
+///    einen Drain also noch nicht sichtbar.
+/// 2. `hard_link(tmp, target)` macht den **fertigen** Inhalt unter dem
+///    finalen Namen atomar sichtbar. Ein Hardlink ist hier die passende
+///    Lösung, weil er den Zielnamen **nie** ersetzt (er scheitert mit
+///    `AlreadyExists`, wenn der Name belegt ist — kein Rename-Rennen, kein
+///    Überschreiben) und den Inhalt **sofort vollständig** sichtbar macht,
+///    sodass unter dem finalen Namen nie eine unvollständige Datei entsteht.
+///    Eignung: `tmp` und `target` liegen im selben Spool-Verzeichnis und damit
+///    auf demselben Dateisystem; der unterstützte Pfad ist Linux/ext4.
+/// 3. `tmp` wird entfernt; der finale Name bleibt als reguläre Datei
+///    (gelinkter Inhalt) erhalten.
+/// 4. Das **Elternverzeichnis** wird `fsync`iert. Erst danach gilt die
+///    Veröffentlichung als dauerhaft. Der Fehler wird **weitergegeben**, weil
+///    der Verzeichniseintrag sonst einen Absturz nicht überlebt.
+///
+/// Datei-Sync und Verzeichnis-Sync sind verschieden: `sync_all` auf `tmp`
+/// sichert den Inhalt, der Verzeichnis-Sync sichert die Sichtbarkeit unter
+/// `target`.
+fn publish_new_file(
+    tmp: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<PublishOutcome, String> {
+    // 1) Vollständig unter dem temporären Namen schreiben und sichern.
+    {
+        let mut f =
+            std::fs::File::create(tmp).map_err(|e| format!("Spool Temp {tmp:?}: {e}"))?;
+        if let Err(e) = std::io::Write::write_all(&mut f, bytes) {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!("Spool schreiben: {e}"));
+        }
+        if let Err(e) = f.sync_all() {
+            let _ = std::fs::remove_file(tmp);
+            return Err(format!("Spool Datei-fsync {tmp:?}: {e}"));
+        }
+    }
+
+    // 2) Atomar unter dem finalen Namen sichtbar machen, ohne zu ersetzen.
+    if let Err(e) = std::fs::hard_link(tmp, target) {
+        // Temporärdatei sicher entfernen; am Ziel wurde nichts verändert.
+        let _ = std::fs::remove_file(tmp);
+        // `AlreadyExists` ist der erwartete Konkurrenzfall und wird **über den
+        // Fehlertyp** unterschieden, nicht über eine Textsuche in der
+        // Fehlermeldung (die plattformabhängig "File exists" lautet).
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            return Ok(PublishOutcome::TargetExists);
+        }
+        return Err(format!("Spool veröffentlichen {target:?}: {e}"));
+    }
+
+    // 3) Temporärdatei entfernen (Bestand bleibt unter `target` erhalten).
+    let _ = std::fs::remove_file(tmp);
+
+    // 4) Dauerhaftigkeitsgrenze: ohne bestätigten Verzeichnis-Sync gilt die
+    // Veröffentlichung NICHT als abgeschlossen.
+    sync_dir(target)?;
+    Ok(PublishOutcome::Published)
+}
+
+/// Ergebnis eines Veröffentlichungsversuchs (`publish_new_file`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishOutcome {
+    /// Der finale Name war frei; der vollständige Inhalt ist jetzt sichtbar
+    /// und das Verzeichnis ist gesichert.
+    Published,
+    /// Der finale Name war bereits belegt. Es wurde **nichts** verändert; der
+    /// Inhalt entscheidet über die weitere Behandlung.
+    TargetExists,
+}
+
+/// `fsync` des Elternverzeichnisses. Fehler werden weitergereicht: die
+/// unterstuetzte Zielplattform (Linux) liefert hier einen echten Fehler, wenn
+/// das Verzeichnis nicht gesichert werden kann.
+fn sync_dir(path: &Path) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("Spool Verzeichnis zu {path:?} unbekannt"))?;
+    let d = std::fs::File::open(dir).map_err(|e| format!("Spool Verzeichnis oeffnen {dir:?}: {e}"))?;
+    d.sync_all()
+        .map_err(|e| format!("Spool Verzeichnis-fsync {dir:?}: {e}"))
+}
+
+/// Alte, weiterhin benutzte Schreibweise: legt `target` an, ohne eine
+/// vorhandene Datei zu ueberschreiben. Der Inhalt wird nur geschrieben, wenn
+/// die Datei neu angelegt wurde; eine bereits vorhandene Datei bleibt
+/// unberuehrt und wird als `false` gemeldet.
+fn write_atomic_if_absent(tmp: &Path, target: &Path, bytes: &[u8]) -> Result<bool, String> {
+    Ok(publish_new_file(tmp, target, bytes)? == PublishOutcome::Published)
 }
 
 fn move_file(src: &Path, dst: &Path) -> Result<(), String> {
@@ -1118,10 +1688,19 @@ mod tests {
         let snap = snapshot("p1", 3, 10.0);
         s.write_batch(&snap).unwrap();
         s.write_batch(&snap).unwrap();
+        // `P-12`: Idempotenz bedeutet weiterhin **eine** Datei für zwei
+        // identische Schreibvorgänge. Der Name ist jetzt inhaltsbasiert, also
+        // wird kein fester Legacy-Name mehr erwartet, sondern genau eine
+        // lesbare Batch-Datei mit dem erwarteten Eintrag.
         assert_eq!(s.count_batches().unwrap(), 1);
-        let name = format!("{:013}-p1-r3.json", snap.captured_at_ms);
-        let path = base.join("spool").join(name);
+        let path = base.join("spool").join(only_batch_name(&base));
         assert!(path.exists(), "Batch-Datei existiert durable");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let batch: SpoolBatch = serde_json::from_str(&raw).expect("Batch lesbar");
+        assert_eq!(batch.format_version, BATCH_FORMAT_VERSION);
+        assert_eq!(batch.entries.len(), 1);
+        assert_eq!(batch.entries[0].snapshot.player_id, "p1");
+        assert_eq!(batch.entries[0].snapshot.persist_revision, 3);
         assert!(!base.join("spool").read_dir().unwrap().any(|e| {
             e.unwrap()
                 .file_name()
@@ -1129,6 +1708,19 @@ mod tests {
                 .starts_with(".tmp-")
         }));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Name der einzigen Batch-Datei im Spool-Verzeichnis.
+    fn only_batch_name(base: &std::path::Path) -> String {
+        let dir = base.join("spool");
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| !n.starts_with(".tmp-"))
+            .collect();
+        assert_eq!(names.len(), 1, "genau eine Batch-Datei erwartet: {names:?}");
+        names.into_iter().next().unwrap()
     }
 
     #[test]
@@ -1142,11 +1734,16 @@ mod tests {
         b.captured_at_ms = 200;
         s.write_batch(&a).unwrap();
         s.write_batch(&b).unwrap();
+        // `P-12`: Der gemeinsame Batch-Name ist inhaltsbasiert. Die
+        // garantierte Eigenschaft ist die **chronologische** Drain-Reihenfolge
+        // (§36), also wird das Zeitstempel-Präfix geprüft, nicht ein Name.
         let first = s.next_batch_path().unwrap().unwrap();
-        assert_eq!(
-            first.file_name().unwrap().to_string_lossy().as_ref(),
-            "0000000000100-p1-r1.json"
+        let first_name = first.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            first_name.starts_with("0000000000100-"),
+            "älteste Datei zuerst, war: {first_name}"
         );
+        assert_eq!(parse_batch_file_name(&first_name), Some(100));
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2367,6 +2964,9 @@ mod tests {
         /// DB-Schritts und wartet dort auf die Freigabe des Tests. Damit ist
         /// die Reihenfolge ereignisgesteuert statt von `yield_now` abhängig.
         gate: Option<(mpsc::UnboundedSender<()>, Arc<tokio::sync::Notify>)>,
+        /// `P-12`: DB-Revision je Charakter-ID. `Some(map)` überschreibt `db_rev`;
+        /// ein `None` **im Map** bedeutet: kein Charakterdatensatz.
+        per_player: Option<HashMap<String, Option<i64>>>,
     }
 
     impl FakeDb {
@@ -2383,6 +2983,23 @@ mod tests {
                 applies: std::sync::atomic::AtomicUsize::new(0),
                 applied: Mutex::new(Vec::new()),
                 gate,
+                per_player: None,
+            }
+        }
+        /// `P-12`: DB mit Revision **pro** Charakter. `(id, None)` modelliert
+        /// „kein Charakterdatensatz".
+        fn multi(revs: &[(&str, Option<i64>)]) -> Self {
+            Self {
+                db_rev: None,
+                loads: std::sync::atomic::AtomicUsize::new(0),
+                applies: std::sync::atomic::AtomicUsize::new(0),
+                applied: Mutex::new(Vec::new()),
+                gate: None,
+                per_player: Some(
+                    revs.iter()
+                        .map(|(k, v)| (k.to_string(), *v))
+                        .collect::<HashMap<_, _>>(),
+                ),
             }
         }
         fn loads(&self) -> usize {
@@ -2399,9 +3016,15 @@ mod tests {
     impl DrainDb for FakeDb {
         fn load_persist_revision<'a>(
             &'a self,
-            _char_id: &'a str,
+            char_id: &'a str,
         ) -> BoxFuture<'a, Result<Option<i64>, String>> {
             self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // `P-12`: gemeinsame Batches brauchen je Charakter eine eigene
+            // DB-Revision.
+            if let Some(map) = &self.per_player {
+                let rev = map.get(char_id).copied().flatten();
+                return Box::pin(async move { Ok(rev) });
+            }
             Box::pin(async move { Ok(self.db_rev) })
         }
         fn apply_snapshot<'a>(
@@ -2851,6 +3474,881 @@ mod tests {
         assert_eq!(db.applied(), vec![("42".to_string(), 18)]);
         assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
         assert_no_side_artifacts(&s);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- P-12: atomare Veröffentlichung ohne Klon-Sichtbarkeit (§35) ----
+
+    /// P-12: Während der Erstellung ist **keine** finale Datei sichtbar.
+    /// Der vollständige Inhalt entsteht ausschließlich unter dem temporären
+    /// Namen; ein finaler Batch erscheint erst durch den atomaren Schritt.
+    ///
+    /// Der Test beobachtet den Schreibpfad ereignisgesteuert über einen
+    /// Leser, der unmittelbar nach dem Anlegen der Temporärdatei läuft.
+    /// Erwartet wird: zu diesem Zeitpunkt existiert **keine** finale Datei
+    /// und `list_json_files` (die Sicht für den Drain) ist leer.
+    #[test]
+    fn p12_no_final_file_is_visible_while_the_batch_is_being_written() {
+        let base = temp_dir("p12invis");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        let batch = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: "probe".into(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: snap.clone(),
+            }],
+        };
+        let body = serde_json::to_vec(&batch).unwrap();
+        let target = base.join("spool").join("probe.json");
+
+        // Der Veröffentlichungsschritt wird aufgeteilt: erst der Temp-Inhalt
+        // (unvollständigster Zwischenstand, den ein Drain niemals liest), dann
+        // der atomare Schritt. Dazwischen liegt **keine** finale Datei vor.
+        let tmp = base.join("spool").join(".tmp-probe.json");
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        std::io::Write::write_all(&mut f, &body[..body.len() / 2]).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+
+        // Sichtbarkeit des Drains: keine fertige Datei, Temp ist ausgefiltert.
+        assert!(
+            !target.exists(),
+            "vor der Veröffentlichung darf keine finale Datei existieren"
+        );
+        assert!(
+            list_json_files(&s.spool_dir()).unwrap().is_empty(),
+            "Drain darf keinen halbfertigen Batch lesen"
+        );
+        assert!(
+            s.next_batch_path().unwrap().is_none(),
+            "der Drain sieht keinen halbfertigen Batch"
+        );
+
+        // Der atomare Abschluss macht den fertigen Inhalt sichtbar.
+        write_atomic_if_absent(&tmp, &target, &body).unwrap();
+        assert!(target.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), body, "fertiger Inhalt");
+        assert_eq!(list_json_files(&s.spool_dir()).unwrap().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Ein Drain kann keinen halbfertigen Batch lesen — auch dann nicht,
+    /// wenn eine Temporärdatei liegen bleibt. Geprüft über den echten
+    /// Drain-Aufruf: er sieht ausschließlich die fertige Datei.
+    #[tokio::test]
+    async fn p12_drain_never_reads_a_half_written_batch() {
+        let base = temp_dir("p12halbdrain");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let batch = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: "halb".into(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: snapshot("42", 5, 1.0),
+            }],
+        };
+        let body = serde_json::to_vec(&batch).unwrap();
+        // Abgebrochene Veröffentlichung: nur die halbe Temporärdatei liegt vor.
+        let tmp = base.join("spool").join(".tmp-halbbatch.json");
+        let mut f = std::fs::File::create(&tmp).unwrap();
+        std::io::Write::write_all(&mut f, &body[..10]).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+
+        let db = FakeDb::new(Some(1));
+        let out = s.drain_one_with(&db, "1").await.unwrap();
+        assert!(
+            out.is_none(),
+            "Drain darf die halbe Datei nicht als Batch verarbeiten"
+        );
+        assert_eq!(db.loads(), 0, "kein DB-Zugriff aus einer Temporärdatei");
+        assert_eq!(db.applies(), 0);
+        assert!(tmp.exists(), "Temporärdatei bleibt unangetastet liegen");
+        assert_no_side_artifacts(&s);
+
+        // Erst die vollständige Veröffentlichung macht den Batch sichtbar.
+        let target = base.join("spool").join("halb.json");
+        write_atomic_if_absent(&tmp, &target, &body).unwrap();
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("jetzt verarbeitbar");
+        assert_eq!(out.entries_applied, 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Abbruch **vor** der Veröffentlichung hinterlässt höchstens eine
+    /// Temporärdatei und keinen unvollständigen finalen Batch. Der
+    /// Schreibfehlerfall wird deterministisch erzwungen, indem das
+    /// Spool-Verzeichnis entfernt wird.
+    #[tokio::test]
+    async fn p12_abort_before_publication_leaves_no_incomplete_final_batch() {
+        let base = temp_dir("p12abort");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        let (p, _rx) = dirty_test_player("42");
+        shared.lock().await.players.insert(p.id.clone(), p);
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+
+        // Schreibziel unbenutzbar → Abbruch vor jeder Veröffentlichung.
+        let spool_dir = s.spool_dir();
+        std::fs::remove_dir_all(&spool_dir).unwrap();
+        assert!(
+            runtime.persist_dirty_run(&shared, &["42".to_string()]).await.is_err(),
+            "Abbruch muss als Fehler melden"
+        );
+
+        // Es existiert **kein** unvollständiger finaler Batch.
+        assert!(!spool_dir.exists());
+        s.ensure_dirs().unwrap();
+        assert!(
+            list_json_files(&s.spool_dir()).unwrap().is_empty(),
+            "kein unvollständiger finaler Batch nach Abbruch"
+        );
+        assert_eq!(s.count_batches().unwrap(), 0);
+        // Dirty und Revision bleiben für einen späteren Versuch erhalten.
+        let world = shared.lock().await;
+        let p = world.players.get("42").unwrap();
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+        assert_eq!(p.persist_revision, 5);
+        drop(world);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Konkurrierende Veröffentlichungen überschreiben keinen Bestand.
+    /// Zwei Aufrufe mit demselben Namen: der erste gewinnt, der zweite
+    /// scheitert am atomaren Schritt und entscheidet anschließend über den
+    /// vollständigen Inhaltsvergleich, ohne die vorhandene Datei zu ändern.
+    #[test]
+    fn p12_racing_publications_never_clobber_an_existing_file() {
+        let base = temp_dir("p12race2");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        let batch = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: "race".into(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: snap.clone(),
+            }],
+        };
+        let body = serde_json::to_vec(&batch).unwrap();
+        let target = base.join("spool").join("race.json");
+
+        // Erster Versuch gewinnt.
+        let tmp1 = base.join("spool").join(".tmp-race-1.json");
+        assert!(write_atomic_if_absent(&tmp1, &target, &body).unwrap());
+        let first = std::fs::read(&target).unwrap();
+
+        // Zweiter Versuch mit abweichendem Inhalt, identischem Zielnamen.
+        let mut other = snap.clone();
+        other.x = 77.0;
+        let conflicting = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: "race".into(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: other,
+            }],
+        };
+        let body2 = serde_json::to_vec(&conflicting).unwrap();
+        let tmp2 = base.join("spool").join(".tmp-race-2.json");
+        assert!(
+            !write_atomic_if_absent(&tmp2, &target, &body2).unwrap(),
+            "zweiter Versuch darf den Namen nicht belegen"
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            first,
+            "Bestand darf nicht überschrieben werden"
+        );
+        // Der echte Produktionspfad entscheidet danach inhaltlich.
+        assert!(
+            confirm_existing_publication(&target, &conflicting).is_err(),
+            "abweichender Inhalt darf nicht bestätigt werden"
+        );
+        assert!(
+            confirm_existing_publication(&target, &batch).is_ok(),
+            "identischer Inhalt wird bestätigt"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), first);
+        assert_eq!(list_json_files(&s.spool_dir()).unwrap().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Wiederholung **nach** Fehler an der Dauerhaftigkeitsgrenze nutzt
+    /// den echten Produktionspfad (`persist_dirty_run` → `write_batch_run` →
+    /// `confirm_existing_publication`) und erhält Dirty/Revision korrekt.
+    ///
+    /// Szenario: Die Veröffentlichung scheitert, nachdem die Zieldatei bereits
+    /// vorlag. Der erneute Lauf muss Inhalt und Dauerhaftigkeit bestätigen,
+    /// ohne die Datei neu zu schreiben oder den Zustand zu verlieren.
+    #[tokio::test]
+    async fn p12_retry_after_durability_failure_uses_the_production_path() {
+        let base = temp_dir("p12retrypath");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        let (p, _rx) = dirty_test_player("42");
+        shared.lock().await.players.insert(p.id.clone(), p);
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+
+        // Der erste Lauf scheitert an der Dauerhaftigkeitsgrenze
+        // (Schreibziel unbenutzbar); es entsteht keine Datei.
+        std::fs::remove_dir_all(s.spool_dir()).unwrap();
+        assert!(runtime.persist_dirty_run(&shared, &["42".to_string()]).await.is_err());
+        assert_eq!(
+            runtime.status(),
+            PersistStatus::Degraded,
+            "erster Fehlschlag setzt DEGRADED"
+        );
+
+        // Zustand nach dem Fehlschlag: Dirty und Revision unverändert.
+        {
+            let world = shared.lock().await;
+            let p = world.players.get("42").unwrap();
+            assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+            assert_eq!(p.persist_revision, 5, "Revision nicht verbraucht");
+        }
+
+        // Der Wiederholungslauf nimmt **denselben** Produktionspfad und
+        // veröffentlicht regulär.
+        s.ensure_dirs().unwrap();
+        assert_eq!(
+            runtime.persist_dirty_run(&shared, &["42".to_string()]).await.unwrap(),
+            1
+        );
+        assert_eq!(s.count_batches().unwrap(), 1, "genau eine Datei");
+        let name = only_batch_name(&base);
+        let published = std::fs::read(base.join("spool").join(&name)).unwrap();
+        {
+            let world = shared.lock().await;
+            assert!(!world.players.get("42").unwrap().dirty.any(), "Dirty bereinigt");
+        }
+
+        // Ein **dritter** Lauf erfasst eine **neue Revision** (RAM-Revision
+        // wurde fortgeschrieben). Damit ist ein abweichender Inhalt zu
+        // erwarten: Der Lauf schreibt eine weitere Datei und lässt den
+        // vorhandenen Bestand unangetastet. Nachgewiesen wird deshalb der
+        // Bestandsschutz, nicht die Dateianzahl.
+        let world = shared.lock().await;
+        let rev_vorher = world.players.get("42").unwrap().persist_revision;
+        drop(world);
+        {
+            let mut w = shared.lock().await;
+            let pl = w.players.get_mut("42").unwrap();
+            pl.mark_dirty(crate::persist::PersistComponent::Position);
+            drop(w);
+        }
+        assert_eq!(
+            runtime.persist_dirty_run(&shared, &["42".to_string()]).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            std::fs::read(base.join("spool").join(&name)).unwrap(),
+            published,
+            "Bestand aus dem ersten Lauf bleibt unverändert erhalten"
+        );
+        let world = shared.lock().await;
+        assert!(
+            world.players.get("42").unwrap().persist_revision > rev_vorher,
+            "Revision wurde fortgeschrieben"
+        );
+        drop(world);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- P-12: Veröffentlichung, Überschreibschutz, Idempotenz (§35/§38) ----
+
+    /// P-12: Ein Mehrspieler-Batch erzeugt **unabhängig von der
+    /// Eingabereihenfolge** denselben Namen und denselben serialisierten
+    /// Inhalt. Belegt die kanonische Ordnung vor Namensbildung.
+    #[test]
+    fn p12_swapped_input_order_yields_identical_content_and_no_second_file() {
+        let base = temp_dir("p12order");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = snapshot("42", 5, 1.0);
+        let b = snapshot("43", 7, 2.0);
+        s.write_batch_run(vec![a.clone(), b.clone()]).unwrap();
+        let first = only_batch_name(&base);
+        let first_body = std::fs::read(base.join("spool").join(&first)).unwrap();
+        assert_eq!(s.count_batches().unwrap(), 1);
+
+        // Vertauschte Eingabereihenfolge, gleiche vollständige Snapshots.
+        s.write_batch_run(vec![b, a]).unwrap();
+        assert_eq!(
+            s.count_batches().unwrap(),
+            1,
+            "vertauschte Reihenfolge darf keine zweite fertige Datei erzeugen"
+        );
+        assert_eq!(only_batch_name(&base), first, "gleicher Name");
+        assert_eq!(
+            std::fs::read(base.join("spool").join(&first)).unwrap(),
+            first_body,
+            "serialisierter Inhalt muss identisch sein"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Ein bereits vorhandener **identischer** Batch gilt als
+    /// sicherer idempotenter Erfolg — belegt durch `Ok`, nicht durch einen
+    /// Schreibvorgang.
+    #[test]
+    fn p12_existing_identical_batch_is_a_safe_idempotent_success() {
+        let base = temp_dir("p12idem2");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        s.write_batch(&snap).unwrap();
+        let name = only_batch_name(&base);
+        let before = std::fs::read(base.join("spool").join(&name)).unwrap();
+        // Erneuter identischer Versuch: Erfolg, keine neue Datei.
+        let out = s.write_batch_run(vec![snap]).unwrap();
+        assert_eq!(out.map(|p| p.file_name().unwrap().to_string_lossy().to_string()),
+            Some(name.clone()));
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(std::fs::read(base.join("spool").join(&name)).unwrap(), before);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Erzwungener gleicher Zielname bei **abweichendem** Snapshot-Inhalt.
+    /// Erwartung: kein Überschreiben, kein falscher Erfolg.
+    ///
+    /// Der Konflikt wird deterministisch erzeugt, indem ein Batch geschrieben
+    /// und danach unter demselben Namen ein Batch mit abweichendem Inhalt
+    /// angeboten wird. Der Digest allein kann den Konflikt nicht erkennen —
+    /// deshalb wird der **vorhandene Inhalt** gezielt überschrieben, um genau
+    /// den Namenskonflikt mit abweichendem Inhalt nachzustellen.
+    #[test]
+    fn p12_forced_same_name_with_different_content_never_overwrites_or_succeeds() {
+        let base = temp_dir("p12conflict");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let mut snap = snapshot("42", 5, 1.0);
+        s.write_batch(&snap).unwrap();
+        let name = only_batch_name(&base);
+        let target = base.join("spool").join(&name);
+        let original = std::fs::read(&target).unwrap();
+
+        // Zweiter, inhaltlich abweichender Batch mit identischer
+        // Identität+Revision (x statt 1.0) → kanonisch gleiche Namensbasis.
+        snap.x = 99.0;
+        let err = s
+            .write_batch(&snap)
+            .expect_err("abweichender Inhalt unter gleichem Namen darf kein Erfolg sein");
+        assert!(
+            err.contains("Batch-Konflikt"),
+            "klarer Konfliktfehler erwartet, war: {err}"
+        );
+        // Vorhandene Datei unverändert erhalten.
+        assert_eq!(std::fs::read(&target).unwrap(), original, "kein Überschreiben");
+        assert_eq!(s.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Konkurrierende Veröffentlichung unter demselben Namen.
+    /// Der Erstschreibende gewinnt, der Zweite erzeugt **keine** zweite Datei
+    /// und verliert keine bereits veröffentlichte Datei. Der Inhaltsvergleich
+    /// entscheidet über den Erfolg.
+    #[test]
+    fn p12_concurrent_publication_loses_no_already_published_file() {
+        let base = temp_dir("p12concur");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        s.write_batch(&snap).unwrap();
+        let name = only_batch_name(&base);
+        let target = base.join("spool").join(&name);
+        let published = std::fs::read(&target).unwrap();
+
+        // "Konkurrierender" Zweitversuch: derselbe Name, identischer Inhalt.
+        // `write_atomic_if_absent` muss am `hard_link` scheitern und darf die
+        // vorhandene Datei nicht verdrängen.
+        let body = serde_json::to_vec(&SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: name.trim_end_matches(".json").to_string(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: snap.clone(),
+            }],
+        })
+        .unwrap();
+        let tmp = base.join("spool").join(".tmp-konkurrenz");
+        let created = write_atomic_if_absent(&tmp, &target, &body).unwrap();
+        assert!(!created, "hard_link muss einen bestehenden Namen ablehnen");
+        assert!(target.exists(), "veröffentlichte Datei darf nicht verschwinden");
+        assert_eq!(std::fs::read(&target).unwrap(), published, "Inhalt unverändert");
+
+        // Der reguläre Pfad meldet daraufhin sicheren idempotenten Erfolg.
+        assert!(s.write_batch(&snap).is_ok());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Dauerhaftigkeitsgrenze: `publish_new_file` darf nur `Ok` liefern,
+    /// wenn der **Verzeichnis-Sync** erfolgreich war. Ein erzwungener
+    /// Sync-Fehler am Elternverzeichnis muss als Fehler durchschlagen, damit
+    /// keine Dirty-Rücknahme erfolgt.
+    ///
+    /// Der Fehler wird deterministisch erzeugt: Das Zielverzeichnis wird vor
+    /// dem Schreiben entfernt. Dann schlägt bereits das Anlegen fehl — das
+    /// belegt, dass `write_batch_run` **keinen** erfolgreichen Abschluss
+    /// meldet, wenn keine dauerhafte Veröffentlichung stattgefunden hat, und
+    /// dass die Dirty-Bits erhalten bleiben.
+    #[tokio::test]
+    async fn p12_failed_durability_boundary_reports_no_successful_persistence() {
+        let base = temp_dir("p12durable");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        let (p, _rx) = dirty_test_player("42");
+        shared.lock().await.players.insert(p.id.clone(), p);
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+
+        // Spool-Verzeichnis entfernen: die Veröffentlichung muss scheitern.
+        let spool_dir = s.spool_dir();
+        std::fs::remove_dir_all(&spool_dir).unwrap();
+        let res = runtime.persist_dirty_run(&shared, &["42".to_string()]).await;
+        assert!(res.is_err(), "ohne dauerhafte Veröffentlichung kein Erfolg");
+        assert_eq!(
+            runtime.status(),
+            PersistStatus::Degraded,
+            "Fehlschlag setzt DEGRADED"
+        );
+        // Dirty-Zustand bleibt für einen späteren Versuch erhalten (§40).
+        let world = shared.lock().await;
+        let p = world.players.get("42").unwrap();
+        assert!(
+            p.dirty.is_dirty(crate::persist::PersistComponent::Position),
+            "Dirty bleibt erhalten, es wurde nichts dauerhaft gesichert"
+        );
+        assert_eq!(p.persist_revision, 5, "Revision nicht verbraucht");
+        drop(world);
+
+        // Nach Wiederherstellung des Verzeichnisses gelingt der Versuch.
+        s.ensure_dirs().unwrap();
+        assert_eq!(runtime.persist_dirty_run(&shared, &["42".to_string()]).await.unwrap(), 1);
+        assert_eq!(s.count_batches().unwrap(), 1);
+        let world = shared.lock().await;
+        assert!(!world.players.get("42").unwrap().dirty.any());
+        drop(world);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Bestätigung nach fehlgeschlagenem Sync muss Inhalt **und**
+    /// Dauerhaftigkeit prüfen. Ein abweichender Inhalt wird abgelehnt, ein
+    /// übereinstimmender Inhalt wird durch erneuten Verzeichnis-Sync bestätigt.
+    #[test]
+    fn p12_retry_confirmation_checks_content_and_redoes_dir_sync() {
+        let base = temp_dir("p12confirm");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        s.write_batch(&snap).unwrap();
+        let name = only_batch_name(&base);
+        let target = base.join("spool").join(&name);
+        let batch = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: name.trim_end_matches(".json").to_string(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: snap.clone(),
+            }],
+        };
+        // Identischer Inhalt: Bestätigt (inkl. erneutem Verzeichnis-Sync).
+        assert!(confirm_existing_publication(&target, &batch).is_ok());
+        // Abweichender Inhalt: abgelehnt.
+        let mut other = snap.clone();
+        other.x = 42.0;
+        let abweichend = SpoolBatch {
+            format_version: BATCH_FORMAT_VERSION,
+            batch_id: batch.batch_id.clone(),
+            entries: vec![SpoolEntry {
+                format_version: FORMAT_VERSION,
+                snapshot: other,
+            }],
+        };
+        assert!(
+            confirm_existing_publication(&target, &abweichend).is_err(),
+            "abweichender Inhalt darf nicht bestätigt werden"
+        );
+        // Fehlende Datei: abgelehnt.
+        std::fs::remove_file(&target).unwrap();
+        assert!(confirm_existing_publication(&target, &batch).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Doppelte Spieleridentität in einem Batch wird eindeutig
+    /// abgewiesen, nicht stillschweigend verdrängt.
+    #[test]
+    fn p12_duplicate_player_identity_in_one_batch_is_rejected() {
+        let base = temp_dir("p12dup");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = snapshot("42", 5, 1.0);
+        let mut b = snapshot("42", 6, 2.0);
+        b.captured_at_ms = a.captured_at_ms;
+        let err = s
+            .write_batch_run(vec![a, b])
+            .expect_err("doppelte Identität muss abgewiesen werden");
+        assert!(
+            err.contains("mehrfach dieselbe Spieleridentität"),
+            "eindeutiger Fehler erwartet, war: {err}"
+        );
+        assert_eq!(
+            s.count_batches().unwrap(),
+            0,
+            "kein Batch bei abgewiesener Identität"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- P-12: gemeinsamer Batch je Persistenzlauf (§35) ----
+
+    /// P-12, Kernregel 1: ein Lauf über N dirty Spieler erzeugt **eine**
+    /// gemeinsame Batch-Datei mit genau diesen N Snapshots.
+    #[tokio::test]
+    async fn p12_run_writes_exactly_one_batch_containing_all_dirty_players() {
+        let base = temp_dir("p12one");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        for id in ["42", "43", "44"] {
+            let (p, _rx) = dirty_test_player(id);
+            shared.lock().await.players.insert(p.id.clone(), p);
+        }
+        let ids: Vec<String> = ["42", "43", "44"].iter().map(|s| s.to_string()).collect();
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+        assert_eq!(runtime.persist_dirty_run(&shared, &ids).await.unwrap(), 3);
+
+        // Genau eine Datei, und sie ist das gemeinsame Batch.
+        let files = list_json_files(&s.spool_dir()).unwrap();
+        assert_eq!(files.len(), 1, "ein Lauf = eine Datei, war: {files:?}");
+        let raw = std::fs::read_to_string(&files[0]).unwrap();
+        let batch: SpoolBatch = serde_json::from_str(&raw).expect("Batch lesbar");
+        assert_eq!(batch.format_version, BATCH_FORMAT_VERSION);
+        assert_eq!(batch.entries.len(), 3, "alle dirty Spieler in EINER Datei");
+        let mut got: Vec<String> = batch
+            .entries
+            .iter()
+            .map(|e| e.snapshot.player_id.clone())
+            .collect();
+        got.sort();
+        assert_eq!(got, vec!["42", "43", "44"]);
+        // Jeder Eintrag ist ein vollständiger Snapshot.
+        for e in &batch.entries {
+            assert_eq!(e.format_version, FORMAT_VERSION);
+            assert!(e.snapshot.persist_revision > 0);
+        }
+        // Und genau eine Datei, keine Reste.
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert!(!s.spool_dir().read_dir().unwrap()
+            .any(|e| e.unwrap().file_name().to_string_lossy().starts_with(".tmp-")));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kernregel 2: leere Dirty-Menge erzeugt **keine** Datei.
+    #[tokio::test]
+    async fn p12_empty_dirty_set_creates_no_file_at_all() {
+        let base = temp_dir("p12empty");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        // Spieler ohne Dirty-State (dirty_test_player markiert Position).
+        let (mut p, _rx) = dirty_test_player("42");
+        p.dirty = crate::persist::PersistDirty::default();
+        shared.lock().await.players.insert(p.id.clone(), p);
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+        let out = runtime
+            .persist_dirty_run(&shared, &["42".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(out, 0);
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty(), "keine Datei");
+        assert_eq!(s.count_batches().unwrap(), 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Dirty-Bits und Revisionen werden je Eintrag nach der
+    /// dauerhaften Veröffentlichung bereinigt.
+    #[tokio::test]
+    async fn p12_run_clears_dirty_and_advances_revision_per_entry() {
+        let base = temp_dir("p12dirty");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        for id in ["42", "43"] {
+            let (p, _rx) = dirty_test_player(id);
+            shared.lock().await.players.insert(p.id.clone(), p);
+        }
+        let runtime = PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+        };
+        let ids: Vec<String> = ["42", "43"].iter().map(|s| s.to_string()).collect();
+        runtime.persist_dirty_run(&shared, &ids).await.unwrap();
+        let world = shared.lock().await;
+        for id in &ids {
+            let p = world.players.get(id).unwrap();
+            assert!(!p.dirty.any(), "{id} muss nach dem Write clean sein");
+            assert!(p.persist_revision > 5, "{id} Revision muss fortgeschrieben sein");
+        }
+        drop(world);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kernregel 5: Änderungen **während** des Schreibens bleiben dirty
+    /// (§15/§39). Der Write-Callback mutiert den Spieler; die Generation
+    /// stimmt danach nicht mehr, also darf das Dirty-Bit nicht bereinigt werden.
+    #[tokio::test]
+    async fn p12_changes_during_the_write_stay_dirty() {
+        let base = temp_dir("p12race");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let shared = crate::world::new_shared();
+        let (p, _rx) = dirty_test_player("42");
+        shared.lock().await.players.insert(p.id.clone(), p);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Kernregel 1 als Direktnachweis: der Write wird genau einmal gerufen.
+        let inner = s.clone();
+        let writer_shared = shared.clone();
+        let calls_c = calls.clone();
+        let out = crate::persist::persist_dirty_run(
+            &shared,
+            &["42".to_string()],
+            move |snapshots| async move {
+                calls_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(snapshots.len(), 1);
+                // Änderung während des Schreibens: neue Komponente dirty.
+                let mut w = writer_shared.lock().await;
+                if let Some(p) = w.players.get_mut("42") {
+                    p.mark_dirty(crate::persist::PersistComponent::Progression);
+                }
+                drop(w);
+                inner.write_batch_run(snapshots).map(|_| ())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, 1);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "genau ein Write");
+        let world = shared.lock().await;
+        let p = world.players.get("42").unwrap();
+        assert!(
+            p.dirty.is_dirty(crate::persist::PersistComponent::Progression),
+            "Änderung während des Schreibens bleibt dirty"
+        );
+        drop(world);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: zwei Läufe erzeugen zwei Dateien (kein Vermischen), und die
+    /// Reihenfolge bleibt chronologisch.
+    #[tokio::test]
+    async fn p12_two_runs_create_two_distinct_batches() {
+        let base = temp_dir("p12two");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let mut a = snapshot("42", 3, 1.0);
+        a.captured_at_ms = 1_700_000_000_000;
+        let mut b = snapshot("43", 4, 2.0);
+        b.captured_at_ms = 1_700_000_000_500;
+        s.write_batch_run(vec![a.clone()]).unwrap();
+        s.write_batch_run(vec![b.clone()]).unwrap();
+        assert_eq!(s.count_batches().unwrap(), 2, "zwei Läufe = zwei Dateien");
+        // Inhaltlich verschieden -> verschiedene Namen (Digest).
+        let first = s.next_batch_path().unwrap().unwrap();
+        assert_eq!(parse_batch_file_name(&first.file_name().unwrap().to_string_lossy()), Some(a.captured_at_ms));
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: ein gemeinsamer Batch wendet **jeden** Eintrag an; die Datei
+    /// verschwindet erst danach.
+    #[tokio::test]
+    async fn p12_shared_batch_applies_every_entry_once() {
+        let base = temp_dir("p12apply");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![snapshot("42", 5, 1.0), snapshot("43", 7, 2.0)];
+        s.write_batch_run(snaps).unwrap();
+        let db = FakeDb::multi(&[("42", Some(1)), ("43", Some(1))]);
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Batch verarbeitet");
+        assert_eq!(out.batches_processed, 1);
+        assert_eq!(out.entries_applied, 2, "beide Einträge angewendet");
+        assert_eq!(out.entries_superseded, 0);
+        assert_eq!(out.batches_quarantined, 0);
+        assert_eq!(db.applies(), 2);
+        let mut applied = db.applied();
+        applied.sort();
+        assert_eq!(applied, vec![("42".to_string(), 5), ("43".to_string(), 7)]);
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty(), "Datei erst nach allen Einträgen weg");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kernregel 6: ein problematischer, aber eindeutig zuordenbarer
+    /// Eintrag wird **einzeln** dauerhaft quarantänisiert; die übrigen
+    /// Einträge werden trotzdem angewendet.
+    #[tokio::test]
+    async fn p12_single_entry_quarantine_does_not_block_the_others() {
+        let base = temp_dir("p12quar");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![
+            snapshot("42", 5, 1.0),
+            snapshot("43", 7, 2.0), // kein Charakterdatensatz in der DB
+            snapshot("44", 9, 3.0),
+        ];
+        s.write_batch_run(snaps).unwrap();
+        let db = FakeDb::multi(&[("42", Some(1)), ("43", None), ("44", Some(1))]);
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Batch verarbeitet");
+        assert_eq!(out.entries_applied, 2, "42 und 44 werden angewendet");
+        assert_eq!(out.batches_quarantined, 1, "nur 43 wird quarantänisiert");
+        assert_eq!(out.entries_skipped, 0);
+        let mut applied = db.applied();
+        applied.sort();
+        assert_eq!(applied, vec![("42".to_string(), 5), ("44".to_string(), 9)]);
+        // Die Datei ist erst jetzt entfernt worden: alle drei Einträge waren erledigt.
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
+        // Genau ein Quarantäneartefakt, kanonisch 43 zugeordnet.
+        let q = list_json_files(&s.quarantine_open_dir()).unwrap();
+        assert_eq!(q.len(), 1, "genau ein Quarantäneartefakt");
+        let qname = q[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            qname.contains("-43-r7.json--unknown-character.json"),
+            "kanonisch 43 zuordenbar: {qname}"
+        );
+        let qcase = parse_quarantine_file_name(&qname).expect("kanonisch zuordenbar");
+        assert_eq!(qcase.player_id, "43");
+        assert_eq!(qcase.revision, 7);
+        assert_eq!(qcase.reason, "unknown-character");
+        assert!(list_json_files(&s.superseded_dir()).unwrap().is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kernregel 6 in der Gegenrichtung: superseded wird **je Eintrag**
+    /// abgelegt, ohne die übrigen Einträge zu beeinträchtigen.
+    #[tokio::test]
+    async fn p12_superseded_entry_is_archived_per_entry() {
+        let base = temp_dir("p12sup");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![snapshot("42", 5, 1.0), snapshot("43", 7, 2.0)];
+        s.write_batch_run(snaps).unwrap();
+        // 42 ist in der DB bereits weiter -> superseded.
+        let db = FakeDb::multi(&[("42", Some(99)), ("43", Some(1))]);
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Batch verarbeitet");
+        assert_eq!(out.entries_superseded, 1);
+        assert_eq!(out.entries_applied, 1, "43 wird unabhängig davon angewendet");
+        let sup = list_json_files(&s.superseded_dir()).unwrap();
+        assert_eq!(sup.len(), 1, "nur der superseded Eintrag");
+        assert!(list_json_files(&s.quarantine_open_dir()).unwrap().is_empty());
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kernregel 7: ein bereits committeter Eintrag wird idempotent
+    /// übersprungen — kein zweiter Apply.
+    #[tokio::test]
+    async fn p12_already_applied_entry_is_skipped_without_second_apply() {
+        let base = temp_dir("p12skip");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![snapshot("42", 5, 1.0), snapshot("43", 7, 2.0)];
+        s.write_batch_run(snaps).unwrap();
+        // 42 exakt auf DB-Revision -> bereits committet.
+        let db = FakeDb::multi(&[("42", Some(5)), ("43", Some(1))]);
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Batch verarbeitet");
+        assert_eq!(out.entries_skipped, 1);
+        assert_eq!(out.entries_applied, 1);
+        assert_eq!(db.applied(), vec![("43".to_string(), 7)]);
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Ein **nicht** eindeutig zuordenbarer Eintrag darf keinen
+    /// Teilbatch erzeugen. Es wird keine Zuordnung erfunden: die gesamte Datei
+    /// geht in die Quarantäne und die DB wird nicht angefasst.
+    #[tokio::test]
+    async fn p12_unattributable_entry_quarantines_whole_file_and_never_writes_db() {
+        let base = temp_dir("p12unattr");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![snapshot("42", 5, 1.0), snapshot("nicht-kanonisch", 7, 2.0)];
+        s.write_batch_run(snaps).unwrap();
+        let path = s.next_batch_path().unwrap().unwrap();
+        let db = FakeDb::multi(&[("42", Some(1))]);
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Batch verarbeitet");
+        assert_eq!(out.batches_quarantined, 1);
+        assert_eq!(out.entries_applied, 0, "kein Teilbatch angewendet");
+        assert_eq!(db.loads(), 0, "kein DB-Lesevorgang");
+        assert_eq!(db.applies(), 0, "kein DB-Write");
+        assert!(!path.exists(), "Quelle wandert in die Quarantäne");
+        assert_eq!(list_json_files(&s.quarantine_open_dir()).unwrap().len(), 1);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12, Kompatibilität: eine bereits veröffentlichte Einzeldatei im alten
+    /// Format bleibt vollständig lesbar und wird normal gedraint.
+    #[tokio::test]
+    async fn p12_legacy_single_file_is_still_readable() {
+        let base = temp_dir("p12legacy");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snap = snapshot("42", 5, 1.0);
+        s.write_legacy_single(&snap).unwrap();
+        let path = s.next_batch_path().unwrap().unwrap();
+        assert!(
+            path.file_name().unwrap().to_string_lossy().ends_with("-42-r5.json"),
+            "Altformat-Dateiname bleibt erhalten"
+        );
+        // Fail-closed-Vorabprüfung sieht die Altdatei ebenfalls.
+        assert_eq!(s.pending_revision("42"), Ok(Some(5)));
+        let db = FakeDb::new(Some(1));
+        let out = s.drain_one_with(&db, "1").await.unwrap().expect("Altdatei verarbeitet");
+        assert_eq!(out.entries_applied, 1);
+        assert_eq!(db.applied(), vec![("42".to_string(), 5)]);
+        assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// P-12: Die Fail-closed-Vorabprüfung (P-30) erkennt die neue gemeinsame
+    /// Batch-Datei genauso wie das Altformat. Ohne diesen Nachweis wäre die
+    /// P-30-Garantie beim Formatwechsel stillschweigend verloren gegangen.
+    #[tokio::test]
+    async fn p12_pending_revision_sees_shared_batches_for_p30() {
+        let base = temp_dir("p12pend");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let snaps = vec![snapshot("42", 5, 1.0), snapshot("43", 7, 2.0)];
+        s.write_batch_run(snaps).unwrap();
+        assert_eq!(s.pending_revision("42"), Ok(Some(5)));
+        assert_eq!(s.pending_revision("43"), Ok(Some(7)));
+        assert_eq!(s.pending_revision("99"), Ok(None), "fremder Spieler bleibt unberührt");
         std::fs::remove_dir_all(&base).unwrap();
     }
 

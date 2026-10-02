@@ -108,7 +108,7 @@ impl PersistDirty {
 /// - Questzustände fehlen (atomarer Questabschluss über den DB-Guard).
 /// - Abgeleitete Werte (max HP/Mana, Armor) fehlen — sie werden beim Laden
 ///   neu berechnet.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistSnapshot {
     /// Rational id = DB-Charakter-ID; im Drahtformat als `character_id`.
     #[serde(rename = "character_id")]
@@ -237,6 +237,69 @@ where
         }
     }
     Ok(())
+}
+
+/// `P-12`/§35: **ein** Persistenzlauf über mehrere Spieler.
+///
+/// Phase 1 sammelt unter **einer** World-Sperre die Snapshots aller im Lauf
+/// erfassten dirty Spieler. Ist die Menge leer, entsteht **keine** Datei und es
+/// wird nichts reserviert. Phase 2 schreibt **eine** gemeinsame Batch-Datei und
+/// gibt den reservierten Snapshot-Speicher beim Rückkehr aus `write` frei,
+/// **ohne** auf die DB-Verarbeitung zu warten. Phase 3 nimmt Dirty-Bits
+/// ausschließlich bei unveränderter Generation zurück; neuere Änderungen
+/// bleiben dirty (§15/§39).
+pub async fn persist_dirty_run<W, F>(
+    shared: &Shared,
+    player_ids: &[String],
+    write: W,
+) -> Result<u32, String>
+where
+    W: FnOnce(Vec<PersistSnapshot>) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    // Phase 1: konsistente Snapshots aller dirty Spieler unter EINER Sperre.
+    let (snapshots, controls) = {
+        let world = shared.lock().await;
+        let mut snapshots = Vec::new();
+        let mut controls: Vec<(String, i64, u64, PersistDirty)> = Vec::new();
+        for id in player_ids {
+            let Some(player) = world.players.get(id) else {
+                continue; // Spieler offline → nichts zu flushen
+            };
+            let Some(snapshot) = build_snapshot(player, false) else {
+                continue; // nicht dirty → kein Snapshot in diesem Lauf
+            };
+            controls.push((
+                snapshot.player_id.clone(),
+                snapshot.persist_revision,
+                snapshot.generation,
+                snapshot.dirty,
+            ));
+            snapshots.push(snapshot);
+        }
+        (snapshots, controls)
+    };
+    if snapshots.is_empty() {
+        return Ok(0); // leere Dirty-Menge → keine Datei
+    }
+    let count = snapshots.len() as u32;
+    // Phase 2: eine gemeinsame Batch-Datei, außerhalb der World-Sperre.
+    // `snapshots` wandert in `write` und wird danach freigegeben.
+    write(snapshots).await?;
+    // Phase 3: Dirty-Rücknahme je Eintrag, an gesicherte Revision und
+    // unveränderte Generation gebunden.
+    let mut world = shared.lock().await;
+    for (id, revision, generation, dirty) in controls {
+        if let Some(player) = world.players.get_mut(&id) {
+            if player.persist_revision < revision {
+                player.persist_revision = revision;
+            }
+            if player.persist_generation == generation {
+                player.dirty.clear_components(dirty);
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// Produktions-Einstiegspunkt des zentralen Player-Persistenzpfads (Stufe B):

@@ -1157,6 +1157,41 @@ Die fachlichen Inhalte des normalen Player-Snapshots sind verbindlich dokumentie
 
 Keine konkrete JSON-Feldverschachtelung wird hier festgelegt, wenn sie bisher nicht entschieden wurde (Abschnitt 42).
 
+**Freigabe des reservierten Snapshot-Speichers (verbindlich, P-12 entschieden):**
+
+Ein Persistenzlauf hält die Snapshots aller im Lauf erfassten dirty Spieler zunächst **reserviert**, weil die vollständige Batch-Datei vor der Veröffentlichung geschrieben sein muss. Die Grenze, an der dieser reservierte Speicher wieder freigegeben wird, ist die **dauerhafte Spool-Übergabe**, nicht die spätere Datenbankübernahme:
+
+1. Der Lauf erfasst die Dirty-Menge konsistent unter der World-Sperre und baut daraus die Snapshots (unverändert §23, §29, §15).
+2. Der Lauf schreibt **eine** gemeinsame Batch-Datei, die ausschließlich die dirty Spieler-Snapshots dieses Laufs enthält. Ist die Dirty-Menge leer, entsteht **keine** Datei und es wird nichts reserviert.
+3. Die Datei wird als **fertiger Batch** dauerhaft veröffentlicht (vollständig geschrieben, Sync-Schritte, atomare Veröffentlichung im Spool-Verzeichnis). Erst danach wird der reservierte Snapshot-Speicher freigegeben.
+4. Die **Datenbankverarbeitung** erfolgt anschließend unabhängig aus dem Spool. Ein ausstehender DB-Apply verlängert den reservierten Speicher nicht.
+5. Am **lebenden Spielerzustand** bleiben der aktuelle RAM-Zustand sowie die schlanken Recovery- und Revisionsmetadaten erhalten. Die Dirty-Rücknahme bleibt an die tatsächlich gesicherte Revision und an die während des Schreibens unveränderte Generation gebunden; neuere Änderungen bleiben dirty (§15, §39).
+6. Schlägt die Veröffentlichung fehl, bleiben die Snapshots reserviert beziehungsweise die Dirty-Bits erhalten, sodass ein späterer Lauf denselben Zustand erneut sicher schreibt. Es geht kein ungesicherter Zustand verloren.
+
+**Verarbeitung und Quarantäne je Eintrag (verbindlich):**
+
+* Ein Batch wird **eintragweise** validiert und verarbeitet; die Datenbankbestätigung gilt **je Eintrag** (`persist_revision` je Charakter, §29).
+* Ein problematischer, **eindeutig zuordenbarer** Eintrag wird zuerst **dauerhaft quarantänisiert** (§32); danach laufen die übrigen Einträge desselben Batches weiter. Ein problematischer Eintrag ist **keine** Sperre für den ganzen Batch.
+* Schlägt die Quarantänesicherung fehl, gilt der Eintrag **nicht** als erledigt; die Datei bleibt liegen und wird erneut versucht.
+* Die Batch-Datei wird **erst entfernt, wenn jeder Eintrag** datenbankbestätigt oder dauerhaft quarantänisiert ist. Nach einem Abbruch ist die Wiederaufnahme sicher und ohne Doppel-Apply.
+* Ein insgesamt unlesbares Batch und ein **Attributionskonflikt** bleiben `fail-safe` nach `P-30`: keine Zuordnung wird erfunden, es erfolgt keine Teilverarbeitung mit geratenen IDs.
+* Die charakterbezogenen Garantien aus `P-30` — Quarantäne-Sperre je Charakter, Charakter-Gate, Reverify, Doppel-Apply-Schutz, automatische Recovery, Betreiberzähler — bleiben unverändert wirksam.
+
+**Kompatibilität zum bisherigen Einzeldatei-Format (V1):**
+
+Bereits veröffentlichte Dateien im Format „eine Datei je Spieler-Snapshot" (`<captured_at_ms:013>-<player_id>-r<revision>.json`) bleiben unverändert **sicher lesbar und abarbeitbar**; sie werden weder umbenannt noch gelöscht. Neue Schreibvorgänge erzeugen ausschließlich das gemeinsame Batch-Format. Das konkrete technische Schema ist in Abschnitt 42 festgehalten.
+
+**Stabile Batch-Darstellung und Veröffentlichung (verbindlich, P-12 entschieden):**
+
+* Die Einträge eines Batches werden **vor** Namensbildung und Serialisierung **kanonisch** nach stabiler Spieleridentität geordnet. Name und serialisierter Inhalt hängen damit nicht von der Eingabereihenfolge ab: derselbe vollständige Batch ergibt bei vertauschter Eingabe denselben Schreibinhalt.
+* Doppelte Spieleridentitäten innerhalb eines Batches werden **eindeutig abgewiesen**; es findet keine stillschweigende Verdrängung eines Eintrags statt.
+* Der Dateiname ergibt sich aus `min(captured_at_ms)` und einem Digest über die kanonisch geordneten Einträge. Der Digest ist ein **Namensteil und kein kollisionsfreier Inhaltsnachweis**; Inhaltsgleichheit wird ausschließlich über einen vollständigen Strukturvergleich bestimmt.
+* Eine bereits vorhandene Zieldatei wird **nicht überschrieben**. Sie gilt nur dann als bereits erledigter Schreibvorgang, wenn ihr vollständiger Inhalt mit dem zu sichernden Batch übereinstimmt; andernfalls bleibt sie erhalten, der Lauf meldet einen Konflikt und der Dirty-Zustand bleibt für einen späteren Versuch erhalten.
+* Die Veröffentlichung erfolgt **atomar und ohne Überschreiben**: Der vollständige Inhalt wird ausschließlich unter einem **temporären** Namen geschrieben und dort gesichert. Erst danach wird er unter dem finalen Namen **atomar sichtbar gemacht**. Unter dem finalen Namen entsteht zu keinem Zeitpunkt eine unvollständige oder teilweise geschriebene Datei; ein während der Erstellung laufender Lesevorgang (Drain) kann daher keinen halbfertigen Batch lesen.
+* Der atomare Schritt ersetzt einen belegten Zielnamen **nie**. Eine bloße Existenzprüfung vor dem Umbenennen genügt dafür nicht, weil sie zwischen Prüfung und Umbenennung anfechtbar ist; der Schritt selbst muss den vorhandenen Namen zurückweisen. Bei Konkurrenz entscheidet der vollständige Inhaltsvergleich, und eine bereits veröffentlichte Datei geht nicht verloren.
+* Bricht der Vorgang **vor** der Veröffentlichung ab, bleibt höchstens eine temporäre Datei zurück und **kein** unvollständiger finaler Batch; der Zustand bleibt über einen späteren Lauf sicher wiederholbar.
+* Die Dauerhaftigkeitsgrenze umfasst **Datei-Inhalt und Verzeichniseintrag**: Der Verzeichnis-Sync ist keine bloße Nebenläufigkeit, sondern Bestandteil des Nachweises. Schlägt er fehl, gilt die Veröffentlichung als **nicht** abgeschlossen — es erfolgt keine Dirty-Rücknahme und keine Freigabe der einzigen gesicherten Zustandskopie. Ein späterer Versuch bestätigt Inhalt **und** Dauerhaftigkeit erneut.
+
 Es gibt **keine** Zusammenführung/Kompression über mehrere Batches hinweg und kein verzögerungsfreies Neuschreiben älterer Batches (V1). Bereits geschriebene Batches bleiben unverändert erhalten, bis sie gemäß Abschnitt 36 erledigt sind.
 
 Durability: Für jede Batch-Datei gilt das Safe-Write-Prinzip aus Abschnitt 25 – erst nach vollständigem Schreiben, dauerhafter Sicherung (flush/fsync) und atomarer Umbenennung gilt die Datei als gültig.

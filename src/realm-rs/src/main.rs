@@ -338,13 +338,19 @@ async fn async_main() -> Result<(), String> {
                     .map(|p| p.id.clone())
                     .collect()
             };
-            for id in &ids {
-                if let Err(e) = persist_for_players
-                    .persist_player(&persist_player_shared, id, false)
-                    .await
-                {
-                    log::error!("periodic persist {id}: {e}");
+            // `P-12`/§35: **ein** Persistenzlauf erzeugt **eine** gemeinsame
+            // Batch-Datei mit den dirty Spielern dieses Laufs. Der Lauf gibt
+            // den reservierten Snapshot-Speicher nach der dauerhaften
+            // Veröffentlichung frei, ohne auf die DB-Verarbeitung zu warten.
+            match persist_for_players
+                .persist_dirty_run(&persist_player_shared, &ids)
+                .await
+            {
+                Ok(n) if n > 0 => {
+                    log::info!("periodic persist: {n} dirty Snapshots in einem Batch gesichert");
                 }
+                Ok(_) => {}
+                Err(e) => log::error!("periodic persist: {e}"),
             }
         }
     });

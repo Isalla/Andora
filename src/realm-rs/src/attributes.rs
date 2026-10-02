@@ -28,7 +28,7 @@ use crate::world::Player;
 /// Die sieben Grundattribute (ganzzahlige Punkte, §1).
 /// Serialize/Deserialize: vollständiger Player-Snapshot der Stufe B
 /// (docs/Player_Persistenz.md §23).
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Attributes {
     pub strength: i32,
     pub constitution: i32,
