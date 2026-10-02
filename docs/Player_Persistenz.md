@@ -604,6 +604,41 @@ Dieser Dokumentationsauftrag führt die Umbenennung NICHT durch (keine Code-Umbe
 
 Die genauen Berechnungsformeln werden hier nicht festgelegt (Abschnitt 42). Falls das bestehende DB-Schema derzeit Felder für HP Max, Mana Max oder `combat_armor` enthält, bedeutet deren heutige Existenz nicht, dass sie Teil der neuen Stufe-B-Architektur bleiben müssen; das bestehende Feld `combat_armor` darf dokumentiert bleiben, wird aber NICHT allein aufgrund seiner Existenz als verbindliche Stufe-B-Persistenzkomponente behandelt. Es findet keine DB-Änderung statt.
 
+**NORMATIVE DIRTY-KOMPONENTEN-ZUORDNUNG (verbindlich, entschieden):**
+
+Die fünf Dirty-Komponenten des Abschnitts 6 sind festgelegt wie folgt. Die Zuordnung ist **semantisch** und vollständig; sie wird hier verbindlich festgeschrieben.
+
+| Komponente | Zugeordnete Snapshot-Zustände |
+|---|---|
+| `Position` | `x`, `y` |
+| `Progression` | `level`, `exp`, `free_attr_points`, `rested_pool`, `attributes` sowie `char_class`, `faction_transition`, `weapon_skill`, `learned_abilities` |
+| `Idia` | `idia` |
+| `Inventory` | persistenter Inventarbestand (Grundinventar, Rucksäcke/Bag-Slots, Equipment) **ohne** den Sicherheits-Puffer (Abschnitt 6) |
+| `Resources` | `hp`, `mana` |
+
+Festlegungen zur Semantik:
+
+* **Eine Dirty-Komponente steuert die Aufnahme des Spielers in den Snapshot, nicht die Auswahl von Feldern.** Sobald mindestens eine Komponente dirty ist, wird der **vollständige** vorhandene `PersistSnapshot` erfasst. Es gibt **keine** feldweise Auswahl, kein feldweises Delta und keine teilweise Serialisierung einer Komponente.
+* **Das initiale Laden ist keine Spielzustandsänderung.** Der Player wird beim Login aus der Datenbank gesetzt, ohne eine Komponente dirty zu markieren und ohne die Persistenz-Generation fortzuschreiben. Dirty-Markierungen entstehen erst durch nachfolgende Spielzustandsänderungen.
+* **Abgeleitete Werte bleiben außerhalb** (Abschnitt 23: HP Max, Mana Max, Armor). Ebenso separat persistierte Systeme mit eigenem Persistenzweg (Abschnitt 8: Quest State/Progress) sowie `logout_at`.
+* **Jede Zustandsänderung eines zugeordneten Feldes markiert über `Player::mark_dirty` die zugeordnete Komponente.** `mark_dirty` erhöht zusätzlich die Persistenz-Generation (Abschnitt 15/39); eine reine Bit-Manipulation ohne Generationserhöhung wäre eine Verletzung dieser Regel.
+* **Keine neue Komponente.** Die fünf bestehenden Komponenten decken die persistenten Zustände vollständig ab.
+
+**Verbindliche Zuordnung ohne bestehenden Produktions-Mutationspfad:**
+
+Für `char_class`, `faction_transition`, `weapon_skill` und `learned_abilities` ist die Komponente `Progression` normativ festgelegt, **obwohl im aktuellen Produktionscode kein Mutationspfad gefunden wurde, der diese Felder ändert**. Diese Felder sind persistiert (Snapshot und Datenbankspalten) und werden beim Laden gesetzt, können derzeit aber noch nicht im laufenden Spiel verändert werden.
+
+Daraus folgt ausdrücklich:
+
+* Die Zuordnung ist **festgelegt**, damit künftige Änderungsrouten sie ohne erneute Entscheidung einhalten können.
+* Es wird hier **kein** neues Spielsystem und **keine** neue Änderungsroute implementiert. Das Fehlen eines Mutationspfades ist eine Eigenschaft des aktuellen Codeumfangs, kein offener Entscheidungspunkt.
+* Künftige Mutationspfade für diese Felder **müssen** `Player::mark_dirty(PersistComponent::Progression)` verwenden und damit zugleich die Generation fortschreiben.
+* Bis ein solcher Pfad existiert, wird für diese Felder **keine** Implementierung behauptet.
+
+**Gewichtung und Flush-Priorisierung (getrennte Frage):**
+
+Ob Komponenten unterschiedlich gewichtet werden, ob beim Flush eine Reihenfolge oder Priorisierung gilt und ob eine spätere Komponente einen früheren verdrängen darf, ist **eine andere Frage als die Zuordnung** und wird hier **nicht** entschieden. Die Zuordnung dieses Abschnitts legt **keine** Gewichte, **keine** Flush-Regeln und **keine** Priorisierung fest. Siehe Abschnitt 42.
+
 **EIGENER PERSISTENZPFAD – NICHT IM NORMALEN PLAYER-SNAPSHOT:**
 
 * **Quest State / Quest Progress** – persistent, aber über einen eigenen direkten Quest-Persistenzweg behandelt; NICHT Teil des normalen Player-Snapshot-/Spool-Systems (Abschnitt 8)
@@ -1307,7 +1342,7 @@ Ohne vorhandene Entscheidung werden NICHT festgelegt:
 * genaue technische Erzeugung der `persist_revision` (z.B. pro Charakter vergebene Sequenz) – der Mechanismus selbst ist festgelegt (Abschnitt 29)
 * konkrete Rust-Strukturen der neu hinzugekommenen Snapshot-Komponenten (Abschnitte 23/25)
 * konkrete Writer-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten
-* konkrete Dirty-Bit-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten (Attribute, aktuelle HP, aktuelles Mana, Klasse, Fraktionszustand, Weapon Skills, Abilities)
+* ~~konkrete Dirty-Bit-Aufteilung~~ – **GESCHLOSSEN** in Abschnitt 23 („NORMATIVE DIRTY-KOMPONENTEN-ZUORDNUNG“): Die Zuordnung der Attribute, aktuellen HP, aktuellen Mana, Klasse, des Fraktionszustands, der Weapon Skills und der Abilities ist verbindlich festgelegt. Die dort ausdrücklich offen gelassene **Gewichtung/Flush-Priorisierung** bleibt davon unberührt und weiterhin offen.
 * genaue HP-Max-/Mana-Max-Berechnung (die Werte selbst sind abgeleitet, Abschnitt 23)
 * genaue Armor-Berechnung (der Wert selbst ist abgeleitet, Abschnitt 23)
 * neue Gameplay-Regeln

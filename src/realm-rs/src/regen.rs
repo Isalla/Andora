@@ -140,7 +140,18 @@ pub fn apply_regen(player: &mut Player, tick_ms: u64) {
         player.mana_regen_carry = gain - whole as f64;
         if whole > 0 {
             let new_mana = (player.mana + whole).min(player.max_mana);
+            // Nur bei **wirklicher** Änderung markieren: die Regeneration ist
+            // gedeckelt, `new_mana` kann also durchaus `player.mana` entsprechen.
+            let mana_geaendert = new_mana != player.mana;
             player.mana = new_mana;
+            // §6/§39: Mana-Regeneration ändert persistierbare Ressourcen →
+            // Komponente `Resources` dirty markieren (Stufe B). Ohne diese
+            // Markierung nimmt der periodische Lauf einen mana-regenerierten
+            // Spieler nicht auf; bei einem Abbruch bliebe der regenerierte
+            // Stand ungesichert. `mark_dirty` erhöht zusätzlich die Generation.
+            if mana_geaendert {
+                player.mark_dirty(crate::persist::PersistComponent::Resources);
+            }
             if new_mana == player.max_mana {
                 player.mana_regen_carry = 0.0;
             }
@@ -151,6 +162,7 @@ pub fn apply_regen(player: &mut Player, tick_ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn p(class: &str, level: u32, hp: i32, max_hp: i32, mana: i32, max_mana: i32) -> Player {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -425,6 +437,117 @@ mod tests {
     }
 
     // 13: dezimale Raten ohne vorgezogenes Runden über viele Ticks.
+    /// `P-17`: Mana-Regeneration markiert `Resources` und schreibt die
+    /// Generation fort — ueber den **echten** Regenerationspfad
+    /// (`apply_regen`), nicht ueber ein nachgebautes `mark_dirty`.
+    #[test]
+    fn mana_regen_marks_resources_dirty_and_raises_generation() {
+        let mut pl = p("Adventurer", 5, 50, 100, 10, 100);
+        assert!(!pl.dirty.any(), "Ausgangszustand: sauber");
+        assert_eq!(pl.persist_generation, 0);
+        let mana_vorher = pl.mana;
+
+        tick(&mut pl, 5_000);
+
+        assert!(
+            pl.mana > mana_vorher,
+            "Mana muss regeneriert sein, war {mana_vorher}, jetzt {}",
+            pl.mana
+        );
+        assert!(
+            pl.dirty.is_dirty(crate::persist::PersistComponent::Resources),
+            "Mana-Regeneration muss Resources dirty markieren"
+        );
+        assert!(
+            pl.persist_generation > 0,
+            "mark_dirty muss die Generation fortschreiben"
+        );
+    }
+
+    /// `P-17`: Der regenerierte Mana-Wert erreicht den Snapshot. Der Test
+    /// laeuft ueber den echten Persistenzlauf (`persist_dirty_into`) und
+    /// prueft den Snapshot-Inhalt.
+    #[tokio::test]
+    async fn mana_regen_makes_the_player_reachable_for_the_persist_run() {
+        let shared = crate::world::new_shared();
+        let mut pl = p("Adventurer", 5, 50, 100, 10, 100);
+        let mana_vorher = pl.mana;
+        tick(&mut pl, 5_000);
+        let mana_nachher = pl.mana;
+        assert!(mana_nachher > mana_vorher, "Voraussetzung: Mana regeneriert");
+        {
+            let mut w = shared.lock().await;
+            w.players.insert(pl.id.clone(), pl);
+        }
+
+        let erfasst = Arc::new(Mutex::new(None));
+        let erfasst2 = erfasst.clone();
+        let res = crate::persist::persist_dirty_into(&shared, "t", false, move |snapshot| {
+            let erfasst2 = erfasst2.clone();
+            async move {
+                *erfasst2.lock().unwrap() = Some(snapshot.mana);
+                Ok(())
+            }
+        })
+        .await;
+        assert!(res.is_ok(), "Persistenzlauf muss den Spieler aufnehmen");
+        let gespeichert = erfasst.lock().unwrap().expect("Snapshot muss erfasst sein");
+        assert_eq!(
+            gespeichert, mana_nachher,
+            "Snapshot muss den regenerierten Mana-Wert enthalten"
+        );
+    }
+
+    /// `P-17`: Keine Aenderung -> keine Dirty-Markierung, keine
+    /// Generationserhoehung. Zwei Faelle ueber den echten Pfad `apply_regen`:
+    /// volle Pools (die Regenerationszweige werden gar nicht betreten) und
+    /// ein reiner Carry-Bruchteil ohne volle Einheit (`whole == 0`).
+    #[test]
+    fn unchanged_mana_marks_nothing_dirty() {
+        // Volle HP- und Mana-Pools: `hp < max_hp` und `mana < max_mana` sind
+        // beide nicht erfuellt, es wird nichts veraendert und nichts markiert.
+        let mut pl = p("Adventurer", 5, 100, 100, 100, 100);
+        assert!(!pl.dirty.any());
+        tick(&mut pl, 5_000);
+        assert_eq!(pl.mana, 100, "voller Pool darf nicht veraendert werden");
+        assert_eq!(pl.hp, 100);
+        assert!(!pl.dirty.any(), "unveraenderte Poolwerte markieren nichts");
+        assert_eq!(pl.persist_generation, 0, "keine Generationserhoehung");
+
+        // Carry-Bruchteil: `mana_regen_carry` sammelt, aber `whole == 0`, damit
+        // bleibt `mana` unveraendert und `mark_dirty` wird nicht erreicht.
+        let mut pl2 = p("Adventurer", 5, 100, 100, 10, 100);
+        tick(&mut pl2, 1);
+        assert_eq!(pl2.mana, 10, "ein Bruchteil regeneriert nicht ganzzahlig");
+        assert!(
+            !pl2.dirty.is_dirty(crate::persist::PersistComponent::Resources),
+            "ohne Aenderung keine Resources-Markierung"
+        );
+        assert_eq!(
+            pl2.persist_generation, 0,
+            "ohne Aenderung keine Generationserhoehung"
+        );
+    }
+
+    /// `P-17`: Bei gleichzeitiger HP- UND Mana-Aenderung wird `Resources`
+    /// zweimal markiert. Das ist mit der bestehenden Semantik vereinbar: das
+    /// Bit bleibt gesetzt, die Generation steigt zweimal. Der Test haelt die
+    /// gegenwaertige, nicht optimierte Semantik fest.
+    #[test]
+    fn simultaneous_hp_and_mana_regen_mark_resources_twice() {
+        let mut pl = p("Adventurer", 5, 50, 100, 10, 100);
+        tick(&mut pl, 5_000);
+        assert!(pl.hp > 50 && pl.mana > 10, "beide Pool regeneriert");
+        assert!(pl.dirty.is_dirty(crate::persist::PersistComponent::Resources));
+        // HP-Pfad und Mana-Pfad markieren jeweils ueber `mark_dirty`.
+        assert_eq!(
+            pl.persist_generation, 2,
+            "zwei Markierungen -> Generationsstand 2"
+        );
+        // Das Bit ist unveraendert gesetzt.
+        assert!(pl.dirty.is_dirty(crate::persist::PersistComponent::Resources));
+    }
+
     #[test]
     fn decimal_precision_no_premature_rounding() {
         // Magier Level 1: 3,0 HP/s → 0,3 HP pro 100 ms. Über 7 Ticks müssten

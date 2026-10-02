@@ -140,14 +140,30 @@
 
 ### P-17 – Dirty-Bit-Zuordnung für einzelne Snapshot-Komponenten
 
-- **Status:** `ZU PRÜFEN`
+- **Status:** `ERLEDIGT`
 - **Priorität:** offen (im Auftrag nicht vergeben)
-- **Betroffener Bereich:** Dirty-State / Snapshot-Komponenten (`src/realm-rs/src/persist.rs`, `docs/Player_Persistenz.md` §23/§42)
-- **Bekannte Ausgangslage:** Das Komponenten-Enum kennt nur fünf Varianten; die konkrete Dirty-Bit-Verteilung für Attribute, HP, Mana, Klasse, Fraktion, Waffenskills und Fähigkeiten ist laut Doku bewusst offen.
-- **Offene Frage / Entscheidung:** Welche Komponente welchen Zustand abdeckt und ob die Abdeckung vollständig ist.
-- **Verifizierte Belege:** `src/realm-rs/src/persist.rs:36-51` (`PersistComponent` mit Position, Progression, Idia, Inventory, Resources); `src/realm-rs/src/persist.rs:10-19` (Header: §42 lässt die Gewichtung offen); `docs/Player_Persistenz.md:1105` (§42: bewusst offene Punkte).
-- **Nächster zulässiger Schritt:** Komponenten-Zuordnung in der Doku festlegen; danach Implementierung und Tests prüfen.
-- **Abschlussnachweis:** ausstehend.
+- **Betroffener Bereich:** Dirty-State / Snapshot-Komponenten (`src/realm-rs/src/persist.rs`, `src/realm-rs/src/regen.rs`, `docs/Player_Persistenz.md` §23/§42)
+- **Historischer Befund – Ausgangszustand vor der Festlegung:** Das Komponenten-Enum kannte nur fünf Varianten; die konkrete Dirty-Bit-Verteilung für Attribute, HP, Mana, Klasse, Fraktion, Waffenskills und Fähigkeiten war laut Doku bewusst offen (`docs/Player_Persistenz.md` §42: „konkrete Dirty-Bit-Aufteilung für die neu hinzugekommenen Snapshot-Komponenten“).
+- **Getroffene Entscheidung (verbindlich, `docs/Player_Persistenz.md` §23 „NORMATIVE DIRTY-KOMPONENTEN-ZUORDNUNG“ ist normativ):** Die **fünf bestehenden Komponenten** bleiben; es wird **keine** neue Komponente eingeführt. Festgelegt ist:
+  - `Position` → `x`, `y`
+  - `Progression` → `level`, `exp`, `free_attr_points`, `rested_pool`, `attributes` sowie `char_class`, `faction_transition`, `weapon_skill`, `learned_abilities`
+  - `Idia` → `idia`
+  - `Inventory` → persistenter Inventarbestand **ohne** Sicherheits-Puffer
+  - `Resources` → `hp`, `mana`
+  - Ergänzend festgeschrieben: Eine Dirty-Komponente steuert die **Aufnahme** des Spielers in den Snapshot, **nicht** die Auswahl von Feldern — aufgenommen wird der vollständige vorhandene `PersistSnapshot`. Das initiale Laden ist keine Spielzustandsänderung. Abgeleitete Werte und separat persistierte Systeme bleiben außerhalb. Jede Zustandsänderung eines zugeordneten Feldes markiert über `Player::mark_dirty` (`src/realm-rs/src/world.rs:165`, erhöht zugleich die Generation) und niemals durch reine Bit-Manipulation.
+- **Normativ zugeordnet ohne bestehenden Produktions-Mutationspfad:** Für `char_class`, `faction_transition`, `weapon_skill` und `learned_abilities` ist `Progression` verbindlich festgelegt, obwohl im aktuellen Produktionscode **kein** Mutationspfad gefunden wurde, der diese Felder ändert. Sie werden beim Login aus der Datenbank gesetzt (`src/realm-rs/src/handlers.rs:406-423`) und in den Snapshot übernommen, können derzeit aber nicht verändert werden. Es wird hier **kein** neues Spielsystem und **keine** neue Änderungsroute implementiert; für diese Felder wird **keine** Implementierung behauptet. Künftige Mutationspfade **müssen** `Player::mark_dirty(PersistComponent::Progression)` verwenden.
+- **Gewichtung / Flush-Priorisierung (getrennte, weiterhin offene Frage):** Ob Komponenten unterschiedlich gewichtet werden und ob beim Flush eine Reihenfolge oder Priorisierung gilt, ist eine andere Frage als die Zuordnung und wurde **nicht** entschieden. §42 ist **ausschließlich** hinsichtlich der Komponenten-Zuordnung geschlossen; die Gewichtung bleibt dort offen.
+- **Belegte Implementierungslücke und Korrektur (Mana-Regeneration):** In `apply_regen` (`src/realm-rs/src/regen.rs:100`) markierte der HP-Zweig die Komponente `Resources` (`:131`), der Mana-Zweig änderte `mana` jedoch **ohne** jede Dirty-Markierung. Damit konnte der periodische Persistenzlauf einen mana-regenerierten Spieler **vollständig auslassen**, solange keine andere Änderung ein Dirty-Bit setzte; der regenerierte Stand wäre bei einem Abbruch ungesichert geblieben. Die Korrektur in `:146-155` vergleicht den gedeckelten Zielwert mit dem bisherigen Wert und markiert `Resources` über `mark_dirty` **nur bei tatsächlicher Änderung** — ohne Bit-Manipulation, also mit Generationsfortschreibung. Der HP-Zweig und die übrige Regenerationslogik bleiben unverändert.
+- **Abgeschlossene Garantien (aktuelle Belege):**
+  1. **Mana-Regeneration markiert `Resources` und schreibt die Generation fort:** `p17`-Nachweis `mana_regen_marks_resources_dirty_and_raises_generation` (`src/realm-rs/src/regen.rs:444`) über den echten Pfad `apply_regen`.
+  2. **Der regenerierte Mana-Wert erreicht den Snapshot:** `mana_regen_makes_the_player_reachable_for_the_persist_run` (`:471`) ruft den echten Persistenzlauf `persist_dirty_into` und prüft den Snapshot-Inhalt gegen den regenerierten Wert.
+  3. **Unveränderter Wert erzeugt keine Markierung:** `unchanged_mana_marks_nothing_dirty` (`:506`) belegt beides über `apply_regen`: volle HP-/Mana-Pools (die Regenerationszweige werden nicht betreten) und ein reiner Carry-Bruchteil ohne volle Einheit (`whole == 0`). Beide Fälle: kein Dirty-Bit, keine Generationserhöhung.
+  4. **Gleichzeitige HP-/Mana-Änderung:** `simultaneous_hp_and_mana_regen_mark_resources_twice` (`:537`) hält die bestehende, nicht optimierte Semantik fest — `Resources` bleibt gesetzt, die Generation steigt zweimal. Das entspricht der vorhandenen Markierungslogik und war Anlass für **keine** Umstrukturierung.
+  5. **Komponenten wählen keine Feldteilmenge:** `build_snapshot` (`src/realm-rs/src/persist.rs:153`) prüft ausschließlich `dirty.any()` und kopiert danach alle Snapshot-Felder; belegt durch `snapshot_is_the_full_player_state` und `buffer_only_changes_never_trigger_inventory_persistence`.
+  6. **Bestehende Zuordnungsnachweise anerkannt:** `apply_progression_marks_progression_dirty` (`Progression`), `dirty_flags_mark_only_selected_components_and_raise_generation` (Bit- und Generationsverhalten), `buffer_only_changes_never_trigger_inventory_persistence` (`Inventory`).
+- **Keine pauschale Datenverlustfreiheit behauptet:** Die Korrektur beseitigt die belegte Lücke, mit der ein mana-regenerierter Spieler vom Save ausgelassen werden konnte. Sie trifft **keine** Aussage darüber, dass jede andere Zustandsänderung vollständig abgedeckt ist; für `char_class`, `faction_transition`, `weapon_skill` und `learned_abilities` besteht weiterhin **kein** Produktions-Mutationspfad.
+- **Bestätigter Teststand:** vollständige Suite `585 passed; 0 failed` (Vorabschnitt 581 + 4 neue Tests über den echten Regenerationspfad); `cargo clippy --offline --all-targets` unverändert bei 47 Warnungen (Binär-Target) / 45 (Test-Target) / 58 Diagnostic-Zeilen.
+- **Abschlussnachweis:** Zuordnung normativ in `docs/Player_Persistenz.md` §23 festgelegt, §42 hinsichtlich der Komponenten-Zuordnung geschlossen, Mana-Registerlücke in `src/realm-rs/src/regen.rs` behoben und über vier Tests am echten Pfad verifiziert.
 
 ### P-18 – Persistenz von Cooldowns (Runtime vs. Snapshot)
 
