@@ -866,22 +866,240 @@ async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Laufzähler für die temporäre Basis eines Testkontexts.
+    ///
+    /// `SystemTime::now()` allein garantiert keine Eindeutigkeit: die Uhr hat
+    /// hier nur grobe Auflösung (gemessen 18 ns), sodass bei parallel
+    /// laufenden Threads identische Nanosekunden entstehen können. Zwei
+    /// `test_ctx()`-Aufrufe mit gleichem Namen teilen dann ein
+    /// Basisverzeichnis, und `failed_disconnect_flush_retains_ram_player_and_
+    /// login_adopts_it` ersetzt darin `spool` durch eine Datei — was
+    /// `login_is_fail_closed_while_newer_snapshot_is_pending_in_spool` mit
+    /// `Not a directory (os error 20)` scheitern lässt. Der Zähler erzwingt
+    /// Eindeutigkeit prozessweit, unabhängig von der Uhrenauflösung.
+    static NEXT_TEST_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Namenspraefix jedes temporaeren Teststamms. Der Guard entfernt
+    /// ausschliesslich Pfade, deren letzter Bestandteil damit beginnt.
+    const TEST_DIR_PREFIX: &str = "andora-realm-net-test-";
+
+    /// Allokiert einen neuen temporaeren Teststamm. Eindeutigkeit entsteht
+    /// prozessweit aus dem atomaren `NEXT_TEST_DIR`, unabhaengig von der
+    /// Uhrenauflösung; Prozess-ID und Zeitwert trennen Prozesse voneinander.
+    fn alloc_test_dir_at(stamp: u128) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{}{}-{}-{}",
+            TEST_DIR_PREFIX,
+            std::process::id(),
+            stamp,
+            NEXT_TEST_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ))
+    }
+
+    fn alloc_test_dir() -> PathBuf {
+        alloc_test_dir_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )
+    }
+
+    /// Prueft, ob `path` genau ein eigener temporaerer Teststamm ist.
+    ///
+    /// Bewusst streng: es wird nichts entfernt, wenn der Pfad nicht unterhalb
+    /// von `std::env::temp_dir()` liegt, nicht mit `TEST_DIR_PREFIX` beginnt,
+    /// dem Tempverzeichnis selbst entspricht, leer ist oder keinen konkreten
+    /// letzten Bestandteil besitzt.
+    fn is_removable_test_dir(path: &Path) -> bool {
+        if path.as_os_str().is_empty() {
+            return false;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        if !name.starts_with(TEST_DIR_PREFIX) {
+            return false;
+        }
+        let tmp = std::env::temp_dir();
+        if path == tmp || !path.starts_with(&tmp) {
+            return false;
+        }
+        path.parent().is_some()
+    }
+
+    /// Entfernt genau den uebergebenen Teststamm. Fehlende Pfade gelten als
+    /// bereits bereinigt. Ist der Stamm selbst eine Datei, wird nur diese
+    /// validierte Datei entfernt. Symlinks werden nicht verfolgt.
+    fn cleanup_test_dir(path: &Path) {
+        if !is_removable_test_dir(path) {
+            return;
+        }
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {}
+            // `symlink_metadata` meldet einen Symlink auf ein Verzeichnis als
+            // kein Verzeichnis; er landet damit in `remove_file` und wird
+            // nicht traversiert.
+            Ok(m) if m.is_dir() => {
+                let _ = std::fs::remove_dir_all(path);
+            }
+            Ok(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    /// Privater RAII-Guard: entfernt beim Drop genau seinen eigenen Stamm.
+    /// `Drop` löst nie einen Panic aus und verdeckt keinen Testfehler.
+    struct TestDirGuard {
+        path: PathBuf,
+    }
+
+    impl Drop for TestDirGuard {
+        fn drop(&mut self) {
+            cleanup_test_dir(&self.path);
+        }
+    }
+
+    /// Testkontext mit gemeinsamem Stammpfad-Cleanup. Alle Klone teilen denselben
+    /// Guard, der Pfad besteht damit, solange mindestens ein Besitzer lebt.
+    ///
+    /// `Deref` haelt die bestehende Feld- und Argumentverwendung unveraendert;
+    /// `Ctx` selbst bleibt unberuehrt (Produktionscode in `handlers.rs`).
+    #[derive(Clone)]
+    struct TestCtx {
+        ctx: Arc<Ctx>,
+        _dir: Arc<TestDirGuard>,
+    }
+
+    impl std::ops::Deref for TestCtx {
+        /// Ziel ist bewusst der `Arc`, nicht der `Ctx`: dadurch bleiben sowohl
+        /// der Feldzugriff (`ctx.persist`) als auch Aufrufe, die `&Arc<Ctx>`
+        /// erwarten, unverändert auflösbar.
+        type Target = Arc<Ctx>;
+        fn deref(&self) -> &Arc<Ctx> {
+            &self.ctx
+        }
+    }
+
+    // ---- Cleanup des temporären Teststamms (RAII-Guard) ----
+
+    /// Legt Stamm + Guard an und liefert beides zurück.
+    fn guarded_dir() -> (PathBuf, Arc<TestDirGuard>) {
+        let dir = alloc_test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let guard = Arc::new(TestDirGuard { path: dir.clone() });
+        (dir, guard)
+    }
+
+    /// A. Eindeutigkeit: zwei Allokationen unterscheiden sich — auch bei
+    /// identischem simuliertem Zeitwert, weil der Zähler entscheidet.
+    #[test]
+    fn test_dir_allocation_is_unique_even_with_identical_timestamp() {
+        let a = alloc_test_dir_at(42);
+        let b = alloc_test_dir_at(42);
+        assert_ne!(a, b, "Zähler muss Eindeutigkeit erzwingen");
+        let c = alloc_test_dir();
+        let d = alloc_test_dir();
+        assert_ne!(
+            c, d,
+            "zwei aufeinanderfolgende Allokationen kollidieren nicht"
+        );
+        for p in [&a, &b, &c, &d] {
+            assert!(is_removable_test_dir(p), "{p:?} muss validierbar sein");
+        }
+    }
+
+    /// B. Lebensdauer: nach Drop eines von zwei Besitzern besteht der Pfad
+    /// weiter, nach Drop des letzten ist er entfernt.
+    #[test]
+    fn test_dir_survives_until_last_owner_is_dropped() {
+        let (dir, guard) = guarded_dir();
+        let second = guard.clone();
+        assert!(dir.is_dir());
+        drop(guard);
+        assert!(dir.is_dir(), "Pfad muss nach Drop eines Besitzers bestehen");
+        drop(second);
+        assert!(
+            !dir.exists(),
+            "Pfad muss nach Drop des letzten Besitzers weg sein"
+        );
+    }
+
+    /// C. Panic-Unwinding: ein Panic im Scope entfernt den Stamm trotzdem.
+    #[test]
+    fn test_dir_is_cleaned_up_on_panic_unwind() {
+        let mut observed = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (dir, _guard) = guarded_dir();
+            observed = Some(dir.clone());
+            assert!(dir.is_dir());
+            panic!("absichtliches Panic im Test-Scope");
+        }));
+        assert!(result.is_err(), "Panic muss ausgeloest worden sein");
+        let dir = observed.expect("Pfad muss innerhalb des Scopes bekannt sein");
+        assert!(!dir.exists(), "Stamm muss auch nach Unwind entfernt sein");
+    }
+
+    /// D. Fremdschutz: ein zweiter Stamm, `TMPDIR` und das gemeinsame
+    /// Elternverzeichnis bleiben beim Drop des ersten Guard bestehen.
+    #[test]
+    fn test_dir_cleanup_leaves_foreign_paths_untouched() {
+        let (mine, guard) = guarded_dir();
+        let other = alloc_test_dir();
+        std::fs::create_dir_all(&other).unwrap();
+        let tmp = std::env::temp_dir();
+        drop(guard);
+        assert!(!mine.exists(), "eigener Stamm muss entfernt sein");
+        assert!(other.is_dir(), "fremder Stamm muss bestehen bleiben");
+        assert!(tmp.is_dir(), "TMPDIR muss bestehen bleiben");
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    /// E. Bereits entfernt: ein vorzeitig manuell entfernter Stamm macht den
+    /// Drop panicfrei.
+    #[test]
+    fn test_dir_drop_is_panic_free_when_already_removed() {
+        let (dir, guard) = guarded_dir();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop(guard);
+        }));
+        assert!(res.is_ok(), "Drop darf bei fehlendem Pfad nicht paniken");
+    }
+
+    /// Ergänzend: `cleanup_test_dir` lehnt fremde Ziele strikt ab, statt
+    /// irgendeine Ersatzbereinigung auszuführen.
+    #[test]
+    fn cleanup_rejects_paths_outside_its_own_test_dir() {
+        let tmp = std::env::temp_dir();
+        assert!(!is_removable_test_dir(Path::new("")));
+        assert!(
+            !is_removable_test_dir(&tmp),
+            "TMPDIR selbst ist kein Teststamm"
+        );
+        assert!(!is_removable_test_dir(&tmp.join("fremdes-verzeichnis")));
+        assert!(!is_removable_test_dir(Path::new("/")));
+        assert!(!is_removable_test_dir(Path::new("/tmp")));
+        // Ein Stamm, der als Datei angelegt wurde, wird exakt entfernt.
+        let dir = alloc_test_dir();
+        std::fs::write(&dir, b"kein verzeichnis").unwrap();
+        cleanup_test_dir(&dir);
+        assert!(!dir.exists(), "validierte Datei muss entfernt sein");
+    }
 
     /// Testkontext ohne DB-Verbindung: der Pool wird lazy geöffnet und in
     /// diesen Tests nicht benutzt (getestet werden Lesepfad und Cleanup).
     /// Die Konfiguration wird im Speicher gebaut (kein Datei-I/O, damit der
     /// Test nicht von Mount-/Cache-Sichtbarkeit abhängt).
-    async fn test_ctx() -> Arc<Ctx> {
+    async fn test_ctx() -> TestCtx {
         use std::collections::HashMap;
-        let dir = std::env::temp_dir().join(format!(
-            "andora-realm-net-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = alloc_test_dir();
         std::fs::create_dir_all(&dir).unwrap();
+        let dir_guard = Arc::new(TestDirGuard { path: dir.clone() });
         let env = HashMap::<String, String>::new();
         let cfg = Arc::new(crate::config::Config {
             realm_id: 1,
@@ -927,7 +1145,7 @@ mod tests {
         let persist = std::sync::Arc::new(
             crate::spool::PersistRuntime::new(&dir, &cfg.combat.weapon_skill_id).unwrap(),
         );
-        Arc::new(Ctx {
+        let ctx = Arc::new(Ctx {
             cfg,
             db,
             auth,
@@ -937,7 +1155,11 @@ mod tests {
             groups,
             quest: crate::quest::QuestService::new(),
             persist,
-        })
+        });
+        TestCtx {
+            ctx,
+            _dir: dir_guard,
+        }
     }
 
     // ---- P-27: begrenzter Retry des direkten `logout_at`-Writes ----
