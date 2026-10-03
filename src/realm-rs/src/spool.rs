@@ -50,6 +50,23 @@ pub enum PersistStatus {
     Degraded,
 }
 
+impl PersistStatus {
+    /// `P-23`: Stabile, dokumentierte Statuswerte für die Beobachtung über
+    /// `/status` (`persistence_status`, docs/Player_Persistenz.md §27/§28).
+    ///
+    /// Die Abbildung ist **additiv**: Die Benennung des Enums bleibt
+    /// unverändert (`Recovering`/`Ready`/`Degraded`); nur die Ausgabe verwendet
+    /// die drei festgelegten kleingeschriebenen Werte. Der Wert ist reine
+    /// Beobachtung und steuert **nichts** — weder Spielfreigabe noch Status.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PersistStatus::Recovering => "recovering",
+            PersistStatus::Ready => "ready",
+            PersistStatus::Degraded => "degraded",
+        }
+    }
+}
+
 /// Gemeinsame Batch-Datei **eines Persistenzlaufs** (docs §35, `P-12`).
 ///
 /// Enthält ausschließlich die dirty Player-Snapshots dieses Laufs. Jeder
@@ -3730,6 +3747,147 @@ mod tests {
         assert_eq!(s.count_batches().unwrap(), 0);
         assert_eq!(rt.apply_drain_tick().unwrap(), RecoveryStatusUpdate::Ready);
         assert_eq!(rt.status(), PersistStatus::Ready);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ===== P-23: Monitoring während der Start-Recovery =====
+
+    /// Echter HTTP-GET gegen den laufenden Health-Server. Nur Lesezugriff,
+    /// keine Wartezeit, keine Schleife: der Server beantwortet und schließt die
+    /// Verbindung (`Connection: close`).
+    async fn p23_http_get_json(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut sock = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("Verbindung zum Monitoring");
+        sock.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .expect("Request schreiben");
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.expect("Antwort lesen");
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let (_head, body) = text.split_once("\r\n\r\n").expect("Kopf und Body");
+        serde_json::from_str(body).expect("JSON-Antwort")
+    }
+
+    /// `P-23`: Das bestehende Monitoring ist während der Startup-Recovery
+    /// erreichbar und beobachtet den tatsächlichen Persistenzstatus.
+    ///
+    /// **Produktionspfad:** Das Monitoring wird über dieselbe Startstelle gestartet
+    /// wie im Startpfad (`health::spawn_monitor` → `serve` → `serve_bound` →
+    /// `accept_loop`); der Test nutzt `health::spawn_monitor_on`, das denselben
+    /// `serve_bound`/`accept_loop` auf einem bereits gebundenen Listener
+    /// ausführt. Die Recovery ist die Produktionsschleife `recover_with_limit`
+    /// (identisch zu `recover`), die Statusentscheidung ist die Produktions-
+    /// entscheidung `apply_startup_recovery`.
+    ///
+    /// **Ereignisgesteuert, ohne Sleeps und ohne Datenbank:** Der freie Port
+    /// entsteht durch eine **echte Bindung** auf `127.0.0.1:0` — kein
+    /// Portraten und keine Probe-Bindung mit anschließendem Freigeben. Die
+    /// erfolgreiche Bindung ist zugleich der Bereitschaftsnachweis, weil der
+    /// Kernel Verbindungen bereits annimmt. Das Anhalten der Recovery erfolgt im
+    /// DB-Schritt der vorhandenen `FakeDb::gated`-Barriere (Kanal + `Notify`),
+    /// nicht über eine Wartezeit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p23_monitoring_is_reachable_during_recovery_and_reports_the_real_status() {
+        let base = temp_dir("p23mon");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        // Startstatus der Runtime: RECOVERING (Produktionszustand vor der
+        // Startup-Recovery).
+        let rt = Arc::new(p22_runtime(&s));
+        assert_eq!(rt.status(), PersistStatus::Recovering);
+
+        // Ein Batch, dessen Revision über der DB-Revision liegt ⇒ ein Apply
+        // würde im DB-Schritt stattfinden und die Barriere auslösen.
+        s.write_batch(&snapshot("777", 5, 1.0)).unwrap();
+
+        // Freien Port durch echte Bindung ermitteln.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Listener binden");
+        let addr = listener.local_addr().unwrap();
+
+        // Monitoring starten — vor der Recovery, wie im Startpfad.
+        let health_task = crate::health::spawn_monitor_on(
+            listener,
+            Arc::new(crate::health::test_config()),
+            crate::world::new_shared(),
+            rt.clone(),
+        );
+
+        // Recovery starten; die Barriere hält sie im DB-Schritt an.
+        let (entered_tx, mut entered_rx) = mpsc::unbounded_channel::<()>();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let db = FakeDb::gated(Some(1), Some((entered_tx, release.clone())));
+        let recovery = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.recover_with_limit(&db, 10).await })
+        };
+
+        // Ereignisgesteuert warten, bis die Recovery im DB-Schritt steht.
+        tokio::time::timeout(Duration::from_secs(10), entered_rx.recv())
+            .await
+            .expect("Recovery erreicht den DB-Schritt nicht")
+            .expect("Kanal geschlossen");
+        assert_eq!(
+            rt.status(),
+            PersistStatus::Recovering,
+            "während der Recovery ist der Status RECOVERING"
+        );
+
+        // Echter HTTP-Request **während** die Recovery läuft.
+        let body = p23_http_get_json(addr, "/status").await;
+        assert!(
+            !recovery.is_finished(),
+            "die Recovery läuft noch — Monitoring hat also währenddessen geantwortet"
+        );
+        assert_eq!(
+            body["persistence_status"], "recovering",
+            "RECOVERING muss über /status beobachtbar sein"
+        );
+        assert_eq!(
+            rt.status(),
+            PersistStatus::Recovering,
+            "der Health-Request mutiert keinen Zustand"
+        );
+        // Bestehende Felder bleiben erhalten.
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["server_up"], true);
+        assert_eq!(body["players"], 0);
+
+        // Recovery freigeben und abwarten.
+        release.notify_one();
+        let joined = tokio::time::timeout(Duration::from_secs(10), recovery)
+            .await
+            .expect("Recovery terminiert nicht")
+            .expect("kein Panic");
+        let outcome = joined.expect("Recovery ohne Fehler");
+        assert_eq!(outcome.report.batches_processed, 1);
+        assert_eq!(outcome.batches_remaining, 0);
+
+        // Produktions-Statusentscheidung des Startpfads anwenden.
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::Ready
+        );
+
+        // Korrekter Folgestatus über HTTP beobachten.
+        let body = p23_http_get_json(addr, "/status").await;
+        assert_eq!(body["persistence_status"], "ready");
+
+        // Monitoring ist keine Spielfreigabe: /health bleibt Liveness, und
+        // /players bleibt unberührt.
+        let live = p23_http_get_json(addr, "/health").await;
+        assert_eq!(live["ok"], true);
+        assert!(live.get("persistence_status").is_none());
+
+        // Tasks und Listener zuverlässig beenden.
+        health_task.abort();
+        let _ = health_task.await;
         std::fs::remove_dir_all(&base).unwrap();
     }
 

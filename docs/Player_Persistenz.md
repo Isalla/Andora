@@ -767,7 +767,7 @@ Keine Monitoring-Implementierung in der Stufe B. Dokumentiert werden hier die An
 
 Der bestehende Webserver soll später mindestens darstellen können:
 
-* Persistence-Status, z.B. **HEALTHY / DEGRADED / RECOVERING**
+* Persistence-Status. `P-23` führt dafür das **additive** Feld `persistence_status` in der **bestehenden** `/status`-Antwort ein. Die drei festgelegten Werte sind **`recovering`**, **`ready`** und **`degraded`** (Abschnitt 28). Sie entsprechen unverändert den Zuständen des Persistenz-Status `Recovering`/`Ready`/`Degraded`; der Status-Enum wird dadurch **nicht** umbenannt. `/health` bleibt **Liveness** (der Prozess antwortet) und ist **keine** Readiness- und **keine** Spielfreigabe.
 * letzter erfolgreicher DB-Persistenzzeitpunkt
 * Zeitpunkt/Beginn eines anhaltenden Fehlers
 * Anzahl ausstehender Spool-Snapshots
@@ -836,6 +836,8 @@ Die Snapshots werden in Reihenfolge verarbeitet, **ältester zuerst** (Batch-Sor
 Erst wenn alle normal verarbeitbaren Spool-Snapshots erledigt oder ordnungsgemäß aus der aktiven Recovery in Quarantäne überführt wurden, darf der Realm **READY** werden.
 
 Monitoring/Administration soll während **RECOVERING** weiterhin verfügbar sein.
+
+`P-23` (umgesetzt): Der Health-Server startet nach Erstellung seiner Abhängigkeiten (Config, Shared, Persistenz-Runtime) und **vor Beginn der Recovery**, damit Monitoring und Administration während **RECOVERING** erreichbar sind. Während der Recovery ist der Zustand über das Feld `persistence_status` in `/status` mit dem Wert `recovering` beobachtbar; danach tritt an seine Stelle `ready` oder `degraded` (Abschnitt 27). Die Monitoring-Erreichbarkeit ist **keine** Spielfreigabe: der WebSocket-Spielserver startet weiterhin erst nach der Recovery, Logins bleiben in **RECOVERING** blockiert, und ein Monitoring-Request verändert keinen Zustand.
 
 ---
 

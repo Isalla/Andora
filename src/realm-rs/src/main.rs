@@ -118,6 +118,21 @@ async fn async_main() -> Result<(), String> {
         std::path::Path::new(&cfg.persist.persistence_dir),
         &cfg.combat.weapon_skill_id,
     )?);
+
+    // `P-23`: Monitoring **vor** der Recovery starten. Der Health-Server
+    // benötigt ausschließlich Config, Shared und PersistRuntime — beides ist
+    // hier vollständig vorhanden — und ist rein lesend. Damit sind Monitoring
+    // und Administration während RECOVERING erreichbar und der Zustand ist
+    // über `/status` (`persistence_status` = `recovering`) beobachtbar
+    // (docs/Player_Persistenz.md §27/§28).
+    //
+    // Das ist **keine** Spielfreigabe: `net::serve` startet weiterhin erst
+    // nach der Recovery, und Logins bleiben in `Recovering` blockiert
+    // (handlers.rs). Handle, Fehlerbehandlung und das Shutdown-`abort()`
+    // bleiben unverändert; Ports, Bind-Adressen und Auth werden nicht
+    // verändert.
+    let health_task = health::spawn_monitor(cfg.clone(), shared.clone(), persist.clone());
+
     // Startup-Recovery (§34) NACH den Migrationen und VOR `net::serve`:
     // im Spool liegende Batches (Crash/Wartung) werden auf die DB angewendet.
     // Ein DB-Fehler bricht den Start NICHT ab — der Realm startet dann im
@@ -162,16 +177,6 @@ async fn async_main() -> Result<(), String> {
         }
     }
 
-    let health_task = {
-        let (cfg, shared) = (cfg.clone(), shared.clone());
-        // P-30: die bestehende Runtime weiterreichen (keine neue im Health-Pfad).
-        let health_persist = persist.clone();
-        tokio::spawn(async move {
-            if let Err(e) = health::serve(cfg, shared, health_persist).await {
-                log::error!("health: {e}");
-            }
-        })
-    };
     let ws_task = {
         let (cfg, shared, parental, groups, persist) = (
             cfg.clone(),
