@@ -256,8 +256,7 @@ pub async fn handle_hello(
     // Rested-Zeit aus dem echten Logout-Zeitpunkt der beendeten Sitzung und
     // setzt die Spalte danach selbst zurück — ein verspäteter Logout-Write der
     // alten Sitzung kann die aktive Sitzung nicht mehr markieren.
-    let gate = ctx.persist.player_gate(&char_id).await;
-    let _logout_gate = gate.lock_owned().await;
+    let _logout_gate = ctx.persist.player_gate(&char_id).await.lock_owned().await;
 
     // AUTH-03 (Takeover): Die neue Verbindung darf erst übernehmen, wenn
     // ALLE falliblen Vorprüfungen erfolgreich waren. Der Ownership-Nachweis
@@ -2068,16 +2067,14 @@ mod tests {
         let s = std::sync::Arc::new(crate::spool::PersistRuntime::new(&dir, "ws").unwrap());
         let snap = p30_snapshot("42", 18);
         s.spool().write_batch(&snap).unwrap();
-        let gate = s.player_gate("42").await;
-        let guard = gate.lock_owned().await;
+        let guard = s.player_gate("42").await.lock_owned().await;
         // Unter dem Gate: der wartende Batch ist sichtbar ⇒ fail-closed.
         assert_eq!(s.pending_revision("42"), Ok(Some(18)));
         assert!(crate::world::db_row_is_stale(17, s.pending_revision("42")));
         // Ein zweiter Versuch am selben Gate wartet (nicht reentrant).
         let s2 = s.clone();
         let waiter = tokio::spawn(async move {
-            let g = s2.player_gate("42").await;
-            let _held = g.lock().await;
+            let _held = s2.player_gate("42").await.lock_owned().await;
             "durch"
         });
         // Deterministisch: der Wartende kann erst nach dem Freigeben laufen.
@@ -2105,10 +2102,10 @@ mod tests {
         let a = s.player_gate("8").await;
         let b = s.player_gate("9").await;
         assert!(
-            !Arc::ptr_eq(&a, &b),
+            !a.same_gate(&b),
             "verschiedene Charaktere, verschiedene Gates"
         );
-        let _held = a.lock().await;
+        let _held = a.lock_owned().await;
         assert_eq!(
             s.evaluate_character_availability("8", 1),
             A::SaveRecoveryPending

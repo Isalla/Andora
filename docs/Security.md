@@ -258,15 +258,27 @@
 
 ### P-29 – Cleanup der `in_flight`-Gates
 
-- **Status:** `ZU PRÜFEN`
+- **Status:** `ERLEDIGT`
 - **Priorität:** offen (im Auftrag nicht vergeben)
-- **Betroffener Bereich:** Nebenläufigkeit / Persistenz (`src/realm-rs/src/spool.rs`, `src/realm-rs/src/persist.rs`)
-- **Bekannte Ausgangslage:** Pro Spieler wird ein Serialisierungs-Gate in einer Map angelegt; eine Entfernung der Einträge ist nicht nachgewiesen.
-- **Offene Frage / Entscheidung:** Wann Gates entfernt werden (Erfolg/Fehler) und ob ein Leck über die Prozesslaufzeit besteht.
-- **Verifizierte Belege:** `src/realm-rs/src/spool.rs:74` (`in_flight`-Map); `src/realm-rs/src/persist.rs:256-257` (Gate-Erwerb in `persist_player`) und `src/realm-rs/src/spool.rs:95-102` (Anlage per `or_insert_with` in `player_gate`); keine Entfernung im Repository nachweisbar.
-- **Nächster zulässiger Schritt:** Codepfade (Erfolg/Fehler von `persist_player`) nachverfolgen; danach Tests für das Cleanup ergänzen oder beauftragen.
-- **Abschlussnachweis:** ausstehend.
-
+- **Betroffener Bereich:** Nebenläufigkeit / Persistenz (`src/realm-rs/src/spool.rs`, `src/realm-rs/src/persist.rs`, `src/realm-rs/src/handlers.rs`, `src/realm-rs/src/net.rs`)
+- **Historischer Befund – Ausgangszustand vor dieser Umsetzung:** Pro Spieler wurde ein Serialisierungs-Gate in einer `HashMap` angelegt (`or_insert_with` in `player_gate`); eine **Entfernung** der Einträge war im Repository nicht nachweisbar — die einzigen Zugriffe auf `in_flight` waren der Konstruktor und der `entry`-Zugriff. Jede `player_id`, die einmal persistiert wurde (periodischer Flush, HELLO, Logout, Drain), belegte damit dauerhaft einen Map-Eintrag. Das Wachstum über die Prozesslaufzeit war damit belegt.
+- **Verbindliche Invariante:** Solange für eine `player_id` ein Gate gehalten wird, ein Aufrufer darauf wartet oder ein bereits ausgegebener Handle es noch erwerben kann, darf **kein** unabhängiges zweites Gate für dieselbe `player_id` entstehen.
+- **Gewählte Lösung:** Die Map hält je `player_id` einen `GateEntry` (`src/realm-rs/src/spool.rs:115`) aus dem Gate-`Arc` und einem **Halter-Zähler** (`AtomicUsize`). Der Zähler wird ausschließlich in `Spool::player_gate` (`:267`) erhöht und im `Drop` der Lease (`:216`) verringert — **nicht** über `Arc::strong_count`. Beide Schritte laufen unter derselben Map-Sperre, und die Freigabe prüft zusätzlich per `Arc::ptr_eq`, dass die Map noch genau dieses Gate hält. `player_gate` liefert deshalb ein `PlayerGate` mit RAII-Lebensdauer (`:147`); der Sperr-Guard `PlayerGateGuard` (`:211`) **trägt die Lease mit**, sodass ein temporäres Handle (`player_gate(..).lock_owned()`) den Eintrag erst beim Guard-Drop freigibt.
+- **Warum kein `Arc::strong_count`:** Die Referenzzahl des Gate-`Arc` wird auch von der Map selbst gehalten und ist damit kein Halternachweis. Ein Cleanup danach würde einen bereits ausgegebenen, noch nicht gelockten Handle übersehen und könnte ein zweites Gate anlegen, während die Sperre noch gehalten wird — genau die Spaltung, die P-30 verhindert. Belegt durch `p29_unlocked_handle_prevents_gate_split`.
+- **Synchronisierung:** Die Map wurde von `tokio::sync::Mutex` auf `std::sync::Mutex` umgestellt, damit der `Drop` synchron arbeiten kann. `lock_in_flight` (`:134`) übernimmt einen vergifteten Mutex über `unwrap_or_else(|e| e.into_inner())`, damit ein vorangegangener Panic im `Drop` **keinen** zweiten Panic auslöst. Es entsteht kein `await` innerhalb der Map-Sperre. Hintergrundaufgabe und zusätzliche Abhängigkeiten wurden nicht eingeführt.
+- **Erhaltene Garantien:** Die Reihenfolge **Gate → World** ist an allen fünf Produktionsaufrufern unverändert (`spool.rs:896` und `:1155` im Drain, `persist.rs:319` im Flush, `handlers.rs:259` im HELLO, `net.rs:635` im Logout). Alle Aufrufer verwenden nun `player_gate(..).await.lock_owned().await`, wodurch die Lease die gesamte Sperrzeit gehalten wird. Serialisierung, Reverify, Login-Gating, Logout und Drain sind funktional unverändert.
+- **Abgeschlossene Garantien (aktuelle Belege):**
+  1. **Zwei Aufrufer derselben `player_id` benutzen dasselbe Gate:** `p29_two_callers_of_same_player_share_one_gate` (`spool.rs:3663`).
+  2. **Wartender Aufrufer überlebt das Cleanup des Besitzers:** `p29_waiting_holder_survives_owner_cleanup` (`:3681`) — nach dem Drop des Besitzers bleibt der Map-Eintrag bestehen, der Wartende erhält dasselbe Gate.
+  3. **Ausgegebener, nicht gelockter Handle verhindert Gate-Spaltung:** `p29_unlocked_handle_prevents_gate_split` (`:3715`).
+  4. **Entfernung nach dem letzten Nutzer und Wiederverwendung:** `p29_entry_removed_after_last_user_and_reusable_afterwards` (`:3736`).
+  5. **Tatsächliche Map-Bereinigung bei vielen Spielern:** `p29_many_finished_players_do_not_grow_the_map` (`:3768`) — 64 abgeschlossene Zugriffe verschiedener `player_id` hinterlassen **0** Einträge (`in_flight_len`, `:284`).
+  6. **Fehler- und Panic-Unwinding ohne Rest:** `p29_error_and_panic_paths_leave_no_unused_gate` (`:3787`) — sowohl der Fehlerpfad (`Err` per `?`) als auch ein Panic mit `catch_unwind` räumen den Eintrag ab.
+  7. **Unabhängigkeit verschiedener Spieler:** `p29_different_players_stay_independent` (`:3819`).
+  8. **Bestehende P-30-Nachweise unverändert:** `player_gate_is_per_character_and_shared` und `player_gate_is_not_reentrant` wurden auf die Lease-API umgestellt und bestehen weiter; `drain_double_apply_is_prevented_by_reverify` nutzt `try_lock_owned` und belegt weiterhin, dass während des DB-Schritts genau ein Aufrufer das Gate hält.
+- **Bestätigter Teststand:** vollständige Suite `592 passed; 0 failed` (Vorabschnitt 585 + 7 neue P-29-Tests); `cargo clippy --offline --all-targets` unverändert bei 47 Warnungen (Binär-Target) / 45 (Test-Target) / 58 Diagnostic-Zeilen.
+- **Nicht Gegenstand dieser Änderung:** Die verbleibenden `ZU PRÜFEN`-Punkte (`P-18`, `P-22`, `P-23`, `P-26`, `P-28`) und der Eintrag `P-33` wurden nicht berührt. Recovery-Limits, Gameplay- und Protokollverhalten sind unverändert.
+- **Abschlussnachweis:** erbracht; die Lösung ist RAII-basiert, paniksicher und ohne Nebenläufigkeit oder zusätzliche Abhängigkeit.
 ### P-30 – Charakterbezogene Quarantäne-Sperre beim Charakterbeitritt
 
 - **Status:** `ERLEDIGT`

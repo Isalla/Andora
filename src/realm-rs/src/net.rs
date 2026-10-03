@@ -632,8 +632,7 @@ async fn finish_owner(
 ) -> bool {
     // Gate zuerst: verhindert, dass ein Login-/Takeover für dieselbe player_id
     // zwischen Eigentümerprüfung und `logout_at`-Write abschließt.
-    let gate = ctx.persist.player_gate(player_id).await;
-    let _logout_gate = gate.lock_owned().await;
+    let _logout_gate = ctx.persist.player_gate(player_id).await.lock_owned().await;
     // (1) vor dem Flush — finaler Disconnect-Save nur als Eigentümer
     // (vollständiger Durable-Spool-Batch via zentralem Pfad; der
     // Inventar-Sicherheits-Puffer ist temporär und wird nie persistiert).

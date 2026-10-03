@@ -92,10 +92,147 @@ pub struct DrainReport {
 /// konkurrierende Snapshots derselben Revisions-Baseline und serialisiert
 /// zusätzlich den Eigentümer-/Logout-Übergang pro `player_id` — siehe
 /// `player_gate`).
+///
+/// `P-29`: Die Map hält **nicht** mehr nur das Gate, sondern einen
+/// `GateEntry` mit einem Halter-Zähler. Sobald der letzte Halter eines Gates
+/// seinen `PlayerGate` bzw. `PlayerGateGuard` droppt, wird der Map-Eintrag
+/// entfernt — die Map wächst also nicht mehr über die Prozesslaufzeit.
 #[derive(Clone)]
 pub struct Spool {
     pub base_dir: PathBuf,
-    in_flight: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    in_flight: Arc<std::sync::Mutex<HashMap<String, Arc<GateEntry>>>>,
+}
+
+/// Ein Spieler-Gate mit Halter-Zähler.
+///
+/// `holders` zählt **zugegebene `PlayerGate`- und `PlayerGateGuard`-Werte**,
+/// nicht `Arc`-Referenzen. Das ist der entscheidende Unterschied zu einem
+/// Cleanup über `Arc::strong_count`: der Zähler wird ausschließlich von
+/// `Spool::player_gate` (Erwerb) und vom `Drop` der Lease (Freigabe)
+/// verändert, und beide Erhöhungen sowie die Entfernung passieren unter
+/// derselben `in_flight`-Sperre. Ein bereits ausgegebener, noch nicht
+/// gelockter Handle hält den Zähler daher zu Recht auf mindestens 1.
+struct GateEntry {
+    gate: Arc<tokio::sync::Mutex<()>>,
+    holders: std::sync::atomic::AtomicUsize,
+}
+
+impl GateEntry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+            holders: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+}
+
+/// Sperrt `in_flight` **ohne** bei Poisoning zu panicken.
+///
+/// `Drop` der Lease darf nach einem Panic niemals einen zweiten Panic
+/// auslösen (das würde den Prozess beenden). Ein vergifteter Mutex wird daher
+/// übernommen statt behandelt.
+fn lock_in_flight(
+    map: &std::sync::Mutex<HashMap<String, Arc<GateEntry>>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, Arc<GateEntry>>> {
+    map.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Zugriffsschutz auf das Gate einer `player_id` (`P-29`).
+///
+/// Erwerb und Freigabe eines Gates sind an **dasselbe** Gate gebunden:
+/// Beide Operationen laufen unter der `in_flight`-Sperre, und die Freigabe
+/// prüft zusätzlich per `Arc::ptr_eq`, dass die Map wirklich noch dieses
+/// Gate hält. Damit kann für dieselbe `player_id` **kein** zweites
+/// unabhängiges Gate entstehen, solange ein Handle oder Guard existiert.
+pub struct PlayerGate {
+    map: Arc<std::sync::Mutex<HashMap<String, Arc<GateEntry>>>>,
+    player_id: String,
+    entry: Arc<GateEntry>,
+}
+
+impl PlayerGate {
+    /// Sperre auf **eigenem** Arc; der Guard trägt die Lease weiter.
+    ///
+    /// Das ist der von Produktionspfaden zu verwendende Aufruf: Er hält den
+    /// Halter-Zähler über die gesamte Sperrzeit auf mindestens 1, sodass der
+    /// Map-Eintrag unter keinen Umständen entfernt wird, während die Sperre
+    /// gehalten wird.
+    pub async fn lock_owned(self) -> PlayerGateGuard {
+        let guard = self.entry.gate.clone().lock_owned().await;
+        PlayerGateGuard {
+            _guard: guard,
+            _lease: self,
+        }
+    }
+
+    /// Identität des zugrunde liegenden Gates.
+    ///
+    /// Nur für Tests: `Arc::ptr_eq` über `PlayerGate` ist nicht möglich, weil
+    /// die Lease nicht denselben Typ wie der Map-Wert trägt.
+    #[cfg(test)]
+    pub(crate) fn same_gate(&self, other: &PlayerGate) -> bool {
+        Arc::ptr_eq(&self.entry, &other.entry)
+    }
+
+    /// Identität gegen einen **gehaltenen** Guard.
+    ///
+    /// Nur für Tests: der Guard hält die Lease, nicht das Gate, deshalb ist
+    /// ein Vergleich über `PlayerGate` nicht moeglich.
+    #[cfg(test)]
+    pub(crate) fn same_gate_during(&self, guard: &PlayerGateGuard) -> bool {
+        Arc::ptr_eq(&self.entry, &guard._lease.entry)
+    }
+
+    /// Nicht blockierender Erwerb; `None`, wenn das Gate gerade gehalten wird.
+    ///
+    /// Nur für Tests (P-30-Doppel-Apply-Nachweis). Die Lease wird bei `None`
+    /// mit dem `PlayerGate` verworfen und gibt ihren Zähler frei — der
+    /// Map-Eintrag bleibt bestehen, solange ein echter Halter existiert.
+    #[cfg(test)]
+    pub(crate) async fn try_lock_owned(self) -> Option<PlayerGateGuard> {
+        match self.entry.gate.clone().try_lock_owned() {
+            Ok(guard) => Some(PlayerGateGuard {
+                _guard: guard,
+                _lease: self,
+            }),
+            Err(_) => None,
+        }
+    }
+}
+
+/// Hält Sperre **und** Lease.
+///
+/// Die Lease wird bewusst mitgeführt: Bei
+/// `player_gate(..).lock_owned()` existiert das `PlayerGate` nur als
+/// temporäres Handle. Würde die Map den Eintrag schon beim Rückkehr aus
+/// `player_gate` entfernen, könnte ein zweiter Aufrufer ein zweites Gate
+/// anlegen, während die Sperre noch gehalten wird — genau die Spaltung, die
+/// P-30 verhindert.
+pub struct PlayerGateGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _lease: PlayerGate,
+}
+
+impl Drop for PlayerGate {
+    fn drop(&mut self) {
+        let mut map = lock_in_flight(&self.map);
+        let Some(entry) = map.get(&self.player_id) else {
+            return; // bereits entfernt: nichts zu tun
+        };
+        // Nur freigeben, wenn die Map wirklich noch **dieses** Gate hält.
+        if !Arc::ptr_eq(entry, &self.entry) {
+            return;
+        }
+        let previous = entry.holders.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        if previous <= 1 {
+            // Letzter Halter: Eintrag jetzt entfernen. Der Zähler- und
+            // Entfernungsschritt liegen beide unter der Map-Sperre, daher
+            // kann sich kein neuer Halter dazwischen einfinden.
+            if entry.holders.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                map.remove(&self.player_id);
+            }
+        }
+    }
 }
 
 impl Spool {
@@ -114,13 +251,38 @@ impl Spool {
     /// Das Gate ist pro `player_id`; verschiedene Spieler blockieren sich
     /// nicht. Aufrufer MÜSSEN es vor jeder World-Sperre holen (Reihenfolge
     /// Gate → World → Elternkontrolle/Gruppen), niemals umgekehrt.
-    pub async fn player_gate(&self, player_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.in_flight
-            .lock()
-            .await
+    ///
+    /// `P-29`: Der Rückgabewert ist ein `PlayerGate` mit RAII-Lebensdauer. Der
+    /// Halter-Zähler wird **hier** unter der `in_flight`-Sperre erhöht; fällt
+    /// der Aufrufer frühzeitig weg oder tritt ein Panic auf, wird der Eintrag
+    /// beim `Drop` der Lease wieder entfernt. Für den gehaltenen Sperr-Guard
+    /// ist `PlayerGate::lock_owned` zu verwenden — es erhält die Lease und
+    /// verhindert damit eine Gate-Spaltung.
+    ///
+    /// Die Signatur bleibt bewusst `async`, obwohl der Zugriff synchron ist:
+    /// die `in_flight`-Map enthält nur kurze Kopieroperationen, und die
+    /// Aufruferkette (Login-Gating, Logout, periodischer Flush, Drain) bleibt
+    /// dadurch unverändert. Es entsteht **kein** `await` innerhalb der
+    /// Map-Sperre.
+    pub async fn player_gate(&self, player_id: &str) -> PlayerGate {
+        let mut map = lock_in_flight(&self.in_flight);
+        let entry = map
             .entry(player_id.to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+            .or_insert_with(GateEntry::new)
+            .clone();
+        entry.holders.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        PlayerGate {
+            map: self.in_flight.clone(),
+            player_id: player_id.to_string(),
+            entry,
+        }
+    }
+
+    /// `P-29`: Anzahl der aktuell registrierten Gate-Einträge. Für Tests und
+    /// die Beobachtung des Wachstums; die Produktion loggt diesen Wert nicht.
+    #[cfg(test)]
+    pub(crate) fn in_flight_len(&self) -> usize {
+        lock_in_flight(&self.in_flight).len()
     }
 }
 
@@ -136,7 +298,7 @@ impl PersistRuntime {
     pub fn new(base_dir: &Path, weapon_skill_id: &str) -> Result<Self, String> {
         let spool = Spool {
             base_dir: base_dir.to_path_buf(),
-            in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
         };
         spool.ensure_dirs()?;
         Ok(Self {
@@ -153,7 +315,7 @@ impl PersistRuntime {
     /// Per-player-Serialisierung (Gate → World, nie umgekehrt): durable
     /// Schreibvorgänge und Eigentümer-/Logout-Übergänge derselben
     /// `player_id`. Siehe `Spool::player_gate`.
-    pub async fn player_gate(&self, player_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub async fn player_gate(&self, player_id: &str) -> PlayerGate {
         self.spool.player_gate(player_id).await
     }
 
@@ -730,7 +892,7 @@ impl Spool {
             (None, Some(c)) => Some(c),
             (None, None) => None,
         };
-        let _gate_guard: Option<tokio::sync::OwnedMutexGuard<()>> = match &gate_player {
+        let _gate_guard: Option<PlayerGateGuard> = match &gate_player {
             Some(pid) => Some(self.player_gate(pid).await.lock_owned().await),
             None => None,
         };
@@ -1630,6 +1792,7 @@ fn prune_older_than(dir: &Path, now_secs: u64) -> PruneFailures {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::FutureExt;
     use crate::inventory::InventoryState;
     use std::collections::{BTreeMap, HashSet};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1676,7 +1839,7 @@ mod tests {
     fn spool(base: &Path) -> Spool {
         Spool {
             base_dir: base.to_path_buf(),
-            in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2848,29 +3011,42 @@ mod tests {
         let a1 = s.player_gate("42").await;
         let a2 = s.player_gate("42").await;
         let b = s.player_gate("43").await;
-        assert!(Arc::ptr_eq(&a1, &a2), "gleiche player_id => gleiches Gate");
-        assert!(!Arc::ptr_eq(&a1, &b), "andere player_id => eigenes Gate");
+        // `P-29`: Die Identitätsprüfung erfolgt über `same_gate`, weil der
+        // Rückgabewert jetzt eine Lease mit eigenem Zähler ist und damit
+        // nicht mehr der Map-`Arc` selbst ist.
+        assert!(a1.same_gate(&a2), "gleiche player_id => gleiches Gate");
+        assert!(!a1.same_gate(&b), "andere player_id => eigenes Gate");
+        drop(a1);
+        drop(a2);
+        drop(b);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// Ein nicht reentrantes Gate: der zweite Erwerb desselben Gates wartet,
     /// bis der erste Guard freigegeben ist. Nachweis ohne Sleep über eine
     /// kontrollierte Reihenfolge.
+    ///
+    /// `P-29`: Jeder Aufrufer holt seine **eigene** Lease — ein `clone` des
+    /// Handles existiert bewusst nicht, weil nur `Spool::player_gate` den
+    /// Halter-Zähler erhöhen darf.
     #[tokio::test]
     async fn player_gate_is_not_reentrant() {
         let base = temp_dir("p30d2");
         let s = spool(&base);
         s.ensure_dirs().unwrap();
-        let gate = s.player_gate("42").await;
-        let first = gate.clone();
-        let held = tokio::spawn(async move {
-            let _g = first.lock().await;
-            tokio::task::yield_now().await;
+        let held = tokio::spawn({
+            let s = s.clone();
+            async move {
+                let _g = s.player_gate("42").await.lock_owned().await;
+                tokio::task::yield_now().await;
+            }
         });
-        let second = gate.clone();
-        let waiter = tokio::spawn(async move {
-            let _g = second.lock().await;
-            "durch"
+        let waiter = tokio::spawn({
+            let s = s.clone();
+            async move {
+                let _g = s.player_gate("42").await.lock_owned().await;
+                "durch"
+            }
         });
         held.await.unwrap();
         assert_eq!(waiter.await.unwrap(), "durch");
@@ -3404,9 +3580,7 @@ mod tests {
             Some(5),
             Some((entered_tx, release.clone())),
         ));
-        let gate = s.player_gate("42").await;
-
-        let held = gate.clone().lock_owned().await;
+        let held = s.player_gate("42").await.lock_owned().await;
         let s1 = s.clone();
         let d1 = db.clone();
         let first = tokio::spawn(async move { s1.drain_one_with(&*d1, "1").await });
@@ -3433,7 +3607,10 @@ mod tests {
 
         // Schritt 3: waehrend der erste im DB-Schritt steht, ist das Gate
         // gehalten und der zweite kommt nicht in die DB.
-        assert!(gate.try_lock().is_err(), "Gate muss über den DB-Schritt gehalten sein");
+        assert!(
+            s.player_gate("42").await.try_lock_owned().await.is_none(),
+            "Gate muss über den DB-Schritt gehalten sein"
+        );
         assert!(
             tokio::time::timeout(Duration::from_millis(200), entered_rx.recv())
                 .await
@@ -3474,6 +3651,181 @@ mod tests {
         assert_eq!(db.applied(), vec![("42".to_string(), 18)]);
         assert!(list_json_files(&s.spool_dir()).unwrap().is_empty());
         assert_no_side_artifacts(&s);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- P-29: Lebensdauer der in_flight-Gates ----
+
+    /// `P-29`: Zwei Aufrufer derselben `player_id` benutzen **dasselbe** Gate.
+    /// Die Identitätsprüfung läuft über `same_gate` (der Map-`Arc` ist hinter
+    /// der Lease verborgen).
+    #[tokio::test]
+    async fn p29_two_callers_of_same_player_share_one_gate() {
+        let base = temp_dir("p29same");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = s.player_gate("42").await;
+        let b = s.player_gate("42").await;
+        assert!(a.same_gate(&b), "gleiche player_id => ein Gate");
+        assert_eq!(s.in_flight_len(), 1, "genau ein Map-Eintrag");
+        drop(a);
+        drop(b);
+        assert_eq!(s.in_flight_len(), 0, "nach Freigabe entfernt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Ein **wartender** Aufrufer (seine Lease existiert bereits, der
+    /// Guard noch nicht) überlebt das Cleanup des bisherigen Besitzers sicher.
+    /// Der Map-Eintrag darf nicht verschwinden, solange der Wartende zählt.
+    #[tokio::test]
+    async fn p29_waiting_holder_survives_owner_cleanup() {
+        let base = temp_dir("p29wait");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+
+        // Besitzer hält das Gate; der Wartende holt schon seine Lease.
+        let held = s.player_gate("42").await.lock_owned().await;
+        let waiter_lease = s.player_gate("42").await;
+        assert_eq!(s.in_flight_len(), 1);
+
+        // Der Besitzer gibt frei. Der Wartende muss **dasselbe** Gate sehen,
+        // also darf der Map-Eintrag nicht entfernt worden sein.
+        drop(held);
+        assert_eq!(
+            s.in_flight_len(),
+            1,
+            "wartende Lease haelt den Map-Eintrag am Leben"
+        );
+
+        // Der Wartende erhaelt nun das Gate und kann es sperren.
+        let acquired = waiter_lease.lock_owned().await;
+        // Ein frischer Zugriff landet ebenfalls auf diesem Gate.
+        let later = s.player_gate("42").await;
+        assert!(later.same_gate_during(&acquired), "kein zweites Gate entstanden");
+        drop(later);
+        drop(acquired);
+        assert_eq!(s.in_flight_len(), 0, "nach letztem Halter entfernt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Ein **ausgegebener, aber nicht gelockter** Handle verhindert
+    /// die Gate-Spaltung. Genau der Fall, an dem ein Cleanup über
+    /// `Arc::strong_count` scheitern würde.
+    #[tokio::test]
+    async fn p29_unlocked_handle_prevents_gate_split() {
+        let base = temp_dir("p29split");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        // Handle ausgeben, aber nicht sperren: der Zaehler steht auf 1.
+        let handle = s.player_gate("42").await;
+        assert_eq!(s.in_flight_len(), 1);
+        // Ein zweiter Aufrufer muss dasselbe Gate vorfinden, kein neues.
+        let second = s.player_gate("42").await;
+        assert!(handle.same_gate(&second), "kein zweites Gate");
+        drop(second);
+        // Solange `handle` lebt, bleibt der Eintrag bestehen.
+        assert_eq!(s.in_flight_len(), 1, "Handle ohne Lock haelt Eintrag");
+        drop(handle);
+        assert_eq!(s.in_flight_len(), 0);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Nach dem letzten Nutzer wird der Map-Eintrag entfernt, und ein
+    /// erneuter Zugriff funktioniert wieder.
+    #[tokio::test]
+    async fn p29_entry_removed_after_last_user_and_reusable_afterwards() {
+        let base = temp_dir("p29reuse");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        {
+            let _g = s.player_gate("42").await.lock_owned().await;
+            assert_eq!(s.in_flight_len(), 1);
+        }
+        assert_eq!(s.in_flight_len(), 0, "Guard-Drop entfernt den Eintrag");
+
+        // Erneuter Zugriff nach vollstaendiger Freigabe: funktioniert wieder
+        // und wird am Ende sauber abgeraeumt.
+        {
+            let again = s.player_gate("42").await.lock_owned().await;
+            assert_eq!(s.in_flight_len(), 1, "erneuter Zugriff erzeugt Eintrag");
+            // Solange dieser Aufrufer haelt, sieht ein weiterer das gleiche
+            // Gate — genau die Invariante, die der Cleanup schuetzt.
+            let third = s.player_gate("42").await;
+            assert!(
+                third.same_gate_during(&again),
+                "waehrend der Haltezeit ein Gate, kein Reuse daneben"
+            );
+            drop(third);
+            assert_eq!(s.in_flight_len(), 1, "Guard haelt den Eintrag");
+        }
+        assert_eq!(s.in_flight_len(), 0, "auch der zweite Durchlauf raeumt auf");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Viele verschiedene, jeweils abgeschlossene Spielerzugriffe
+    /// lassen die Map **nicht** dauerhaft wachsen.
+    #[tokio::test]
+    async fn p29_many_finished_players_do_not_grow_the_map() {
+        let base = temp_dir("p29many");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        for i in 0..64 {
+            let _g = s.player_gate(&format!("p{i}")).await.lock_owned().await;
+        }
+        assert_eq!(
+            s.in_flight_len(),
+            0,
+            "nach 64 abgeschlossenen Zugriffen kein Rest"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Fehler- und Panic-Unwinding hinterlaesst kein unbenutztes Gate.
+    /// Der Fehlerpfad enthaelt kein `catch_unwind`; das Unwinding laeuft ueber den
+    /// normalen Rust-Drop der Lease.
+    #[tokio::test]
+    async fn p29_error_and_panic_paths_leave_no_unused_gate() {
+        let base = temp_dir("p29err");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+
+        // (a) Fehlerpfad: der Aufrufer bricht per `?` ab.
+        let fehler: Result<(), String> = async {
+            let _g = s.player_gate("42").await.lock_owned().await;
+            Err(" simulierter Fehler".to_string())
+        }
+        .await;
+        assert!(fehler.is_err());
+        assert_eq!(s.in_flight_len(), 0, "Fehlerpfad ohne Rest");
+
+        // (b) Panic-Unwinding: der Panic wird gefangen, die Lease wird per
+        // Drop freigegeben. `catch_unwind` um einen Future braucht
+        // `AssertUnwindSafe`, weil die Map nicht `UnwindSafe` ist.
+        let s2 = s.clone();
+        let res = std::panic::AssertUnwindSafe(async move {
+            let _g = s2.player_gate("42").await.lock_owned().await;
+            panic!("simulierter Panic");
+        })
+        .catch_unwind()
+        .await;
+        assert!(res.is_err(), "Panic muss den Stack abwickeln");
+        assert_eq!(s.in_flight_len(), 0, "Panic-Pfad ohne Rest");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-29`: Unterschiedliche Spieler bleiben unabhaengig — ihre Gates
+    /// blockieren sich nicht gegenseitig.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn p29_different_players_stay_independent() {
+        let base = temp_dir("p29indep");
+        let s = std::sync::Arc::new(spool(&base));
+        s.ensure_dirs().unwrap();
+        let a = s.player_gate("a").await.lock_owned().await;
+        let b = s.player_gate("b").await.lock_owned().await;
+        assert_eq!(s.in_flight_len(), 2, "zwei getrennte Eintraege");
+        drop(a);
+        drop(b);
+        assert_eq!(s.in_flight_len(), 0);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -4469,7 +4821,7 @@ mod tests {
         let runtime = PersistRuntime {
             spool: Spool {
                 base_dir: base.clone(),
-                in_flight: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+                in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             },
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),

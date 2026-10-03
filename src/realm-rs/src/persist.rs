@@ -316,8 +316,7 @@ pub async fn persist_player(
     player_id: &str,
     force: bool,
 ) -> Result<(), String> {
-    let gate = spool.player_gate(player_id).await;
-    let _guard = gate.lock().await;
+    let _guard = spool.player_gate(player_id).await.lock_owned().await;
     let spool = spool.clone();
     persist_dirty_into(shared, player_id, force, move |snapshot| {
         let spool = spool.clone();
