@@ -51,6 +51,33 @@ fn run() -> Result<(), String> {
     rt.block_on(async_main())
 }
 
+/// `P-22`: Statusentscheidung nach einem **erfolgreichen** Tick des
+/// periodischen Drainers (`Ok(Some(..))` wie `Ok(None)`).
+///
+/// Ein einzelner erfolgreicher Drain beweist die Start-Recovery **nicht** als
+/// abgeschlossen: Solange die Start-Recovery offen ist und Spool-Arbeit
+/// verbleibt, bleibt der Status `DEGRADED` und es wird nur der Restzähler
+/// protokolliert. `READY` folgt erst nach bestätigtem Abschluss (Spool leer);
+/// normale neue Spool-Arbeit im Regelbetrieb erzwingt weiterhin kein
+/// `DEGRADED`. Die Fehlerbehandlung bleibt beim Aufrufer (`Err` → `DEGRADED`).
+fn apply_drain_tick_status(runtime: &crate::spool::PersistRuntime) {
+    match runtime.apply_drain_tick() {
+        Ok(crate::spool::RecoveryStatusUpdate::Ready) => {}
+        Ok(crate::spool::RecoveryStatusUpdate::RecoveryStillOpen { remaining }) => {
+            // Datensparsam: nur der Restzähler.
+            log::warn!(
+                "Start-Recovery weiterhin offen: {} Spool-Batches verbleiben — Status bleibt DEGRADED",
+                remaining
+            );
+        }
+        Err(e) => {
+            // Restcheck nicht ermittelbar: Status nicht eigenmächtig auf READY
+            // heben; der bestehende Zustand bleibt, der Fehler wird protokolliert.
+            log::error!("Drain-Statusprüfung fehlgeschlagen: {e}");
+        }
+    }
+}
+
 async fn async_main() -> Result<(), String> {
     let args: Vec<String> = std::env::args().collect();
     let cfg = Arc::new(config::load_config(&config::config_path(&args))?);
@@ -95,8 +122,15 @@ async fn async_main() -> Result<(), String> {
     // im Spool liegende Batches (Crash/Wartung) werden auf die DB angewendet.
     // Ein DB-Fehler bricht den Start NICHT ab — der Realm startet dann im
     // Status DEGRADED (Login weiter möglich, Drain retryt periodisch).
+    //
+    // `P-22`: READY setzt der Start **nur** bei bestätigt abgeschlossener
+    // Recovery. Blieb nach dem Recovery-Ende relevante Restarbeit in
+    // `<base>/spool/` liegen (Limit erreicht oder Abbruch ohne Fortschritt),
+    // startet der Realm DEGRADED; der periodische Drainer arbeitet sie weiter
+    // ab und hebt den Status erst nach bestätigtem Abschluss auf READY.
     match persist.recover(&pool).await {
-        Ok(report) => {
+        Ok(outcome) => {
+            let report = outcome.report;
             if report.batches_processed > 0 || report.batches_quarantined > 0 {
                 log::info!(
                     "Recovery-Drain: {} Batches, {} angewendet, {} übersprungen, {} superseded, {} quarantäniert",
@@ -107,10 +141,23 @@ async fn async_main() -> Result<(), String> {
                     report.batches_quarantined
                 );
             }
-            persist.set_status(crate::spool::PersistStatus::Ready);
+            match persist.apply_startup_recovery(&outcome) {
+                crate::spool::RecoveryStatusUpdate::Ready => {}
+                crate::spool::RecoveryStatusUpdate::RecoveryStillOpen { remaining } => {
+                    // Datensparsam: ausschließlich der Restzähler, keine
+                    // Dateinamen, Inhalte, Pfade oder Rohfehler.
+                    log::warn!(
+                        "Recovery unvollständig: {} Spool-Batches verbleiben — Realm startet als DEGRADED, periodischer Drain arbeitet weiter",
+                        remaining
+                    );
+                }
+            }
         }
         Err(e) => {
             log::error!("Recovery-Drain fehlgeschlagen: {e} — Realm startet als DEGRADED");
+            // Batches liegen per Abbruchvertrag weiter im Spool: die Start-
+            // Recovery ist damit offen, READY folgt erst nach dem Abarbeiten.
+            persist.set_recovery_open(true);
             persist.set_status(crate::spool::PersistStatus::Degraded);
         }
     }
@@ -380,10 +427,10 @@ async fn async_main() -> Result<(), String> {
                             report.batches_quarantined
                         );
                     }
-                    drain_runtime.set_status(crate::spool::PersistStatus::Ready);
+                    apply_drain_tick_status(&drain_runtime);
                 }
                 Ok(None) => {
-                    drain_runtime.set_status(crate::spool::PersistStatus::Ready);
+                    apply_drain_tick_status(&drain_runtime);
                 }
                 Err(e) => {
                     log::error!("Drain fehlgeschlagen: {e}");

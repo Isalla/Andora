@@ -25,6 +25,7 @@
 // einspielen).
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,43 @@ pub struct DrainReport {
     pub entries_skipped: u32,
     pub entries_superseded: u32,
     pub batches_quarantined: u32,
+}
+
+/// `P-22`: Ergebnis der Startup-Recovery: der bisherige Drain-Bericht **plus**
+/// die tatsächlich verbliebene relevante Recovery-Arbeit.
+///
+/// `batches_remaining` zählt ausschließlich die offenen Batch-Dateien in
+/// `<base>/spool/` (siehe `Spool::count_batches`). Quarantäne, `superseded/`,
+/// Archive und temporäre Dateien sind **keine** offene Recovery und werden
+/// hier nicht mitgezählt; sie bleiben getrennt bewertet (`P-14`, `P-30`).
+/// `batches_remaining == 0` bedeutet: die Start-Recovery ist tatsächlich
+/// abgeschlossen und `READY` ist zulässig.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RecoveryOutcome {
+    pub report: DrainReport,
+    pub batches_remaining: usize,
+}
+
+/// `P-22`: Notventil der Startup-Recovery. **Schutzgrenze, kein Statusmittel:**
+/// Der Wert bleibt unverändert 10.000 Drain-Aufrufe (eine Iteration = eine
+/// Batch-Datei in `<base>/spool/`). Er entscheidet **nicht** über `READY` oder
+/// `DEGRADED`; das entscheidet allein die tatsächlich verbliebene Restarbeit
+/// (`RecoveryOutcome::batches_remaining`).
+pub const RECOVERY_MAX_DRAIN_CALLS: u32 = 10_000;
+
+/// `P-22`: Ergebnis der Statusentscheidung nach der Startup-Recovery
+/// (`PersistRuntime::apply_startup_recovery`) beziehungsweise nach einem
+/// erfolgreichen Tick des periodischen Drainers
+/// (`PersistRuntime::apply_drain_tick`). Der Aufrufer protokolliert
+/// ausschließlich den Zähler `remaining`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryStatusUpdate {
+    /// Die Start-Recovery ist bestätigt abgeschlossen bzw. es liegt nur
+    /// normale Spool-Arbeit vor → Status steht auf `READY`.
+    Ready,
+    /// Die Start-Recovery ist weiterhin offen und Restarbeit verbleibt →
+    /// Status bleibt `DEGRADED`, `remaining` ist der reine Restzähler.
+    RecoveryStillOpen { remaining: usize },
 }
 
 /// Durable-Snapshot-Spool. `in_flight` serialisiert pro Spieler (verhindert
@@ -291,6 +329,11 @@ pub struct PersistRuntime {
     spool: Spool,
     weapon_skill_id: String,
     status: Arc<Mutex<PersistStatus>>,
+    /// `P-22`: Die Start-Recovery ist noch **offen** (Limit erreicht oder
+    /// Abbruch ohne Fortschritt, jeweils mit verbliebener Restarbeit). Nur so
+    /// unterscheidet der Hintergrund-Drainer „erster Erfolg bei noch offener
+    /// Start-Recovery" von „normale neue Spool-Arbeit im Regelbetrieb".
+    recovery_open: Arc<AtomicBool>,
 }
 
 impl PersistRuntime {
@@ -305,6 +348,7 @@ impl PersistRuntime {
             spool,
             weapon_skill_id: weapon_skill_id.to_string(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -358,6 +402,78 @@ impl PersistRuntime {
 
     pub fn set_status(&self, s: PersistStatus) {
         *self.status.lock().unwrap() = s;
+    }
+
+    /// `P-22`: Ist die Start-Recovery noch offen? Nur unmittelbar nach dem
+    /// Start relevant; danach ist der Zustand nur noch „Start-Recovery
+    /// abgeschlossen" (`false`).
+    pub fn recovery_open(&self) -> bool {
+        self.recovery_open.load(Ordering::SeqCst)
+    }
+
+    /// `P-22`: Markiert die Start-Recovery als offen/abgeschlossen. Wird nur
+    /// vom Startpfad und vom bestätigten Abschluss gesetzt — nicht von den
+    /// normalen Save- und Drainpfaden.
+    pub fn set_recovery_open(&self, open: bool) {
+        self.recovery_open.store(open, Ordering::SeqCst);
+    }
+
+    /// `P-22`: Statusentscheidung des **Startpfads** nach der Startup-Recovery
+    /// (aufgerufen mit dem echten `RecoveryOutcome` aus `recover`).
+    ///
+    /// - `batches_remaining == 0`: die Recovery ist **bestätigt abgeschlossen**
+    ///   → `READY`, auch dann, wenn das Limit erreicht wurde.
+    /// - `batches_remaining > 0`: Limitabbruch **oder** Abbruch ohne
+    ///   Fortschritt mit relevanter Restarbeit → **kein** `READY`, sondern
+    ///   `DEGRADED`; die Restarbeit wird als „offen" markiert, damit der
+    ///   Hintergrund-Drainer `READY` erst nach dem Abarbeiten zulässt.
+    pub fn apply_startup_recovery(&self, outcome: &RecoveryOutcome) -> RecoveryStatusUpdate {
+        if outcome.batches_remaining == 0 {
+            self.set_recovery_open(false);
+            self.set_status(PersistStatus::Ready);
+            RecoveryStatusUpdate::Ready
+        } else {
+            self.set_recovery_open(true);
+            self.set_status(PersistStatus::Degraded);
+            RecoveryStatusUpdate::RecoveryStillOpen {
+                remaining: outcome.batches_remaining,
+            }
+        }
+    }
+
+    /// `P-22`: Statusentscheidung des **periodischen Drainers** nach einem
+    /// erfolgreichen Tick (`Ok(Some(..))` wie `Ok(None)`).
+    ///
+    /// - Spool leer: die Start-Recovery ist damit **bestätigt abgeschlossen**
+    ///   → `READY` (der Abschluss überschreibt bewusst einen zwischenzeitlich
+    ///   gesetzten `DEGRADED`, weil der Recovery-Pfad selbst fehlerfrei blieb).
+    /// - Spool nicht leer **und** Start-Recovery noch offen: der Tick hat nur
+    ///   eine Batch abgearbeitet → **kein** `READY`; `DEGRADED` bleibt erhalten
+    ///   und wird datensparsam protokolliert.
+    /// - Spool nicht leer, Start-Recovery abgeschlossen: **normale neue
+    ///   Spool-Arbeit** im Regelbetrieb → unverändert `READY`, sie erzwingt
+    ///   nicht pauschal `DEGRADED`.
+    ///
+    /// Der Restcheck misst ausschließlich `<base>/spool/`; ein Fehler des
+    /// Restchecks wird **weitergereicht** und löst hier keinen Statuswechsel
+    /// aus. Der Fehlerpfad des Drains (`Err`) bleibt beim Aufrufer und setzt
+    /// dort wie bisher `DEGRADED`.
+    pub fn apply_drain_tick(&self) -> Result<RecoveryStatusUpdate, String> {
+        match self.spool.count_batches()? {
+            0 => {
+                self.set_recovery_open(false);
+                self.set_status(PersistStatus::Ready);
+                Ok(RecoveryStatusUpdate::Ready)
+            }
+            remaining => {
+                if self.recovery_open() {
+                    Ok(RecoveryStatusUpdate::RecoveryStillOpen { remaining })
+                } else {
+                    self.set_status(PersistStatus::Ready);
+                    Ok(RecoveryStatusUpdate::Ready)
+                }
+            }
+        }
     }
 
     /// Zentraler Player-Persistenzpfad (durable; siehe persist::persist_player).
@@ -440,17 +556,43 @@ impl PersistRuntime {
 
     /// Startup-Recovery: drain alle vorhandenen Batches (älteste zuerst).
     /// Stoppt beim ersten DB-Fehler (Batch bleibt, Realm startet als DEGRADED).
-    pub async fn recover(&self, pool: &Pool<MySql>) -> Result<DrainReport, String> {
+    ///
+    /// `P-22`: Der Rückgabewert unterscheidet den **bestätigten Abschluss**
+    /// (`batches_remaining == 0`) von einem **Limitabbruch oder Abbruch ohne
+    /// Fortschritt mit verbleibender Restarbeit** (`batches_remaining > 0`).
+    /// Das Limit selbst bleibt `RECOVERY_MAX_DRAIN_CALLS` und entscheidet
+    /// **nicht** über den Status.
+    pub async fn recover(&self, pool: &Pool<MySql>) -> Result<RecoveryOutcome, String> {
+        self.recover_with_limit(&PoolDrainDb { pool }, RECOVERY_MAX_DRAIN_CALLS)
+            .await
+    }
+
+    /// Wie `recover`, aber mit internem Limit für die Tests. Die Produktion
+    /// ruft ausschließlich `recover` mit `RECOVERY_MAX_DRAIN_CALLS` auf; die
+    /// Schleife selbst ist identisch.
+    async fn recover_with_limit<D: DrainDb>(
+        &self,
+        db: &D,
+        max_drain_calls: u32,
+    ) -> Result<RecoveryOutcome, String> {
         let mut total = DrainReport::default();
         let mut guard = 0u32;
-        while self.spool.count_batches()? > 0 && guard < 10_000 {
+        while self.spool.count_batches()? > 0 && guard < max_drain_calls {
             guard += 1;
-            match self.spool.drain_one(pool, &self.weapon_skill_id).await? {
+            match self.spool.drain_one_with(db, &self.weapon_skill_id).await? {
                 Some(r) => total = merge_report(total, r),
                 None => break,
             }
         }
-        Ok(total)
+        // Restarbeit **nach** jedem regulären Schleifenende messen: Limit,
+        // Abbruch ohne Fortschritt und vollständiger Durchlauf werden dadurch
+        // am Ergebnis unterscheidbar. Fehler des Restchecks werden
+        // weitergereicht.
+        let batches_remaining = self.spool.count_batches()?;
+        Ok(RecoveryOutcome {
+            report: total,
+            batches_remaining,
+        })
     }
 
     /// Retention: superseded-/Archiv-Dateien über 30 Tage (docs §33).
@@ -3294,6 +3436,303 @@ mod tests {
         );
     }
 
+    // ===== P-22: Recovery-Abschluss, Limitabbruch und Statusübergänge =====
+    //
+    // Diese Tests rufen die **echten** Produktionsfunktionen `recover_with_limit`
+    // (identische Schleife wie `recover`, nur mit internem Limit), `drain_one_with`
+    // und die Statusentscheidungen `apply_startup_recovery`/`apply_drain_tick` auf.
+    // Sie bauen die Entscheidung nicht im Test nach. Das Limit wird klein
+    // gewählt, damit der Limitabbruch ohne zehntausend Dateien erreichbar ist;
+    // der Produktionswert `RECOVERY_MAX_DRAIN_CALLS` bleibt davon unberührt.
+
+    /// `PersistRuntime` über einem echten Spool, Startstatus `Recovering`.
+    fn p22_runtime(s: &Spool) -> PersistRuntime {
+        PersistRuntime {
+            spool: s.clone(),
+            weapon_skill_id: "ws".into(),
+            status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// `n` getrennte Batch-Dateien (je ein Spieler), DB-Revision je Spieler
+    /// niedriger als die Snapshot-Revision ⇒ jeder Drain wendet an.
+    fn p22_write_n_batches(s: &Spool, n: usize) -> FakeDb {
+        const IDS: [&str; 5] = ["100", "101", "102", "103", "104"];
+        for id in IDS.iter().take(n) {
+            s.write_batch(&snapshot(id, 5, 1.0)).unwrap();
+        }
+        let revs: Vec<(&str, Option<i64>)> = IDS.iter().take(n).map(|id| (*id, Some(1))).collect();
+        FakeDb::multi(&revs)
+    }
+
+    /// Vollständige Recovery ⇒ keine Restarbeit ⇒ Startentscheidung `READY`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_complete_recovery_reports_no_remaining_and_allows_ready() {
+        let base = temp_dir("p22ok");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let db = p22_write_n_batches(&s, 3);
+        let rt = p22_runtime(&s);
+
+        let outcome = rt.recover_with_limit(&db, 10).await.unwrap();
+        assert_eq!(outcome.report.batches_processed, 3);
+        assert_eq!(outcome.report.entries_applied, 3);
+        assert_eq!(
+            outcome.batches_remaining, 0,
+            "vollständig abgearbeitete Recovery darf keine Rest melden"
+        );
+        assert_eq!(rt.status(), PersistStatus::Recovering);
+
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::Ready
+        );
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        assert!(!rt.recovery_open());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Fünf Dateien bei Limit drei ⇒ genau zwei verbleiben ⇒ `DEGRADED`.
+    /// Der Limitwert selbst ist unerheblich: entscheidend ist die Restarbeit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_limit_with_five_batches_leaves_two_and_degrades() {
+        let base = temp_dir("p22lim");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let db = p22_write_n_batches(&s, 5);
+        let rt = p22_runtime(&s);
+        assert_eq!(s.count_batches().unwrap(), 5);
+
+        let outcome = rt.recover_with_limit(&db, 3).await.unwrap();
+        assert_eq!(outcome.report.batches_processed, 3);
+        assert_eq!(outcome.batches_remaining, 2);
+        // Die Restarbeit liegt unverändert im Spool (nicht etwa in Quarantäne).
+        assert_eq!(s.count_batches().unwrap(), 2);
+
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 2 }
+        );
+        assert_eq!(rt.status(), PersistStatus::Degraded);
+        assert!(
+            rt.recovery_open(),
+            "Start-Recovery bleibt als offen markiert"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Genau am Limit vollständig fertig ⇒ `READY` bleibt möglich. Das Limit
+    /// ist ein Schutz und darf einen vollständigen Abschluss nicht verhindern.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_exactly_at_limit_is_a_complete_recovery() {
+        let base = temp_dir("p22edge");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let db = p22_write_n_batches(&s, 3);
+        let rt = p22_runtime(&s);
+
+        let outcome = rt.recover_with_limit(&db, 3).await.unwrap();
+        assert_eq!(outcome.report.batches_processed, 3);
+        assert_eq!(outcome.batches_remaining, 0);
+        assert_eq!(s.count_batches().unwrap(), 0);
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::Ready
+        );
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        assert!(!rt.recovery_open());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Abbruch **ohne Fortschritt** mit Restarbeit ⇒ ebenfalls `DEGRADED`.
+    /// Modelliert wird der `Ok(None)`-Pfad (Attributionskonflikt `P-30`), der
+    /// die Schleife beendet, während die Datei liegen bleibt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_abort_without_progress_with_remaining_is_degraded() {
+        let base = temp_dir("p22stall");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let path = write_conflicting_batch(&s);
+        let db = FakeDb::multi(&[]);
+        let rt = p22_runtime(&s);
+
+        let outcome = rt.recover_with_limit(&db, 10).await.unwrap();
+        assert_eq!(
+            outcome.batches_remaining, 1,
+            "blockierte Datei bleibt relevante Restarbeit"
+        );
+        assert!(path.exists(), "blockierte Datei bleibt erhalten");
+        assert_eq!(db.applies(), 0, "kein Apply ohne Fortschritt");
+
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 1 }
+        );
+        assert_eq!(rt.status(), PersistStatus::Degraded);
+        assert!(rt.recovery_open());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Quarantäne ist **keine** offene Recovery: eine nicht parsebare Datei
+    /// wird überführt, der Spool ist leer ⇒ `READY` bleibt zulässig.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_quarantine_is_not_counted_as_remaining_recovery() {
+        let base = temp_dir("p22quar");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        write_unparseable_batch(&s);
+        let db = FakeDb::new(Some(1));
+        let rt = p22_runtime(&s);
+
+        let outcome = rt.recover_with_limit(&db, 10).await.unwrap();
+        assert_eq!(outcome.report.batches_quarantined, 1);
+        assert_eq!(
+            outcome.batches_remaining, 0,
+            "Quarantäne darf nicht als Restarbeit zählen"
+        );
+        assert!(!list_json_files(&s.quarantine_open_dir())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            rt.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::Ready
+        );
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Erster Hintergrund-Erfolg bei **noch offener** Start-Recovery hebt
+    /// `DEGRADED` nicht vorzeitig auf: nach einem echten `drain_one` bleibt
+    /// Restarbeit, also kein `READY`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_first_drain_success_keeps_degraded_while_recovery_open() {
+        let base = temp_dir("p22tick1");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let db = p22_write_n_batches(&s, 3);
+        let rt = p22_runtime(&s);
+        // Start mit offener Recovery und Restarbeit.
+        let outcome = rt.recover_with_limit(&db, 1).await.unwrap();
+        assert_eq!(outcome.batches_remaining, 2);
+        rt.apply_startup_recovery(&outcome);
+        assert_eq!(rt.status(), PersistStatus::Degraded);
+        assert!(rt.recovery_open());
+
+        // Ein erfolgreicher Drainer-Tick: eine Batch abgearbeitet, eine bleibt.
+        let report = s.drain_one_with(&db, "ws").await.unwrap();
+        assert!(report.is_some(), "der Tick verarbeitet eine Batch");
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(
+            rt.apply_drain_tick().unwrap(),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 1 },
+            "einzelner Erfolg darf offene Recovery nicht als fertig melden"
+        );
+        assert_eq!(
+            rt.status(),
+            PersistStatus::Degraded,
+            "READY ist vor bestätigtem Abschluss unzulässig"
+        );
+        assert!(rt.recovery_open());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Bestätigter Abschluss (Spool leer) ⇒ `READY` wird zulässig und die
+    /// offene Recovery-Markierung entfällt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_confirmed_completion_allows_ready_again() {
+        let base = temp_dir("p22tick2");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let db = p22_write_n_batches(&s, 1);
+        let rt = p22_runtime(&s);
+        rt.set_recovery_open(true);
+        rt.set_status(PersistStatus::Degraded);
+
+        let report = s.drain_one_with(&db, "ws").await.unwrap();
+        assert!(report.is_some());
+        assert_eq!(s.count_batches().unwrap(), 0);
+        assert_eq!(rt.apply_drain_tick().unwrap(), RecoveryStatusUpdate::Ready);
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        assert!(!rt.recovery_open(), "Abschluss ist bestätigt");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Normale neue Spool-Arbeit nach abgeschlossener Recovery: Der Spool ist
+    /// nicht leer, die Start-Recovery ist aber abgeschlossen ⇒ weiterhin
+    /// `READY`, **kein** pauschales `DEGRADED`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_normal_new_batch_after_completed_recovery_stays_ready() {
+        let base = temp_dir("p22tick3");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let rt = p22_runtime(&s);
+        rt.set_recovery_open(false);
+        rt.set_status(PersistStatus::Ready);
+
+        // Regulärer Save erzeugt eine neue Batch.
+        s.write_batch(&snapshot("900", 3, 1.0)).unwrap();
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(
+            rt.apply_drain_tick().unwrap(),
+            RecoveryStatusUpdate::Ready,
+            "normale neue Spool-Arbeit ist keine offene Start-Recovery"
+        );
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        assert!(!rt.recovery_open());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// Ein Fehlerpfad des Drains (`Err`) bleibt unverändert beim Aufrufer: er
+    /// setzt `DEGRADED`, und der Drainer-Tick hebt das erst nach einem
+    /// bestätigten Abschluss auf.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p22_drain_error_keeps_degraded_until_confirmed_completion() {
+        struct FailingDb;
+        impl DrainDb for FailingDb {
+            fn load_persist_revision<'a>(
+                &'a self,
+                _char_id: &'a str,
+            ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+                Box::pin(async move { Err("db down".into()) })
+            }
+            fn apply_snapshot<'a>(
+                &'a self,
+                _snapshot: &'a PersistSnapshot,
+                _weapon_skill_id: &'a str,
+            ) -> BoxFuture<'a, Result<(), String>> {
+                Box::pin(async move { Err("db down".into()) })
+            }
+        }
+
+        let base = temp_dir("p22tick4");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        s.write_batch(&snapshot("901", 3, 1.0)).unwrap();
+        let rt = p22_runtime(&s);
+        rt.set_recovery_open(true);
+
+        // Fehlerpfad: der Aufrufer setzt DEGRADED (unveränderte Semantik).
+        assert!(s.drain_one_with(&FailingDb, "ws").await.is_err());
+        rt.set_status(PersistStatus::Degraded);
+
+        // Der Restcheck darf daraus kein READY machen, solange Restarbeit da ist.
+        assert_eq!(
+            rt.apply_drain_tick().unwrap(),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 1 }
+        );
+        assert_eq!(rt.status(), PersistStatus::Degraded);
+
+        // Erst nach bestätigtem Abschluss (Spool leer) ist READY zulässig: der
+        // nächste erfolgreiche Drain verarbeitet die letzte Batch.
+        let ok_db = FakeDb::multi(&[("901", Some(1))]);
+        assert!(s.drain_one_with(&ok_db, "ws").await.unwrap().is_some());
+        assert_eq!(s.count_batches().unwrap(), 0);
+        assert_eq!(rt.apply_drain_tick().unwrap(), RecoveryStatusUpdate::Ready);
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// B1, Nachweise 1–9: kanonischer Dateiname `42`, gültiger Inhalt `99`,
     /// echter `drain_one`-Aufruf mit **beiden** Gates gehalten. Der Aufruf muss
     /// trotzdem sofort seinen sicheren Ausgang liefern: das beweist, dass kein
@@ -3946,6 +4385,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
 
         // Schreibziel unbenutzbar → Abbruch vor jeder Veröffentlichung.
@@ -4054,6 +4494,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
 
         // Der erste Lauf scheitert an der Dauerhaftigkeitsgrenze
@@ -4271,6 +4712,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
 
         // Spool-Verzeichnis entfernen: die Veröffentlichung muss scheitern.
@@ -4390,6 +4832,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(runtime.persist_dirty_run(&shared, &ids).await.unwrap(), 3);
 
@@ -4434,6 +4877,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
         let out = runtime
             .persist_dirty_run(&shared, &["42".to_string()])
@@ -4461,6 +4905,7 @@ mod tests {
             spool: s.clone(),
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
         let ids: Vec<String> = ["42", "43"].iter().map(|s| s.to_string()).collect();
         runtime.persist_dirty_run(&shared, &ids).await.unwrap();
@@ -4825,6 +5270,7 @@ mod tests {
             },
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
+            recovery_open: Arc::new(AtomicBool::new(false)),
         };
         let shared = crate::world::new_shared();
         let (p, _rx) = dirty_test_player("p");
