@@ -5461,4 +5461,71 @@ mod tests {
         );
         std::fs::remove_dir_all(&base).unwrap();
     }
+
+    /// `P-26`: Spool erfolgreich, DB-Drain fehlgeschlagen. Der Zustand ist
+    /// **lokal dauerhaft gesichert** (§41 Fall 2): Die Batch-Datei bleibt
+    /// vollständig liegen und wird beim nächsten Start durch die Recovery
+    /// angewendet. Dieser Fall ist deshalb **kein** ungesicherter Snapshot und
+    /// darf keinen Fehlerabschluss des Shutdowns erzeugen.
+    ///
+    /// Der Nachweis nutzt die echten Produktionsfunktionen `write_batch` und
+    /// `drain_one_with` mit dem vorhandenen `FailingDb` — **keine** echte
+    /// Datenbank und keine Betriebssystemstörung.
+    #[tokio::test]
+    async fn p26_durable_spool_batch_survives_a_failing_db_drain() {
+        struct FailingDb;
+        impl DrainDb for FailingDb {
+            fn load_persist_revision<'a>(
+                &'a self,
+                _char_id: &'a str,
+            ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+                Box::pin(async move { Err("db down".into()) })
+            }
+            fn apply_snapshot<'a>(
+                &'a self,
+                _snapshot: &'a PersistSnapshot,
+                _weapon_skill_id: &'a str,
+            ) -> BoxFuture<'a, Result<(), String>> {
+                Box::pin(async move { Err("db down".into()) })
+            }
+        }
+
+        let base = temp_dir("p26drain");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let rt = PersistRuntime::new(&base, "ws").unwrap();
+        // (1) Der forcierte Save **am echten Spool**: dauerhaft veröffentlicht.
+        // Die Charakter-ID ist kanonisch (rational), sonst würde der P-30-
+        // Fail-safe den Eintrag zuordnen und **nicht** in die DB schreiben.
+        s.write_batch(&snapshot("900", 7, 1.0)).unwrap();
+        assert_eq!(s.count_batches().unwrap(), 1);
+
+        // (2) Der finale DB-Drain schlägt fehl.
+        assert!(
+            s.drain_one_with(&FailingDb, "ws").await.is_err(),
+            "DB-Drain muss fehlschlagen"
+        );
+
+        // (3) Die Batch-Datei liegt unverändert und vollständig wieder da: für
+        // die spätere Recovery ist der Zustand nicht verloren.
+        assert_eq!(
+            s.count_batches().unwrap(),
+            1,
+            "die Batch-Datei muss den Fehlschlag überleben"
+        );
+        let pending = rt.pending_revision("900").expect("Spool-Lesung");
+        assert_eq!(
+            pending,
+            Some(7),
+            "die gesicherte Revision bleibt für die Recovery nachweisbar"
+        );
+
+        // (4) Sobald die DB wieder erreichbar ist, wird derselbe Batch
+        // angewendet — der Zustand ist also tatsächlich wiederherstellbar.
+        let ok_db = FakeDb::multi(&[("900", Some(1))]);
+        assert!(s.drain_one_with(&ok_db, "ws").await.unwrap().is_some());
+        assert_eq!(s.count_batches().unwrap(), 0);
+        assert_eq!(ok_db.applied(), vec![("900".to_string(), 7)]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

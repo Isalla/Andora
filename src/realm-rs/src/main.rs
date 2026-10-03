@@ -38,7 +38,11 @@ use std::sync::Arc;
 fn main() {
     env_logger::init();
     if let Err(e) = run() {
-        log::error!("startup failed: {e}");
+        // `P-26`: Das Mapping bleibt unverändert — ein `Err` aus `run()` (Start
+        // **oder** Shutdown-Abschlussentscheidung) ergibt Exit 1. Nur die
+        // Meldung ist neutral gefasst, damit ein Fehler des
+        // Shutdown-Abschlusses nicht als Startfehler gemeldet wird.
+        log::error!("realm beendet mit Fehler: {e}");
         std::process::exit(1);
     }
 }
@@ -481,8 +485,8 @@ async fn async_main() -> Result<(), String> {
     // Begrenzte Retry-Semantik für den direkten `logout_at`-Write
     // (docs/Player_Persistenz.md §30; docs/Security.md `P-27`): die Phase
     // besitzt ein **globales** Budget und erzeugt genau eine Abschlusszusammen-
-    // fassung. Der kontrollierte Abschluss (Drain, `pool.close()`, `Ok(())`)
-    // bleibt unverändert.
+    // fassung. Der kontrollierte Abschluss (Drain, `pool.close()`) bleibt
+    // unverändert und läuft **immer** vollständig.
     let logout_wait = |d: std::time::Duration| {
         Box::pin(async move {
             tokio::time::sleep(d).await;
@@ -525,5 +529,97 @@ async fn async_main() -> Result<(), String> {
         log::error!("final drain: {e}");
     }
     pool.close().await;
+    // `P-26`: Das aggregierte **Sicherungsergebnis** wird erst **nach** dem
+    // vollständigen Cleanup ausgewertet — finaler Drain und `pool.close()`
+    // laufen oben in jedem Fall, auch wenn der Zustand nicht bestätigt
+    // gesichert werden konnte. Ein Skip des Cleanups ist ausgeschlossen.
+    //
+    // Maßgeblich ist ausschließlich der forcierte Spool-Save: ein gescheiterter
+    // finaler Drain allein ändert die Aussage über die Snapshot-Sicherung
+    // nicht, weil der Snapshot dann dauerhaft im Spool liegt und bei der
+    // nächsten Start-Recovery angewendet wird (§30/§41 Fall 2). Das
+    // bestehende Fehlerlog `final drain:` und der `DEGRADED`-Status bleiben
+    // unverändert erhalten.
+    //
+    // Ein `Err` bedeutet: mindestens ein aktueller Spielerzustand wurde nicht
+    // dauerhaft bestätigt gesichert. `main()` erzeugt daraus Exit 1. Der
+    // Nichtnull-Exit **meldet** diesen Zustand und ersetzt **keine** Sicherung;
+    // es wird ausdrücklich nicht behauptet, es existiere kein älterer
+    // dauerhafter Stand (§41).
+    if let Some(e) = logout_report.snapshot_security_error() {
+        log::error!(
+            "shutdown_persistence_unconfirmed: {}",
+            logout_report.spool_failed
+        );
+        return Err(e);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod p26_tests {
+    //! `P-26`: statische Nachweise über die **echte** Produktionsquelle dieses
+    //! Crate-Root. `async_main` lässt sich ohne laufende Datenbank nicht als
+    //! Funktion aufrufen; die beiden entscheidenden Eigenschaften — die
+    //! Reihenfolge des Cleanups gegenüber der Fehlerrückgabe und das
+    //! Exit-Mapping von `main()` — sind deshalb **strukturell** belegt. Geprüft
+    //! wird die reale Datei, nicht eine nachgebaute Entscheidung.
+
+    /// Die Produktionsquelle selbst, zur Compile-Zeit eingelesen.
+    const SRC: &str = include_str!("main.rs");
+
+    fn idx(needle: &str) -> usize {
+        SRC.find(needle)
+            .unwrap_or_else(|| panic!("Marker fehlt in der Produktionsquelle: {needle}"))
+    }
+
+    /// Der finale Drain und `pool.close()` liegen **vor** der Rückgabe des
+    /// aggregierten Sicherungsergebnisses. Notwendiges Cleanup wird deshalb
+    /// auch dann **nicht** übersprungen, wenn der Shutdown als Fehler endet.
+    #[test]
+    fn p26_cleanup_precedes_the_error_result() {
+        let drain = idx("if let Err(e) = persist.drain_one(&pool).await {");
+        let close = idx("pool.close().await;");
+        let decision = idx("logout_report.snapshot_security_error()");
+        let ret = idx("return Err(e);");
+        assert!(
+            drain < close,
+            "der finale Drain muss vor pool.close() laufen"
+        );
+        assert!(
+            close < decision,
+            "pool.close() muss vor der Abschlussentscheidung laufen"
+        );
+        assert!(
+            decision < ret,
+            "das Fehlerergebnis wird erst nach dem vollständigen Cleanup zurückgegeben"
+        );
+        // Der Erfolgsfall bleibt erreichbar: die Fehlerrückgabe ist bedingt.
+        assert!(SRC.contains("    Ok(())\n}\n"));
+    }
+
+    /// `main()` bildet jedes `Err` aus `run()` auf Exit 1 ab — auch das
+    /// Fehlerergebnis des Shutdown-Abschlusses. Es entsteht **kein** zweiter,
+    /// eigener Exit-Pfad für die Persistenzentscheidung.
+    #[test]
+    fn p26_main_maps_any_error_to_exit_1() {
+        // Nur der Rumpf von `main()` — vom Anfang bis zum Beginn von `run()`.
+        let main_body = &SRC[idx("fn main() {")..idx("fn run() -> Result<(), String> {")];
+        let run = main_body
+            .find("if let Err(e) = run()")
+            .expect("run()-Fehlerbehandlung in main() fehlt");
+        let exit = main_body
+            .find("std::process::exit(1)")
+            .expect("Exit-1-Mapping in main() fehlt");
+        assert!(
+            run < exit,
+            "ein Err aus run() muss zu std::process::exit(1) führen"
+        );
+        // Es gibt keine weitere Stelle, die den Prozess beendet.
+        assert_eq!(
+            main_body.matches("std::process::exit").count(),
+            1,
+            "genau eine Exit-Stelle in main()"
+        );
+    }
 }

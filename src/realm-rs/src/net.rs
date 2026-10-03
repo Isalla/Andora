@@ -241,6 +241,52 @@ pub(crate) struct ShutdownLogoutReport {
     pub skipped: u32,
     /// Das globale Budget wurde erschöpft.
     pub budget_exhausted: bool,
+    /// `P-26`: Charaktere, deren **aktueller** Zustand beim Shutdown nicht
+    /// dauerhaft bestätigt gesichert wurde — der forcierte Spool-Save
+    /// (`force = true`) ist fehlgeschlagen, es existiert daher weder ein
+    /// bestätigter Spool-Batch **noch** ein anwendbarer DB-Transfer für
+    /// diesen Zustand.
+    ///
+    /// Bewusst **getrennt** von `failed`/`skipped`: dort geht es um den
+    /// direkten `logout_at`-Write, der nach `docs/Player_Persistenz.md` §23
+    /// **nicht** Teil des Snapshots ist. Ein `logout_at`-Fehler bei
+    /// erfolgreich gesichertem Snapshot ist deshalb **kein** ungesicherter
+    /// Spielerzustand und wird hier nicht gezählt (kein Doppelzählen, keine
+    /// Pauschalbehauptung).
+    pub spool_failed: u32,
+}
+
+impl ShutdownLogoutReport {
+    /// `P-26`: Wurde der aktuelle Zustand **mindestens eines** Charakters
+    /// beim Shutdown nicht dauerhaft bestätigt gesichert?
+    ///
+    /// Maßgeblich ist ausschließlich `spool_failed`. Ein gescheiterter
+    /// `logout_at`-Write (`failed`/`skipped`) ebenso wie ein gescheiterter
+    /// finaler DB-Drain ändern diese Aussage **nicht**: der Snapshot liegt in
+    /// diesen Fällen dauerhaft im Spool und wird bei der nächsten
+    /// Start-Recovery angewendet (`docs/Player_Persistenz.md` §30/§41).
+    pub(crate) fn snapshot_security_failed(&self) -> bool {
+        self.spool_failed > 0
+    }
+
+    /// `P-26`: Abschlussentscheidung **nach** dem vollständigen Shutdown-
+    /// Cleanup (finaler Drain, `pool.close()`).
+    ///
+    /// `None` = der aktuelle Zustand aller Charaktere ist dauerhaft bestätigt
+    /// gesichert. `Some(_)` = mindestens ein aktueller Spielerzustand ist
+    /// nicht bestätigt gesichert; der Text nennt ausschließlich die **Anzahl**
+    /// und eine neutrale, stabile Fehlerklasse — **keine** Spielernamen und
+    /// **keine** unbelegte Aussage darüber, woher ein älterer dauerhafter
+    /// Stand stammt.
+    pub(crate) fn snapshot_security_error(&self) -> Option<String> {
+        if !self.snapshot_security_failed() {
+            return None;
+        }
+        Some(format!(
+            "graceful shutdown: {} Spielerzustände nicht dauerhaft gesichert (Fehlerklasse: durable_snapshot_unconfirmed)",
+            self.spool_failed
+        ))
+    }
 }
 
 /// Direkte `logout_at`-Phase des Graceful Shutdowns
@@ -253,6 +299,11 @@ pub(crate) struct ShutdownLogoutReport {
 ///
 /// Die Zähler des Abschlussberichts sind der maßgebliche Nachweis; rohe
 /// DB-Fehlermeldungen gelangen nicht in die Ausgabe.
+///
+/// `P-26`: Zusätzlich wird je Charakter der forcierte Spool-Save gezählt
+/// (`spool_failed`). Dieser Schritt läuft **vor** der Budget-/Skip-
+/// Entscheidung und daher für **alle** gelisteten Charaktere; Budgetablauf,
+/// `skipped` oder ein Timeout des Logout-Writes verhindern ihn nicht.
 pub(crate) async fn shutdown_logout_phase(
     persist: &crate::spool::PersistRuntime,
     shared: &crate::world::Shared,
@@ -268,9 +319,10 @@ pub(crate) async fn shutdown_logout_phase(
         failed: 0,
         skipped: 0,
         budget_exhausted: false,
+        spool_failed: 0,
     };
     for id in online {
-        // (1) Deadline-Prüfung **zuerst**, noch vor jedem weiteren Schritt: ist
+        // (1) Deadline-Prüfung **zuerst**, noch vor jedem anderen Schritt: ist
         // die harte Deadline abgelaufen, startet für diesen Charakter **kein**
         // weiterer direkter `logout_at`-Write.
         let expired = deadline.saturating_duration_since(Instant::now()).is_zero();
@@ -279,7 +331,16 @@ pub(crate) async fn shutdown_logout_phase(
         // Charaktere, deren direkter Logout-Write ausfällt. Er ist ein lokaler
         // Dateischreibvorgang **ohne DB-Zugriff**, steht aber außerhalb des
         // 30-S-Budgets und kann es daher rechnerisch überschreiten.
+        //
+        // `P-26`: Dieser Schritt liegt bewusst **vor** der Budget-/Skip-
+        // Entscheidung weiter unten. Budgetablauf, `skipped` und ein Timeout
+        // des Logout-Writes können deshalb den forcierten Save **nicht**
+        // verhindern; jeder gelistete Charakter durchläuft ihn. Ein Fehler
+        // bedeutet: der aktuelle Zustand dieses Charakters ist nicht dauerhaft
+        // bestätigt gesichert (§41) und wird deshalb gezählt. Der bestehende
+        // Fehlerlog je Charakter bleibt unverändert.
         if let Err(e) = persist.persist_player(shared, id, true).await {
+            report.spool_failed += 1;
             log::error!("shutdown persist {id}: {e}");
         }
         // (3)+(4) Der Logout-Zeitpunkt wird **einmal** bestimmt und über alle
@@ -1619,6 +1680,453 @@ mod tests {
             report.retried, 0,
             "kein zweiter Versuch: Budget war aufgebraucht"
         );
+    }
+
+    /// `P-26`: `PersistRuntime` über einem echten Spool-Stamm, dessen
+    /// `spool/`-Unterverzeichnis bewusst **fehlt**. Der Durable-Write
+    /// (`publish_new_file` → `File::create`) schlägt dadurch deterministisch
+    /// fehl — dasselbe Muster wie der bestehende Nachweis
+    /// `spool::tests::failed_spool_write_sets_degraded_and_keeps_dirty_and_revision`.
+    ///
+    /// Keine echte Datenbank, keine Betriebssystemstörung, keine
+    /// Rechteveränderung: es fehlt lediglich ein Verzeichnis.
+    fn p26_runtime_without_spool_dir() -> (crate::spool::PersistRuntime, PathBuf, Arc<TestDirGuard>)
+    {
+        let dir = alloc_test_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let guard = Arc::new(TestDirGuard { path: dir.clone() });
+        let rt = crate::spool::PersistRuntime::new(&dir, "ws").unwrap();
+        std::fs::remove_dir_all(dir.join("spool")).unwrap();
+        (rt, dir, guard)
+    }
+
+    /// Registriert `ids` als RAM-Spieler. Der Shutdown-Flush braucht keine
+    /// Owner-Zuordnung; entscheidend ist nur die Anwesenheit in
+    /// `world.players`, weil `persist_dirty_into` ausschließlich dort den
+    /// Snapshot erfasst.
+    async fn insert_players(shared: &crate::world::Shared, ids: &[&str]) {
+        let mut world = shared.lock().await;
+        for id in ids {
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            world.players.insert(
+                (*id).to_string(),
+                crate::world::Player {
+                    id: (*id).to_string(),
+                    name: (*id).to_string(),
+                    x: 0.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 1,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: std::time::Instant::now(),
+                    tx: ptx,
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    idia: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: Default::default(),
+                    cooldowns: Default::default(),
+                    active_cast: None,
+                    learned_abilities: Default::default(),
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 100,
+                    sitting: false,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                    persist_revision: 0,
+                },
+            );
+        }
+    }
+
+    /// `P-26` 1. Vollständig erfolgreiche Sicherung: Jeder gelistete Spieler
+    /// erhält einen **dauerhaft veröffentlichten** Spool-Batch, es entsteht
+    /// **kein** Fehlerergebnis, und der Shutdown darf als erfolgreich
+    /// gemeldet werden.
+    #[tokio::test]
+    async fn p26_successful_forced_save_produces_no_persistence_error() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["a", "b", "c"]).await;
+        let online = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let make_write = |_id: &str| -> DisconnectLogout {
+            Box::new(|_ts: i64| {
+                Box::pin(async { Ok(()) }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let report = shutdown_logout_phase(
+            &ctx.persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(report.spool_failed, 0, "kein Save darf fehlschlagen");
+        assert!(!report.snapshot_security_failed());
+        assert_eq!(report.snapshot_security_error(), None);
+        // Der Zustand ist nicht nur "gemeldet erfolgreich", sondern tatsächlich
+        // dauerhaft im Spool: für jeden Spieler liegt eine offene Batch-Datei
+        // mit der gesicherten Revision.
+        for id in ["a", "b", "c"] {
+            assert!(
+                matches!(ctx.persist.pending_revision(id), Ok(Some(1))),
+                "Spieler {id} hat keinen dauerhaften Spool-Batch"
+            );
+        }
+    }
+
+    /// `P-26` 2. Der forcierte Spool-Save schlägt fehl: Der Fehler wird je
+    /// Spieler gezählt, die **übrigen** Spieler werden weiterverarbeitet, die
+    /// Dirty-Bits bleiben erhalten (kein vorgetäuschter Erfolg), der Status ist
+    /// `DEGRADED` und die Abschlussentscheidung meldet den Fehler.
+    ///
+    /// Zusätzlich fehlt für einen Spieler der direkte `logout_at`-Write
+    /// (permanent): beide Fehlerklassen werden **getrennt** gezählt, derselbe
+    /// Spieler wird **nicht doppelt** in die Sicherheitsentscheidung gezählt.
+    #[tokio::test]
+    async fn p26_failed_forced_save_is_counted_and_reaches_the_exit_decision() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["1001", "1002", "1003"]).await;
+        let (persist, _dir, _guard) = p26_runtime_without_spool_dir();
+        let online = vec!["1001".to_string(), "1002".to_string(), "1003".to_string()];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let make_write = move |id: &str| -> DisconnectLogout {
+            let id = id.to_string();
+            let c = c2.clone();
+            Box::new(move |_ts: i64| {
+                let c = c.clone();
+                let id = id.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if id == "1001" {
+                        Err("db down".into())
+                    } else {
+                        Ok(())
+                    }
+                }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let report = shutdown_logout_phase(
+            &persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            5,
+            "ein einzelner Fehler darf die übrigen Spieler nicht überspringen: \
+             3 Versuche für '1001' (begrenzter Retry) + je 1 für '1002'/'1003'"
+        );
+        assert_eq!(
+            report.spool_failed, 3,
+            "alle drei Saves sind nicht bestätigt gesichert"
+        );
+        assert_eq!(report.failed, 1, "nur '1001' scheitert am logout_at-Write");
+        assert!(report.snapshot_security_failed());
+        let err = report
+            .snapshot_security_error()
+            .expect("nicht bestätigte Sicherung muss ein Fehlerergebnis liefern");
+        assert!(err.contains('3'), "Fehlermeldung nennt die Anzahl: {err}");
+        assert!(
+            err.contains("durable_snapshot_unconfirmed"),
+            "neutrale Fehlerklasse fehlt: {err}"
+        );
+        for id in ["1001", "1002", "1003"] {
+            assert!(
+                !err.contains(id),
+                "Fehlermeldung darf keinen Spielernamen nennen: {err}"
+            );
+        }
+        assert_eq!(
+            persist.status(),
+            crate::spool::PersistStatus::Degraded,
+            "der Betriebsstatus bleibt DEGRADED"
+        );
+        // Kein vorgetäuschter Erfolg: Dirty-Bits bleiben gesetzt, es existiert
+        // keine offene Batch-Datei für diese Spieler.
+        {
+            let world = ctx.shared.lock().await;
+            for id in ["1001", "1002", "1003"] {
+                assert!(
+                    !world.players[id].dirty.any(),
+                    "unbestätigter Save darf Dirty nicht bereinigen ({id})"
+                );
+            }
+        }
+        for id in ["1001", "1002", "1003"] {
+            // `Ok(Some(_))` würde einen bestätigten Batch behaupten. Bei
+            // fehlendem Spool-Verzeichnis liefert die Spool-Lesung stattdessen
+            // `Err` — beides belegt: **kein** bestätigter Batch vorhanden.
+            assert!(
+                !matches!(persist.pending_revision(id), Ok(Some(_))),
+                "es darf kein scheinbar gesicherter Batch existieren ({id})"
+            );
+        }
+    }
+
+    /// `P-26` 3. Budgetablauf, `skipped` und ein Timeout des Logout-Writes
+    /// können den forcierten Save **nicht** verhindern: Der Save liegt in der
+    /// Schleife bewusst **vor** der Skip-Entscheidung. Mit Budget 0 wird kein
+    /// einziger DB-Write gestartet (`skipped == online.len()`), der
+    /// Sicherungszähler erfasst aber trotzdem **alle** Spieler.
+    #[tokio::test]
+    async fn p26_budget_exhaustion_does_not_prevent_the_forced_save() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["a", "b", "c"]).await;
+        let (persist, _dir, _guard) = p26_runtime_without_spool_dir();
+        let online = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let make_write = move |_id: &str| -> DisconnectLogout {
+            let c = c2.clone();
+            Box::new(move |_ts: i64| {
+                let c = c.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let report = shutdown_logout_phase(
+            &persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::ZERO,
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nach Budgetablauf darf kein DB-Write starten"
+        );
+        assert_eq!(report.skipped, 3, "alle drei zählen als skipped");
+        assert!(report.budget_exhausted);
+        assert_eq!(
+            report.spool_failed, 3,
+            "der forcierte Save läuft unabhängig vom Budget für alle Spieler"
+        );
+        assert!(report.snapshot_security_failed());
+    }
+
+    /// `P-26` 4. Gescheiterter `logout_at`-Write bei **erfolgreicher**
+    /// Snapshot-Sicherung ist **kein** ungesicherter Spielerzustand:
+    /// `logout_at` gehört nicht zum Snapshot (§23), der Snapshot liegt
+    /// dauerhaft im Spool und wird bei der Start-Recovery angewendet (§30).
+    /// Der Shutdown darf hier als erfolgreich gemeldet werden.
+    #[tokio::test]
+    async fn p26_logout_failure_alone_is_no_unsecured_player_state() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["dead", "recovered", "ok"]).await;
+        let online = vec![
+            "dead".to_string(),
+            "recovered".to_string(),
+            "ok".to_string(),
+        ];
+        let recovered_once = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let r2 = recovered_once.clone();
+        let make_write = move |id: &str| -> DisconnectLogout {
+            let id = id.to_string();
+            let r = r2.clone();
+            Box::new(move |_ts: i64| {
+                let r = r.clone();
+                let id = id.clone();
+                Box::pin(async move {
+                    match id.as_str() {
+                        "dead" => Err("db down".into()),
+                        "recovered" => {
+                            if r.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                                Err("einmalig".into())
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        _ => Ok(()),
+                    }
+                }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let report = shutdown_logout_phase(
+            &ctx.persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(report.failed, 1, "nur 'dead' bleibt fehlgeschlagen");
+        assert_eq!(
+            report.retried, 2,
+            "'dead' und 'recovered' brauchten jeweils mindestens einen Retry"
+        );
+        assert_eq!(
+            report.spool_failed, 0,
+            "der Snapshot wurde für alle drei Spieler gesichert"
+        );
+        assert!(
+            !report.snapshot_security_failed(),
+            "logout_at-Fehler ist kein ungesicherter Snapshot"
+        );
+        assert_eq!(report.snapshot_security_error(), None);
+        // §41 Fall 2: Die Zustände bleiben lokal für die spätere Recovery
+        // erhalten — jeder Spieler hat einen offenen Batch.
+        for id in ["dead", "recovered", "ok"] {
+            assert!(
+                matches!(ctx.persist.pending_revision(id), Ok(Some(1))),
+                "Batch von {id} bleibt für die Recovery erhalten"
+            );
+        }
+    }
+
+    /// `P-26` 5. Kein Fehlalarm: Ein Charakter, der zum Zeitpunkt des Flush
+    /// nicht mehr in `world.players` steht, wurde zuvor bereits durch seinen
+    /// Disconnect-Save dauerhaft gesichert (der Disconnect entfernt einen
+    /// Player nur nach erfolgreichem Flush). `persist_dirty_into` liefert für
+    /// ihn `Ok(())`; daraus darf **kein** Fehlerergebnis entstehen.
+    #[tokio::test]
+    async fn p26_player_removed_after_disconnect_is_not_an_unsecured_state() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["live"]).await;
+        // "gone" ist bewusst **nicht** in der World.
+        let online = vec!["gone".to_string(), "live".to_string()];
+        let make_write = |_id: &str| -> DisconnectLogout {
+            Box::new(|_ts: i64| {
+                Box::pin(async { Ok(()) }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let report = shutdown_logout_phase(
+            &ctx.persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(
+            report.spool_failed, 0,
+            "ein bereits gesicherter, abwesender Charakter ist kein Fehlerfall"
+        );
+        assert_eq!(report.snapshot_security_error(), None);
+        assert!(matches!(ctx.persist.pending_revision("live"), Ok(Some(1))));
+    }
+
+    /// `P-26` 6. Die Abschlussentscheidung selbst: Nur `spool_failed` erzeugt
+    /// ein Fehlerergebnis. Reine Zählerentscheidung ohne DB und ohne Spool —
+    /// sie ist die Produktionsfunktion, die `main.rs` nach dem Cleanup auswertet.
+    #[test]
+    fn p26_snapshot_security_decision_uses_only_the_forced_save_counter() {
+        let base = ShutdownLogoutReport {
+            retried: 0,
+            failed: 0,
+            skipped: 0,
+            budget_exhausted: false,
+            spool_failed: 0,
+        };
+        assert!(!base.snapshot_security_failed());
+        assert_eq!(base.snapshot_security_error(), None);
+        // Reiner `logout_at`-Fehler und reines Budgetüberschreiten ändern die
+        // Sicherungsaussage nicht.
+        let logout_only = ShutdownLogoutReport {
+            retried: 4,
+            failed: 3,
+            skipped: 2,
+            budget_exhausted: true,
+            spool_failed: 0,
+        };
+        assert!(!logout_only.snapshot_security_failed());
+        assert_eq!(logout_only.snapshot_security_error(), None);
+        // Ein einziger nicht bestätigter Save genügt.
+        let unconfirmed = ShutdownLogoutReport {
+            spool_failed: 1,
+            ..base
+        };
+        assert!(unconfirmed.snapshot_security_failed());
+        let err = unconfirmed
+            .snapshot_security_error()
+            .expect("ein nicht bestätigter Save muss ein Fehlerergebnis liefern");
+        assert!(err.contains('1'), "Anzahl fehlt: {err}");
+        assert!(err.contains("durable_snapshot_unconfirmed"), "{err}");
+    }
+
+    /// `P-26` 7. Der Zähler ist **nicht** klebrig: Nach repariertem Spool
+    /// sinkt er wieder auf 0, und derselbe Produktionspfad liefert kein
+    /// Fehlerergebnis mehr. Damit ist belegt, dass die Entscheidung den
+    /// tatsächlichen Sicherungsstand des jeweiligen Laufs beschreibt.
+    #[tokio::test]
+    async fn p26_counting_reflects_the_actual_save_result() {
+        let ctx = test_ctx().await;
+        insert_players(&ctx.shared, &["a"]).await;
+        let online = vec!["a".to_string()];
+        let make_write = |_id: &str| -> DisconnectLogout {
+            Box::new(|_ts: i64| {
+                Box::pin(async { Ok(()) }) as BoxFuture<'static, Result<(), String>>
+            })
+        };
+        let (persist, dir, _guard) = p26_runtime_without_spool_dir();
+        let failed = shutdown_logout_phase(
+            &persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(failed.spool_failed, 1);
+        assert!(failed.snapshot_security_failed());
+        // Spool-Verzeichnis wiederherstellen: derselbe Produktionspfad meldet
+        // jetzt eine bestätigte Sicherung.
+        std::fs::create_dir_all(dir.join("spool")).unwrap();
+        let ok = shutdown_logout_phase(
+            &persist,
+            &ctx.shared,
+            &online,
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(ok.spool_failed, 0, "nach repariertem Spool kein Fehler");
+        assert!(!ok.snapshot_security_failed());
+        assert_eq!(ok.snapshot_security_error(), None);
     }
 
     /// Registriert einen RAM-Player **mit** Owner-Zuordnung (Voraussetzung für
