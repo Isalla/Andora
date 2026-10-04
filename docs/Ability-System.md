@@ -47,8 +47,13 @@ Für Cast-Fähigkeiten gilt:
 
 **Persistenz von Cooldowns:**
 
-* Persistente bzw. lange Cooldowns bleiben serverseitig über Tod und Logout hinweg bestehen und laufen weiter.
-* Normale kurze Kampffähigkeiten dürfen beim entsprechenden Tod bzw. Combat-Reset (Evade/Return, Boss-Reset) zurückgesetzt werden.
+* **Verbindlich umgesetzt (`P-18`):** Alle **laufenden Spieler-Ability-Cooldowns** bleiben über **Logout, Disconnect und Reconnect** hinweg bestehen. Sie werden als **absolute Ablaufzeitpunkte** auf Basis der bestehenden Server-Uhr gespeichert und gehören zur Persistenzkomponente `Progression` (docs/Player_Persistenz.md Abschnitt 23). Vollständige Regel, Zeitdarstellung, Altformat- und Crash-Grenze dort.
+* **Offline-Zeit zählt normal auf den Ablauf an.** Ein Logout **friert** einen Cooldown **nicht** ein; die verbleibende Dauer verringert sich während der Offline-Zeit wie während der Online-Zeit. Ein bereits abgelaufener Ablaufzeitpunkt gibt die Fähigkeit beim Login sofort frei.
+* **Millisekunden-Aufrundung:** Die Speicherung erfolgt in ganzen Millisekunden; ein Submillisekunden-Rest wird dabei **aufgerundet**. Die Ablaufzeit kann dadurch minimal verlängert (um weniger als eine Millisekunde), aber **nie verkürzt** werden — ein Cooldown läuft also nie vorzeitig ab.
+* **Uhrsprünge:** Die bestehende Wall-Clock-Semantik bleibt bestehen. Ein Uhrsprung **kann** die verbleibende Dauer verändern (Rückstellung verlängert, Vorstellung verkürzt). Das ist eine bewusst übernommene Eigenschaft der Zeitbasis.
+* **Tod — allein `cooldown_persistent` entscheidet:** Beim Tod bleiben **ausschließlich** die Cooldowns **markierter** Fähigkeiten (`cooldown_persistent = 1`) bestehen; die Cooldowns nicht markierter Fähigkeiten werden zurückgesetzt. Die Markierung wird aus der tatsächlichen Ability-Registry ausgewertet. Für die bestehenden Seed-Fähigkeiten ist die Markierung `0`; für sie wird daher **nicht** behauptet, dass ihr Cooldown den Tod überdauert.
+* **Realm-Neustart:** Es steht der zuletzt dauerhaft gesicherte Stand wieder zur Verfügung; eine lückenlose Crash-Garantie seit der letzten Sicherung wird **nicht** behauptet.
+* **NPCs und Monster bleiben unverändert:** Ihre Cooldowns sind reine RAM-Zustände; beim Evade/Return erfolgt weiterhin der vollständige Cooldown-Reset (Kampfsystem.md Abschnitt 20).
 
 **Mana-Progression:**
 
@@ -58,7 +63,7 @@ Für Cast-Fähigkeiten gilt:
 
 Für NPCs und Monster gilt zusätzlich: Beim Evade/Return (Kampfsystem.md Abschnitt 20) erfolgt ein vollständiger Cooldown-Reset, wie dort verbindlich festgelegt.
 
-Die Persistenz von Cooldown-Zuständen folgt den allgemeinen Regeln für persistente Realm-Daten in `Datenbank_Architektur.md`.
+Die Persistenz von Cooldown-Zuständen folgt den allgemeinen Regeln für persistente Realm-Daten in `Datenbank_Architektur.md`; für die konkrete Umsetzung ist Abschnitt 2 („Persistenz von Cooldowns") in diesem Dokument und `docs/Player_Persistenz.md` Abschnitt 23 maßgeblich.
 
 ---
 

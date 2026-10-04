@@ -588,6 +588,38 @@ pub(crate) async fn write_character_abilities(
     Ok(())
 }
 
+/// `P-18`: Persistierte Ablaufzeitpunkte der laufenden Ability-Cooldowns in
+/// einer laufenden Transaktion **vollständig ersetzen** (docs §23).
+///
+/// Modell wie `write_character_abilities`: der Bestand des Charakters wird
+/// gelöscht und die Map neu geschrieben. Eine bewusst leere Map entfernt
+/// damit zuvor gespeicherte Cooldowns, sodass sie beim nächsten Laden nicht
+/// wieder erscheinen. Fehler bleiben hart: der Drain bricht ab, das alte
+/// Batch bleibt liegen.
+pub(crate) async fn write_character_cooldowns(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    cooldowns: &std::collections::BTreeMap<String, i64>,
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM character_cooldowns WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveCooldowns {char_id} (delete): {e}"))?;
+    for (ability_id, ready_at_ms) in cooldowns {
+        sqlx::query(
+            "INSERT INTO character_cooldowns (char_id, ability_id, ready_at_ms) VALUES (?, ?, ?)",
+        )
+        .bind(char_id)
+        .bind(ability_id)
+        .bind(*ready_at_ms)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("saveCooldowns {char_id} (insert {ability_id}): {e}"))?;
+    }
+    Ok(())
+}
+
 /// Interne Transaktionshilfe: persistierte Persistenz-Revision eines
 /// Charakters in einer laufenden Transaktion setzen (docs §29).
 pub(crate) async fn write_persist_revision(
@@ -942,6 +974,33 @@ pub async fn load_character_abilities(
             .await
             .map_err(|e| format!("Charakter-Fähigkeiten laden: {e}"))?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// `P-18`: Persistierte Ablaufzeitpunkte der laufenden Ability-Cooldowns eines
+/// Charakters laden (`ability_id` → `SystemTime`).
+///
+/// Die Umrechnung der persistierten Einheit (Epoch-Millisekunden) erfolgt hier
+/// über `crate::combat::cooldowns::from_epoch_ms`; ein nicht darstellbarer
+/// oder veralteter Zeitpunkt ergibt „bereits abgelaufen" und sperrt **keine**
+/// Fähigkeit dauerhaft.
+///
+/// Der Fehler wird **nicht** verschluckt: der Login-Pfad behandelt ihn
+/// fail-closed, weil ein stilles Behandeln als „keine Cooldowns" laufende
+/// Cooldowns zurücksetzen würde.
+pub async fn load_character_cooldowns(
+    pool: &Pool<MySql>,
+    char_id: &str,
+) -> Result<std::collections::BTreeMap<String, std::time::SystemTime>, String> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT ability_id, ready_at_ms FROM character_cooldowns WHERE char_id = ?")
+            .bind(char_id)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Charakter-Cooldowns laden: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, ready_at_ms)| (id, crate::combat::cooldowns::from_epoch_ms(ready_at_ms)))
+        .collect())
 }
 
 /// Persistiert die permanente Klassenwahl (L9) sowie den Fraktions-

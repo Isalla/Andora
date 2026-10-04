@@ -426,6 +426,14 @@ pub async fn serve(
         registry.register(crate::combat::ability::build_ability_def(&row));
     }
     log::info!("{} Ability-Definitionen geladen", registry.defs.len());
+    // `P-18`: Das persistente Cooldown-Set aus der **tatsächlich** geladenen
+    // Registry in den World übernehmen. Bewusst VOR dem Binden der Listener
+    // (`bind_addrs`/`TcpListener::bind` weiter unten): damit kann noch kein
+    // Kampf stattgefunden haben, für den das Set noch fehlen würde.
+    {
+        let mut world = shared.lock().await;
+        world.persistent_cooldown_ids = registry.persistent_cooldown_ids();
+    }
     let ctx = Arc::new(Ctx {
         cfg,
         db,
@@ -3019,6 +3027,299 @@ mod tests {
             None,
             "logout_at markiert die aktive Sitzung des neuen Owners"
         );
+    }
+
+    /// `P-18`: Der **erfolgreiche** Disconnect-Save erfasst die laufenden
+    /// Cooldowns, bevor der Player entfernt wird. Geprüft wird die tatsächlich
+    /// geschriebene Spool-Datei (Drahtformat), nicht ein Mock.
+    ///
+    /// Der Spool-Drain nach MariaDB ist hier **nicht** Teil der Prüfung; es wird
+    /// ausdrücklich keine echte SQL-Ausführung behauptet.
+    #[tokio::test]
+    async fn p18_successful_disconnect_save_captures_cooldowns_before_player_removal() {
+        let ctx = test_ctx().await;
+        let ready_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        {
+            let mut world = ctx.shared.lock().await;
+            let (close_tx, _close_rx) = tokio::sync::oneshot::channel::<()>();
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            let mut p = crate::world::Player {
+                id: "hero".into(),
+                name: "hero".into(),
+                x: 11.0,
+                y: 22.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 77,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 7,
+                session_id: "sess-1".into(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 4,
+                exp: 900,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 555,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 12,
+            };
+            p.cooldowns.insert("fire_bolt".into(), ready_at);
+            p.last_activity = std::time::Instant::now();
+            world.players.insert("hero".into(), p);
+            world.by_conn.insert(7, "hero".into());
+            world.closers.insert(7, close_tx);
+        }
+        let flush_persist = ctx.persist.clone();
+        let flush_shared = ctx.shared.clone();
+        let flush: DisconnectFlush = Box::new(move || {
+            let persist = flush_persist.clone();
+            let shared = flush_shared.clone();
+            Box::pin(async move {
+                persist
+                    .persist_player_gate_held(&shared, "hero", true)
+                    .await
+            })
+        });
+        let logout: DisconnectLogout = Box::new(move |_ts| Box::pin(async move { Ok(()) }));
+
+        assert!(
+            finish_owner(&ctx, 7, "hero", flush, logout).await,
+            "Eigentümer-Disconnect muss den Commit abschließen"
+        );
+
+        // Player ist nach erfolgreichem Save entfernt (unverändert).
+        {
+            let world = ctx.shared.lock().await;
+            assert!(
+                !world.players.contains_key("hero"),
+                "Nach erfolgreichem Flush wird der Player entfernt"
+            );
+        }
+
+        // Die geschriebene Spool-Datei enthält den Ablaufzeitpunkt.
+        let spool_dir = ctx.persist.spool().base_dir.join("spool");
+        let files: Vec<_> = std::fs::read_dir(&spool_dir)
+            .expect("Spool-Verzeichnis lesbar")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        assert_eq!(files.len(), 1, "genau eine Batch-Datei erwartet");
+        let raw = std::fs::read_to_string(&files[0]).expect("Batch-Datei lesbar");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("Batch ist valides JSON");
+        let cooldowns = &value["entries"][0]["cooldowns"];
+        assert_eq!(cooldowns["fire_bolt"], 1_700_000_000_123i64);
+        assert_eq!(
+            cooldowns.as_object().unwrap().len(),
+            1,
+            "nur der laufende Cooldown wird gespeichert"
+        );
+    }
+
+    /// `P-18`: Nach **fehlgeschlagenem** Disconnect-Save bleibt der Player im
+    /// autoritativen RAM (§16) und die **Cooldowns bleiben erhalten**. Der
+    /// nachfolgende Login adoptiert diesen Player — ein aus einer DB-Zeile
+    /// gebauter Kandidat (leere Cooldown-Map) darf ihn nicht ersetzen.
+    ///
+    /// **Grenze der Aussage:** Geprüft wird der RAM-Übernahmepfad
+    /// (`commit_login` → `Adopted`) nach einem **fehlgeschlagenen** Save. Das ist
+    /// **kein** DB-/Login-Roundtrip: die Cooldowns werden hier bewusst **nicht**
+    /// über die Datenbank geladen. Der Roundtrip über `character_cooldowns`
+    /// (Snapshot → Drain → `load_character_cooldowns` → Kandidat) ist damit
+    /// **nicht** abgedeckt und bleibt von der echten MariaDB-Integration abhängig.
+    #[tokio::test]
+    async fn p18_failed_disconnect_save_keeps_cooldowns_and_ram_adoption_keeps_them() {
+        let ctx = test_ctx().await;
+        let ready_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_500);
+        {
+            let mut world = ctx.shared.lock().await;
+            let (close_tx, _close_rx) = tokio::sync::oneshot::channel::<()>();
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            let mut p = crate::world::Player {
+                id: "hero".into(),
+                name: "hero".into(),
+                x: 11.0,
+                y: 22.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 77,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 7,
+                session_id: "sess-1".into(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 4,
+                exp: 900,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 555,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 12,
+            };
+            p.cooldowns.insert("fire_bolt".into(), ready_at);
+            p.mark_dirty(crate::persist::PersistComponent::Progression);
+            world.players.insert("hero".into(), p);
+            world.by_conn.insert(7, "hero".into());
+            world.closers.insert(7, close_tx);
+        }
+        // Spool-Verzeichnis unbenutzbar machen: der Save schlägt fehl.
+        let spool_dir = ctx.persist.spool().base_dir.join("spool");
+        let _ = std::fs::remove_dir_all(&spool_dir);
+        let _ = std::fs::write(&spool_dir, "kein verzeichnis");
+        let flush_persist = ctx.persist.clone();
+        let flush_shared = ctx.shared.clone();
+        let flush: DisconnectFlush = Box::new(move || {
+            let persist = flush_persist.clone();
+            let shared = flush_shared.clone();
+            Box::pin(async move {
+                persist
+                    .persist_player_gate_held(&shared, "hero", true)
+                    .await
+            })
+        });
+        let logout: DisconnectLogout = Box::new(move |_ts| Box::pin(async move { Ok(()) }));
+        assert!(finish_owner(&ctx, 7, "hero", flush, logout).await);
+
+        // §16: Player bleibt im RAM — **mit** seinen Cooldowns.
+        {
+            let world = ctx.shared.lock().await;
+            let p = world.players.get("hero").expect("Player bleibt im RAM");
+            assert_eq!(
+                p.cooldowns.get("fire_bolt").copied(),
+                Some(ready_at),
+                "Cooldown bleibt im autoritativen RAM erhalten"
+            );
+        }
+
+        // Der Login übernimmt denselben RAM-Player (`Adopted`).
+        let gate = ctx.persist.player_gate("hero").await;
+        let _g = gate.lock_owned().await;
+        let (new_tx, _new_rx) = mpsc::unbounded_channel();
+        let candidate = crate::world::Player {
+            id: "hero".into(),
+            name: "hero".into(),
+            x: 0.0,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 1,
+            max_hp: 1,
+            lang: "de".into(),
+            account_id: 7,
+            session_id: "sess-2".into(),
+            entities: Default::default(),
+            last_activity: std::time::Instant::now(),
+            tx: new_tx.clone(),
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            armor: 0,
+            weapon_skill: 1,
+            combat: None,
+            mana: 1,
+            max_mana: 1,
+            effects: Vec::new(),
+            // Der Kandidat aus der DB-Zeile hätte **keine** Cooldowns.
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: Default::default(),
+            attributes: Default::default(),
+            max_hp_base: 1,
+            max_mana_base: 1,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: Default::default(),
+            quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
+            persist_revision: 99,
+        };
+        {
+            let mut world = ctx.shared.lock().await;
+            let outcome = crate::world::commit_login(
+                &mut world,
+                8,
+                candidate,
+                crate::world::ConnectionFields {
+                    tx: new_tx,
+                    session_id: "sess-2".into(),
+                    lang: "de".into(),
+                },
+            )
+            .expect("RAM-Player wird übernommen");
+            assert_eq!(outcome, crate::world::CommitOutcome::Adopted);
+            let p = &world.players["hero"];
+            assert_eq!(
+                p.cooldowns.get("fire_bolt").copied(),
+                Some(ready_at),
+                "Adoption darf die Cooldowns nicht leeren"
+            );
+            assert_eq!(p.persist_revision, 12, "RAM-Revision bleibt maßgeblich");
+        }
     }
 
     /// AUTH-03 (Login nach fehlgeschlagenem Disconnect-Flush, Teil 1): Der

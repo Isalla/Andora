@@ -409,7 +409,7 @@ Das **Ability-System** (Konzept: `Ability-System.md` §§1–16) ist als Combat 
 Umsetzungsstand in Kürze:
 
 * **Ausführungsarten:** `instant` und `cast` (mit `cast_time_ms`); `channel` verhält sich vorläufig wie `cast`.
-* **Ressourcen/Cooldown:** Mana wird beim Cast-Start abgezogen, Cooldown startet erst nach erfolgreicher Ausführung, keine Manarückgabe bei Unterbrechung, kein globaler Cooldown. Persistente Cooldowns (`cooldown_persistent`) sind über die Schnittstelle vorbereitet; die Füllung des persistenten Sets bei Tod/Logout folgt später (`on_death`-TODO).
+* **Ressourcen/Cooldown:** Mana wird beim Cast-Start abgezogen, Cooldown startet erst nach erfolgreicher Ausführung, keine Manarückgabe bei Unterbrechung, kein globaler Cooldown. Spieler-Ability-Cooldowns werden als absolute Ablaufzeitpunkte persistiert und bleiben über Logout/Reconnect erhalten (`P-18`, umgesetzt; `docs/Player_Persistenz.md` Abschnitt 23, `Ability-System.md` Abschnitt 2). Das persistente Set beim Tod wird aus der tatsächlichen Ability-Registry ausgewertet; das zuvor offene `on_death`-TODO ist damit erledigt. NPC-Cooldowns bleiben RAM-Zustand mit vollständigem Reset bei Evade/Return.
 * **Cast-Unterbrechung:** durch Bewegung, Stun, Silence, Tod, Reichweiten- oder Sichtlinien-Verlust; Stun/Silence/Root blockieren Cast-Start bzw. Bewegung über das Effektmodell.
 * **Effekte:** Buffs/Debuffs/Stun/Silence/Root/Slow mit Gruppenlogik (gleiche Gruppe ersetzt, unterschiedliche parallel), DoT/HoT mit Tick-Intervall (`tick_ms`, `next_tick_at`), Entfernung aller Effekte beim Tod; Waffen-Effekte folgen der Quelle-Sichtweise.
 * **AoE:** `single`, `target_radius`, `caster_radius`, `ground`; Zielauswahl über die Welt, kein künstliches Ziellimit.

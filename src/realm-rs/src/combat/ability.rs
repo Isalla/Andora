@@ -10,7 +10,7 @@
 //   - Kein separates System (§15)
 //   - Realm bleibt autoritativ
 //   - Content-Werte aus ability_definitions (Vorläufig, Lua-Replace later)
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::aoe::{self, AoeType};
@@ -77,6 +77,20 @@ impl AbilityRegistry {
 
     pub fn register(&mut self, def: AbilityDef) {
         self.defs.insert(def.id.clone(), def);
+    }
+
+    /// `P-18`: IDs aller **markierten** Fähigkeiten (`cooldown_persistent = 1`).
+    ///
+    /// Das ist die belegte Quelle für die Todes-Regel: markierte Cooldowns
+    /// überdauern den Tod, alle anderen werden zurückgesetzt. Es wird **kein**
+    /// konstanter Leer-Set verwendet; die Markierung kommt aus der tatsächlich
+    /// geladenen Definition (Migration 010, Spalte `cooldown_persistent`).
+    pub fn persistent_cooldown_ids(&self) -> std::collections::HashSet<String> {
+        self.defs
+            .values()
+            .filter(|d| d.cooldown_persistent)
+            .map(|d| d.id.clone())
+            .collect()
     }
 }
 
@@ -345,13 +359,21 @@ fn execute_instant(
     );
 
     // Cooldown starten
+    //
+    // `P-18`: Nur ein **tatsächlich** veränderter Ablaufzeitpunkt ist eine
+    // Zustandsänderung und markiert `Progression` (damit auch die Generation
+    // fortgeschrieben wird, §15). Ein Start, der den gespeicherten Zustand
+    // nicht verändert, markiert nicht.
     if let Some(player) = world.players.get_mut(caster_id) {
-        cooldowns::start(
+        let changed = cooldowns::start(
             &mut player.cooldowns,
             def.id.clone(),
             def.cooldown_ms,
             wall_now,
         );
+        if changed {
+            player.mark_dirty(crate::persist::PersistComponent::Progression);
+        }
     }
 
     // Effekte auf Ziele anwenden
@@ -711,13 +733,16 @@ pub fn ability_tick(
         // Fähigkeit erfolgreich ausgeführt
         if let Some(player) = world.players.get_mut(&caster_id) {
             player.active_cast = None;
-            // Cooldown starten
-            cooldowns::start(
+            // Cooldown starten — `P-18`: dirty nur bei tatsächlicher Änderung.
+            let changed = cooldowns::start(
                 &mut player.cooldowns,
                 def.id.clone(),
                 def.cooldown_ms,
                 wall_now,
             );
+            if changed {
+                player.mark_dirty(crate::persist::PersistComponent::Progression);
+            }
         }
 
         let caster_x = world.players.get(&caster_id).map(|p| p.x).unwrap_or(0.0);
@@ -960,14 +985,22 @@ pub(crate) fn broadcast_combat_event(
 /// Aufräumen bei Tod einer Entität (Ability-System.md §6, §20).
 pub fn on_death(world: &mut World, entity_id: &str, is_player: bool) {
     if is_player {
+        // `P-18`: Das persistente Set stammt aus der tatsächlich geladenen
+        // Ability-Registry (`World::persistent_cooldown_ids`, gefüllt beim Start
+        // des Spielerservers) — nicht mehr aus einem konstanten Leer-Set.
+        // Vor dem mutativen Zugriff klonen (Borrow-Regel).
+        let persistent = world.persistent_cooldown_ids.clone();
         if let Some(player) = world.players.get_mut(entity_id) {
             // Alle aktiven Buffs/Debuffs entfernen
             effects::clear_all(&mut player.effects);
             // Cast abbrechen
             player.active_cast = None;
-            // Nicht-persistenten Cooldowns zurücksetzen
-            let persistent: HashSet<String> = HashSet::new(); //TODO: aus Registry
-            cooldowns::reset_non_persistent(&mut player.cooldowns, &persistent);
+            // Nicht-persistenten Cooldowns zurücksetzen; `P-18`: entfernte
+            // Cooldowns verändern die persistierte Map und markieren deshalb
+            // dirty (Progression + Generation, §15).
+            if cooldowns::reset_non_persistent(&mut player.cooldowns, &persistent) {
+                player.mark_dirty(crate::persist::PersistComponent::Progression);
+            }
         }
     } else {
         if let Some(npc) = world.npcs.get_mut(entity_id) {
@@ -1284,6 +1317,229 @@ mod tests {
                 false
             }
         }));
+    }
+
+    // ── P-18: Cooldown-Start markiert dirty, Todesregel über echte Registry ──
+
+    /// `P-18`: Ein Cooldown-Start ist eine Zustandsänderung und markiert
+    /// `Progression` — über den **echten** Produktionspfad `start_ability`.
+    /// Zusätzlich muss die Persistenzgeneration fortgeschrieben werden (§15),
+    /// sonst wäre ein während des Writes entstehender neuerer RAM-Zustand nicht
+    /// geschützt.
+    #[test]
+    fn p18_cooldown_start_marks_progression_dirty_and_bumps_generation() {
+        use crate::persist::PersistComponent;
+        // Mana-freie Fähigkeit: damit ist der Cooldown-Start die **einzige**
+        // Zustandsänderung des Aufrufs. (Ein Manakosten-Abzug markiert
+        // zusätzlich `Resources` und ist nicht Gegenstand dieser Zusage.)
+        let def = AbilityDef {
+            id: "free_bolt".into(),
+            mana_cost: 0,
+            cooldown_ms: 2000,
+            ..fire_bolt_def()
+        };
+        let (mut w, reg) = make_world_with_ability(def);
+
+        {
+            let p = &w.players["a"];
+            assert!(
+                !p.dirty.any(),
+                "Vorbedingung: Spieler startet ohne Dirty-State"
+            );
+            assert_eq!(p.persist_generation, 0, "Vorbedingung: Generation 0");
+        }
+
+        let events = start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "free_bolt",
+            Some("npc_1"),
+            None,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                CombatEvent::AbilityResult {
+                    outcome: AbilityOutcome::Succeeded,
+                    ..
+                }
+            )),
+            "Fähigkeit muss erfolgreich ausgeführt worden sein"
+        );
+
+        let p = &w.players["a"];
+        assert!(
+            p.dirty.is_dirty(PersistComponent::Progression),
+            "Cooldown-Start muss Progression dirty markieren"
+        );
+        // Der Mana-Pfad (`ability.rs`, Schritt 7) markiert `Resources`
+        // unabhängig vom Manakostwert und schreibt damit **ebenfalls** die
+        // Generation fort. Der Cooldown-Beitrag ist deshalb über die Komponente
+        // `Progression` belegt (siehe auch der Gegen-Test mit `cooldown_ms = 0`).
+        assert!(
+            p.persist_generation >= 1,
+            "Cooldown-Start muss die Generation fortschreiben, war: {}",
+            p.persist_generation
+        );
+        assert!(
+            p.cooldowns.contains_key("free_bolt"),
+            "Cooldown muss im RAM gesetzt sein"
+        );
+    }
+
+    /// `P-18`: Ein Fähigkeitsaufruf, der den gespeicherten Cooldown-Zustand
+    /// **nicht** verändert (`cooldown_ms = 0`), markiert `Progression` **nicht**.
+    /// Damit ist belegt, dass die Dirty-Markierung an einer tatsächlichen
+    /// Änderung hängt und nicht an jedem Aufruf.
+    #[test]
+    fn p18_cast_without_cooldown_does_not_mark_progression_dirty() {
+        use crate::persist::PersistComponent;
+        let def = AbilityDef {
+            id: "free_no_cooldown".into(),
+            mana_cost: 0,
+            cooldown_ms: 0,
+            ..fire_bolt_def()
+        };
+        let (mut w, reg) = make_world_with_ability(def);
+
+        start_ability(
+            &mut w,
+            &reg,
+            "a",
+            "free_no_cooldown",
+            Some("npc_1"),
+            None,
+            None,
+            Instant::now(),
+            SystemTime::now(),
+        );
+
+        let p = &w.players["a"];
+        assert!(
+            p.cooldowns.is_empty(),
+            "Ohne Cooldown wird kein Eintrag gesetzt"
+        );
+        assert!(
+            !p.dirty.is_dirty(PersistComponent::Progression),
+            "Ohne Cooldown-Änderung darf Progression nicht dirty werden"
+        );
+    }
+
+    /// `P-18`: Beim Tod bleiben **ausschließlich** markierte Cooldowns bestehen;
+    /// nicht markierte werden entfernt. Das persistente Set stammt aus der
+    /// tatsächlichen Registry-Auswertung (`AbilityRegistry::persistent_cooldown_ids`),
+    /// nicht aus einem konstanten Leer-Set.
+    #[test]
+    fn p18_death_keeps_marked_and_removes_unmarked_cooldowns_from_real_registry() {
+        use crate::persist::PersistComponent;
+        let marked = AbilityDef {
+            id: "choke_persistent".into(),
+            cooldown_ms: 12_000,
+            cooldown_persistent: true,
+            ..fire_bolt_def()
+        };
+        let unmarked = AbilityDef {
+            id: "fire_bolt".into(),
+            cooldown_ms: 2_000,
+            cooldown_persistent: false,
+            ..fire_bolt_def()
+        };
+        let mut reg = AbilityRegistry::new();
+        reg.register(marked);
+        reg.register(unmarked);
+
+        // Das Set exakt so setzen, wie es der Spielerserver beim Start tut.
+        let persistent_ids = reg.persistent_cooldown_ids();
+        assert_eq!(
+            persistent_ids.len(),
+            1,
+            "Genau eine der beiden Fähigkeiten ist markiert"
+        );
+        assert!(persistent_ids.contains("choke_persistent"));
+
+        let mut w = World::new();
+        let mut caster = make_player("a", 100, 50);
+        let wall = SystemTime::now();
+        cooldowns::start(
+            &mut caster.cooldowns,
+            "choke_persistent".into(),
+            12_000,
+            wall,
+        );
+        cooldowns::start(&mut caster.cooldowns, "fire_bolt".into(), 2_000, wall);
+        w.players.insert("a".into(), caster);
+        w.persistent_cooldown_ids = persistent_ids;
+
+        on_death(&mut w, "a", true);
+
+        let p = &w.players["a"];
+        assert!(
+            p.cooldowns.contains_key("choke_persistent"),
+            "Markierter Cooldown muss den Tod überdauern"
+        );
+        assert!(
+            !p.cooldowns.contains_key("fire_bolt"),
+            "Nicht markierter Cooldown muss beim Tod entfernt werden"
+        );
+        assert!(
+            p.active_cast.is_none(),
+            "Cast wird beim Tod abgebrochen (unverändert)"
+        );
+        assert!(
+            p.effects.is_empty(),
+            "Effekte werden beim Tod entfernt (unverändert)"
+        );
+        assert!(
+            p.dirty.is_dirty(PersistComponent::Progression),
+            "Das Entfernen nichtpersistenter Cooldowns verändert die persistierte Map und markiert dirty"
+        );
+    }
+
+    /// `P-18`: Ein leeres persistentes Set (z. B. vor dem Start des
+    /// Spielerservers) darf **keinen** Cooldown den Tod überdauern lassen —
+    /// die sichere Richtung, weil die Seed-Fähigkeiten ohne Markierung
+    /// ausgeliefert werden.
+    #[test]
+    fn p18_death_without_registry_set_removes_all_cooldowns() {
+        let (mut w, _reg) = make_world_with_ability(fire_bolt_def());
+        let wall = SystemTime::now();
+        cooldowns::start(
+            &mut w.players.get_mut("a").unwrap().cooldowns,
+            "fire_bolt".into(),
+            2_000,
+            wall,
+        );
+        assert!(w.persistent_cooldown_ids.is_empty());
+
+        on_death(&mut w, "a", true);
+
+        assert!(
+            w.players["a"].cooldowns.is_empty(),
+            "Ohne belegtes Set wird kein Cooldown beibehalten"
+        );
+    }
+
+    /// `P-18`: NPC-Cooldowns bleiben unverändert RAM-Zustand und werden beim
+    /// Tod vollständig zurückgesetzt (kein Persistenz-Umweg).
+    #[test]
+    fn p18_npc_death_still_resets_all_cooldowns() {
+        let (mut w, _reg) = make_world_with_ability(fire_bolt_def());
+        let wall = SystemTime::now();
+        cooldowns::start(
+            &mut w.npcs.get_mut("npc_1").unwrap().cooldowns,
+            "fire_bolt".into(),
+            2_000,
+            wall,
+        );
+        on_death(&mut w, "npc_1", false);
+        assert!(
+            w.npcs["npc_1"].cooldowns.is_empty(),
+            "NPC-Cooldowns werden beim Tod vollständig zurückgesetzt"
+        );
     }
 
     #[test]

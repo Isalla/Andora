@@ -202,6 +202,18 @@ pub struct World {
     /// dauerhafte IP-Protokollierung mit Löschfrist ist ein eigener
     /// Auftrag (AUTH-03B) und braucht einen freigegebenen Log-Sink.
     pub peer_addrs: HashMap<u64, String>,
+    /// `P-18`: Ability-IDs mit `cooldown_persistent = 1`, aus der **tatsächlich
+    /// geladenen** Ability-Registry. Bestimmt ausschließlich, welche
+    /// Cooldowns den **Tod** überdauern; alle anderen werden beim Tod
+    /// zurückgesetzt (docs/Player_Persistenz.md §23).
+    ///
+    /// Gefüllt wird das Set beim Start des WebSocket-Spielers, unmittelbar nach
+    /// dem Laden der Fähigkeitsdefinitionen und damit **vor** dem Binden der
+    /// Listener — zu diesem Zeitpunkt kann noch kein Kampf stattgefunden haben.
+    /// Solange das Set leer ist, überdauert **kein** Cooldown den Tod; das ist
+    /// die sichere Richtung, weil die Seed-Fähigkeiten ohnehin ohne Markierung
+    /// ausgeliefert werden.
+    pub persistent_cooldown_ids: HashSet<String>,
     pub tick: TickStat,
     pub started: Instant,
 }
@@ -218,6 +230,7 @@ impl World {
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             peer_addrs: HashMap::new(),
+            persistent_cooldown_ids: HashSet::new(),
             tick: TickStat::default(),
             started: Instant::now(),
         }

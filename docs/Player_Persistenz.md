@@ -570,6 +570,7 @@ Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** d
 * persistenter Zustand der Fraktionswahl/-zugehörigkeit (`faction_transition`)
 * dauerhaft trainierte Weapon Skills
 * dauerhaft erlernte / freigeschaltete Abilities
+* laufende Ability-Cooldowns als **Ablaufzeitpunkte** (verbindlich geregelt in „Cooldowns im Player-Snapshot" unten)
 
 **Idia als absoluter Gesamtbestand:**
 
@@ -611,7 +612,7 @@ Die fünf Dirty-Komponenten des Abschnitts 6 sind festgelegt wie folgt. Die Zuor
 | Komponente | Zugeordnete Snapshot-Zustände |
 |---|---|
 | `Position` | `x`, `y` |
-| `Progression` | `level`, `exp`, `free_attr_points`, `rested_pool`, `attributes` sowie `char_class`, `faction_transition`, `weapon_skill`, `learned_abilities` |
+| `Progression` | `level`, `exp`, `free_attr_points`, `rested_pool`, `attributes` sowie `char_class`, `faction_transition`, `weapon_skill`, `learned_abilities` sowie `cooldowns` |
 | `Idia` | `idia` |
 | `Inventory` | persistenter Inventarbestand (Grundinventar, Rucksäcke/Bag-Slots, Equipment) **ohne** den Sicherheits-Puffer (Abschnitt 6) |
 | `Resources` | `hp`, `mana` |
@@ -634,6 +635,23 @@ Daraus folgt ausdrücklich:
 * Es wird hier **kein** neues Spielsystem und **keine** neue Änderungsroute implementiert. Das Fehlen eines Mutationspfades ist eine Eigenschaft des aktuellen Codeumfangs, kein offener Entscheidungspunkt.
 * Künftige Mutationspfade für diese Felder **müssen** `Player::mark_dirty(PersistComponent::Progression)` verwenden und damit zugleich die Generation fortschreiben.
 * Bis ein solcher Pfad existiert, wird für diese Felder **keine** Implementierung behauptet.
+
+**Cooldowns im Player-Snapshot (verbindlich, `P-18`):**
+
+* **Gegenstand:** ausschließlich die **laufenden Spieler-Ability-Cooldowns** (Ablaufzeitpunkt je Fähigkeit). Sie gehören zur Komponente `Progression` und damit in den normalen Player-Snapshot und in dieselbe DB-Transaktion wie der übrige Snapshot (Abschnitt 30).
+* **Gespeicherte Form:** je Fähigkeit ein **absoluter Ablaufzeitpunkt in Millisekunden seit dem Unix-Epoch** (`SystemTime` → Epoch-Millisekunden). Die bestehende Server-Uhr (Wall-Clock) bleibt die Zeitbasis; es wird **keine** zweite Zeitquelle und **keine** monotone Zeitbasis eingeführt. Die Konvertierung in beide Richtungen ist überprüft und behandelt Werte vor dem Epoch sowie nicht darstellbare Zeitpunkte als „bereits abgelaufen".
+* **Aufrundung auf ganze Millisekunden:** Beim Speichern wird ein vorhandener **Submillisekunden-Rest aufgerundet**, nicht abgeschnitten. Ein Abschneiden würde den Ablaufzeitpunkt um bis zu 999.999 µs **vorziehen** und einen laufenden Cooldown nach dem Laden zu früh freigeben. Ein **exakter** Millisekundenwert bleibt unverändert. Die Aufrundung kann den Ablauf damit **minimal verlängern** (um weniger als eine Millisekunde), aber **nie verkürzen**.
+* **Erhalt über Logout, Disconnect und Reconnect:** Laufende Cooldowns werden durch Logout und Reconnect **nicht** zurückgesetzt. Der Ablaufzeitpunkt wird beim Login geladen; ein bereits abgelaufener Ablaufzeitpunkt gibt die Fähigkeit **sofort** frei.
+* **Offline-Zeit:** zählt **normal** auf den Ablauf an. Es gibt **kein** Einfrieren von Cooldowns beim Logout; die verbleibende Dauer verringert sich während der Offline-Zeit wie während der Online-Zeit.
+* **Uhrsemantik:** Die bestehende Wall-Clock-Semantik bleibt bewusst bestehen. Ein **Uhrsprung kann die verbleibende Dauer verändern** — eine Rückstellung der Serveruhr verlängert einen Cooldown, eine Vorstellung verkürzt ihn. Das ist eine bewusst übernommene Eigenschaft der bestehenden Zeitbasis und **kein** gesonderter Fehlerpfad.
+* **Tod — allein `cooldown_persistent` entscheidet:** Beim Tod bleiben **ausschließlich** die Cooldowns **markierter** Fähigkeiten (`cooldown_persistent = 1`) bestehen; die Cooldowns **nicht** markierter Fähigkeiten werden zurückgesetzt. Das persistente Set wird aus der **tatsächlichen Ability-Registry** gebildet, nicht aus einem konstanten Leer-Set. Die vorhandene Kennzeichnung der Fähigkeiten wird **nicht** verändert: Es wird **nicht** behauptet, dass eine der bestehenden Seed-Fähigkeiten beim Tod persistent ist, solange ihr Flag `0` ist.
+* **Dirty-Pfad:** Ein **tatsächlicher** Cooldown-Start (Neusetzen oder Überschreiben eines Ablaufzeitpunkts) und das **Entfernen** nichtpersistenter Cooldowns beim Tod markieren `Progression` über `Player::mark_dirty` und schreiben damit zugleich die Generation fort. Änderungen während eines laufenden Saves bleiben dadurch über die Generationsregel (Abschnitt 15) geschützt. Ein Cooldown-Start, der den gespeicherten Zustand **nicht** verändert, markiert **nicht**.
+* **Erzwungener Speicherpunkt:** Der erzwungene Disconnect-Save (Abschnitt 11) erfasst die Cooldowns **vor** der Entfernung des Players; nach einem fehlgeschlagenen Save und erneuter Übernahme aus dem RAM (Abschnitt 16) gilt dieselbe Regel unverändert.
+* **Vollständiges Ersetzen:** Die gespeicherte Cooldown-Map wird beim Anwenden **vollständig ersetzt**. Ein neuer Snapshot mit bewusst leerer Map entfernt zuvor gespeicherte Cooldowns; sie erscheinen beim nächsten Laden nicht wieder.
+* **Altformat:** Alte Einzel- und Shared-Batch-Dateien **ohne** Cooldown-Feld bleiben lesbar und verarbeitbar. „Feld fehlt im Altformat" und „neuer Snapshot enthält bewusst eine leere Map" werden unterschieden: nur ein **vorhandenes** Feld ersetzt die gespeicherte Map; ein fehlendes Feld lässt den gespeicherten Zustand unberührt. Die Revisions-, Superseded- und Attributionsregeln (Abschnitt 29, `P-12`, `P-30`) bleiben unverändert wirksam; ein älterer Snapshot überschreibt keinen neueren bestätigten Zustand.
+* **Ladefehler:** Ist der Cooldown-Zustand nicht zuverlässig lesbar, wird der Einstieg **fail-closed** abgelehnt. Ein stilles Behandeln als „keine Cooldowns" würde laufende Cooldowns zurücksetzen und die Zusage dieses Abschnitts aufheben.
+* **Realm-Neustart:** Nach einem Realm-Neustart steht der zuletzt **dauerhaft gesicherte** Stand wieder zur Verfügung. Eine lückenlose Crash-Garantie seit der letzten Sicherung wird **nicht** behauptet: bis zum nächsten erfolgreichen Save gilt der letzte gesicherte Stand.
+* **Ausdrücklich außerhalb (keine Änderung):** Auto-Angriff/Waffendauer, NPC-/Monster-Cooldowns, Effekt-Dauern von Buffs/Debuffs und aktive Casts bleiben unverändert RAM-/Session-Zustand. Es entsteht **keine** neue Persistenzkomponente und **keine** gesonderte Save-Infrastruktur.
 
 **Gewichtung und Flush-Priorisierung (getrennte Frage):**
 

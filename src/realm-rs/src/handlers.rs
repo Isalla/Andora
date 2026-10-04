@@ -382,6 +382,22 @@ pub async fn handle_hello(
         .into_iter()
         .map(|s| (s.quest_id.clone(), s))
         .collect();
+    // `P-18`: Laufende Ability-Cooldowns laden. Sie sind absolute Ablaufzeitpunkte
+    // und müssen Logout/Reconnect überdauern; Offline-Zeit zählt normal mit
+    // (ein abgelaufener Zeitpunkt gibt die Fähigkeit sofort frei).
+    //
+    // FAIL-CLOSED wie der Questzustand: Ein nicht zuverlässig lesbarer
+    // Cooldown-Stand darf NICHT als „der Charakter hat keine Cooldowns"
+    // behandelt werden — das würde laufende Cooldowns zurücksetzen und die
+    // Zusage aus docs/Player_Persistenz.md §23 aufheben. Daher wird der Einstieg
+    // abgelehnt statt mit leerer Map fortzusetzen.
+    let cooldowns: std::collections::BTreeMap<String, std::time::SystemTime> =
+        db::load_character_cooldowns(&ctx.db, &c.id)
+            .await
+            .map_err(|e| {
+                log::error!("HELLO load cooldowns: {e}");
+                "cooldown state unavailable"
+            })?;
     let me = Player {
         id: c.id.clone(),
         name: c.name.clone(),
@@ -417,7 +433,7 @@ pub async fn handle_hello(
         weapon_skill,
         combat: None,
         effects: Vec::new(),
-        cooldowns: std::collections::BTreeMap::new(),
+        cooldowns,
         active_cast: None,
         learned_abilities,
         attributes: attributes::Attributes {
@@ -1635,6 +1651,9 @@ mod tests {
             faction_transition: false,
             weapon_skill: 1,
             learned_abilities: vec![],
+            // `P-18`: `None` = Altformat ohne Cooldown-Feld; der Cooldown-Bestand
+            // bleibt bei diesen Fixtures unberührt.
+            cooldowns: None,
             inventory: crate::inventory::InventoryState::default(),
             generation: 0,
             dirty: crate::persist::PersistDirty::default(),

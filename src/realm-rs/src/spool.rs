@@ -1989,6 +1989,9 @@ mod tests {
             faction_transition: false,
             weapon_skill: 2,
             learned_abilities: vec!["fire_bolt".into()],
+            // `P-18`: `None` = Altformat ohne Cooldown-Feld; diese Fixtures
+            // prüfen Revision/Attribution, nicht den Cooldown-Bestand.
+            cooldowns: None,
             inventory: InventoryState::default(),
             generation: 0,
             dirty: crate::persist::PersistDirty::default(),
@@ -5526,6 +5529,146 @@ mod tests {
         assert!(s.drain_one_with(&ok_db, "ws").await.unwrap().is_some());
         assert_eq!(s.count_batches().unwrap(), 0);
         assert_eq!(ok_db.applied(), vec![("900".to_string(), 7)]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ── P-18: Cooldowns am Drain ───────────────────────────────────────────
+
+    /// Zeichnet die **vollen** Snapshots auf, die am DB-Schritt ankommen.
+    /// Damit ist belegbar, dass der Drahtinhalt bis zur Persistenzgrenze
+    /// unverändert weitergereicht wird. Es wird **keine** echte SQL-Ausführung
+    /// behauptet: der Fake-DB-Schritt ersetzt `apply_snapshot_to_db`.
+    struct RecordingDb {
+        db_rev: Option<i64>,
+        seen: Mutex<Vec<PersistSnapshot>>,
+    }
+
+    impl DrainDb for RecordingDb {
+        fn load_persist_revision<'a>(
+            &'a self,
+            _char_id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+            Box::pin(async move { Ok(self.db_rev) })
+        }
+        fn apply_snapshot<'a>(
+            &'a self,
+            snapshot: &'a PersistSnapshot,
+            _weapon_skill_id: &'a str,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            let seen = &self.seen;
+            let snapshot = snapshot.clone();
+            Box::pin(async move {
+                seen.lock().unwrap().push(snapshot);
+                Ok(())
+            })
+        }
+    }
+
+    /// `P-18`: Eine alte Batch-Datei **ohne** Cooldown-Feld bleibt lesbar und
+    /// wird normal angewendet (kein Quarantäne-Fall, kein Fehler).
+    #[tokio::test(flavor = "current_thread")]
+    async fn p18_old_format_batch_without_cooldown_field_is_still_applied() {
+        let base = temp_dir("p18alt");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+
+        let mut old = snapshot("900", 7, 1.0);
+        // Altformat: Feld fehlt vollständig.
+        old.cooldowns = None;
+        s.write_batch(&old).unwrap();
+
+        // Das geschriebene JSON enthält das Feld tatsächlich nicht.
+        let file = std::fs::read_dir(base.join("spool"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .expect("Batch-Datei geschrieben");
+        let raw = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !raw.contains("cooldowns"),
+            "Altformat-Datei darf kein Cooldown-Feld enthalten: {raw}"
+        );
+
+        let db = RecordingDb {
+            db_rev: Some(1),
+            seen: Mutex::new(Vec::new()),
+        };
+        let report = s
+            .drain_one_with(&db, "ws")
+            .await
+            .unwrap()
+            .expect("Batch verarbeitet");
+        assert_eq!(report.entries_applied, 1, "Altformat wird angewendet");
+        assert_eq!(report.batches_quarantined, 0, "kein Quarantäne-Fall");
+        assert_eq!(s.count_batches().unwrap(), 0, "Datei nach Apply entfernt");
+        assert_eq!(
+            db.seen.lock().unwrap()[0].cooldowns,
+            None,
+            "am DB-Schritt ankommt weiterhin kein Feld"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `P-18`: Ablaufzeitpunkte erreichen den DB-Schritt unverändert. Geprüft
+    /// wird außerdem die Unterscheidung: vorhandene leere Map (`Some({})`)
+    /// bewahrt einen leeren Cooldown-Zustand, fehlendes Feld (`None`) nicht.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p18_ready_at_reaches_drain_unchanged_and_empty_is_distinguishable() {
+        let base = temp_dir("p18drain");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+
+        let mut with_cd = snapshot("901", 8, 1.0);
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("fire_bolt".to_string(), 1_700_000_000_123i64);
+        map.insert("choke".to_string(), 1_700_000_060_000i64);
+        with_cd.cooldowns = Some(map);
+
+        let mut empty_cd = snapshot("902", 9, 2.0);
+        empty_cd.cooldowns = Some(std::collections::BTreeMap::new());
+
+        let mut alt_cd = snapshot("903", 10, 3.0);
+        alt_cd.cooldowns = None;
+
+        s.write_batch(&with_cd).unwrap();
+        s.write_batch(&empty_cd).unwrap();
+        s.write_batch(&alt_cd).unwrap();
+
+        let db = RecordingDb {
+            db_rev: Some(1),
+            seen: Mutex::new(Vec::new()),
+        };
+        let mut applied = 0;
+        while s.count_batches().unwrap() > 0 {
+            assert!(s.drain_one_with(&db, "ws").await.unwrap().is_some());
+            applied += 1;
+        }
+        assert_eq!(applied, 3, "alle drei Bestände verarbeitet");
+        assert_eq!(s.count_batches().unwrap(), 0);
+
+        let seen = db.seen.lock().unwrap();
+        let by_id = |id: &str| -> Option<PersistSnapshot> {
+            seen.iter().find(|x| x.player_id == id).cloned()
+        };
+
+        let a = by_id("901").expect("Snapshot 901 angewendet");
+        let cd = a.cooldowns.expect("Feld vorhanden");
+        assert_eq!(cd.len(), 2);
+        assert_eq!(cd.get("fire_bolt").copied(), Some(1_700_000_000_123));
+        assert_eq!(cd.get("choke").copied(), Some(1_700_000_060_000));
+
+        assert_eq!(
+            by_id("902").unwrap().cooldowns,
+            Some(std::collections::BTreeMap::new()),
+            "vorhandene leere Map = bewusst leerer Cooldown-Zustand"
+        );
+        assert_eq!(
+            by_id("903").unwrap().cooldowns,
+            None,
+            "fehlendes Feld = Altformat, kein Ersetzen"
+        );
+        drop(seen);
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -131,6 +131,21 @@ pub struct PersistSnapshot {
     pub faction_transition: bool,
     pub weapon_skill: u32,
     pub learned_abilities: Vec<String>,
+    /// `P-18`: Laufende Ability-Cooldowns als **absolute Ablaufzeitpunkte** in
+    /// **Millisekunden seit dem Unix-Epoch** (`ability_id` → `ready_at_ms`).
+    ///
+    /// - `Some(map)` = neuer Snapshot: die gespeicherte Map wird beim Anwenden
+    ///   **vollständig ersetzt**; `Some({})` entfernt zuvor gespeicherte
+    ///   Cooldowns bewusst.
+    /// - `None` = **Altformat**: das Feld fehlt in der Datei. Solche Dateien
+    ///   bleiben lesbar, und der gespeicherte Cooldown-Bestand bleibt dabei
+    ///   **unberührt** (es wird nichts ersetzt).
+    ///
+    /// Die Zeitbasis ist die bestehende Server-Uhr (Wall-Clock); ein
+    /// Uhrsprung kann die verbleibende Dauer verändern (docs/Player_Persistenz.md
+    /// §23 „Cooldowns im Player-Snapshot").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldowns: Option<std::collections::BTreeMap<String, i64>>,
     pub inventory: InventoryState,
     /// RAS-Steuergröße (§15), niemals serialisiert.
     #[serde(skip)]
@@ -157,6 +172,14 @@ fn build_snapshot(player: &Player, force: bool) -> Option<PersistSnapshot> {
     }
     let mut learned: Vec<String> = player.learned_abilities.iter().cloned().collect();
     learned.sort();
+    // `P-18`: Ablaufzeitpunkte in die persistierte Zeiteinheit umrechnen.
+    // `BTreeMap` ist bereits nach `ability_id` sortiert → deterministisches
+    // Drahtformat.
+    let cooldowns: std::collections::BTreeMap<String, i64> = player
+        .cooldowns
+        .iter()
+        .map(|(id, ready_at)| (id.clone(), crate::combat::cooldowns::to_epoch_ms(*ready_at)))
+        .collect();
     Some(PersistSnapshot {
         player_id: player.id.clone(),
         persist_revision: player.persist_revision.saturating_add(1),
@@ -175,6 +198,7 @@ fn build_snapshot(player: &Player, force: bool) -> Option<PersistSnapshot> {
         faction_transition: player.faction_transition,
         weapon_skill: player.weapon_skill,
         learned_abilities: learned,
+        cooldowns: Some(cooldowns),
         inventory: player.inventory.clone(),
         generation: player.persist_generation,
         dirty,
@@ -362,6 +386,12 @@ pub(crate) async fn apply_snapshot_to_db(
     crate::db::write_character_class(&mut tx, char_id, class, snapshot.faction_transition).await?;
     crate::db::write_weapon_skill(&mut tx, char_id, weapon_skill_id, snapshot.weapon_skill).await?;
     crate::db::write_character_abilities(&mut tx, char_id, &snapshot.learned_abilities).await?;
+    // `P-18`: Cooldowns gehören zum normalen Snapshot und werden in derselben
+    // Transaktion gespeichert. Nur ein **vorhandenes** Feld ersetzt den
+    // Bestand; `None` = Altformat ohne Feld und lässt ihn unberührt.
+    if let Some(cooldowns) = snapshot.cooldowns.as_ref() {
+        crate::db::write_character_cooldowns(&mut tx, char_id, cooldowns).await?;
+    }
     crate::db::write_persist_revision(&mut tx, char_id, snapshot.persist_revision).await?;
 
     tx.commit()
@@ -731,6 +761,164 @@ mod tests {
             !player.dirty.any(),
             "alle dirty Komponenten wurden zurückgesetzt (Voll-Snapshot)"
         );
+    }
+
+    // ── P-18: Cooldowns im Snapshot ────────────────────────────────────────
+
+    /// `P-18`: Laufende Cooldowns erscheinen im Snapshot als **absolute
+    /// Ablaufzeitpunkte in Epoch-Millisekunden** (persistierte Zeiteinheit).
+    #[tokio::test]
+    async fn p18_snapshot_carries_cooldowns_as_epoch_millis() {
+        use std::time::{Duration, SystemTime};
+        let shared = crate::world::new_shared();
+        let (mut p, _rx) = test_player("p");
+        let ready_at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_123);
+        p.cooldowns.insert("fire_bolt".into(), ready_at);
+        p.cooldowns.insert(
+            "choke".into(),
+            SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_060_000),
+        );
+        p.mark_dirty(PersistComponent::Progression);
+        put_player(&shared, p).await;
+
+        let (res, captured) = run_save(&shared, true).await;
+        assert!(res.is_ok());
+        let snapshot = captured.lock().unwrap().take().unwrap();
+        let map = snapshot
+            .cooldowns
+            .as_ref()
+            .expect("neuer Snapshot enthält immer ein Cooldown-Feld");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("fire_bolt").copied(), Some(1_700_000_000_123));
+        assert_eq!(map.get("choke").copied(), Some(1_700_000_060_000));
+        // Der RAM-Zustand bleibt dabei unangetastet (nur Lesezugriff).
+        let world = shared.lock().await;
+        assert_eq!(world.players["p"].cooldowns["fire_bolt"], ready_at);
+    }
+
+    /// `P-18`: Ein Spieler **ohne** laufende Cooldowns erzeugt `Some({})` —
+    /// das Feld ist bewusst vorhanden und leer. Das ist der Beleg, dass beim
+    /// Anwenden des Snapshots zuvor gespeicherte Cooldowns entfernt werden
+    /// (vollständiges Ersetzen) und nicht stillschweigend erhalten bleiben.
+    #[tokio::test]
+    async fn p18_snapshot_without_running_cooldowns_is_present_but_empty() {
+        let shared = crate::world::new_shared();
+        let (mut p, _rx) = test_player("p");
+        assert!(p.cooldowns.is_empty());
+        p.mark_dirty(PersistComponent::Progression);
+        put_player(&shared, p).await;
+
+        let (res, captured) = run_save(&shared, true).await;
+        assert!(res.is_ok());
+        let snapshot = captured.lock().unwrap().take().unwrap();
+        assert_eq!(
+            snapshot.cooldowns,
+            Some(std::collections::BTreeMap::new()),
+            "Feld vorhanden, bewusst leer"
+        );
+    }
+
+    /// `P-18`: **Altformat** — ein Snapshot ohne Cooldown-Feld bleibt lesbar und
+    /// ergibt `None`. `None` bedeutet „Feld fehlt", nicht „leere Map": beim
+    /// Anwenden wird der gespeicherte Bestand dann **nicht** ersetzt.
+    #[test]
+    fn p18_snapshot_without_cooldown_field_deserializes_as_none() {
+        // Echter Snapshot, anschließend wird **nur** das Cooldown-Feld entfernt.
+        // Das bildet eine alte Datei ab, ohne das Inventar-JSON von Hand nachzubauen.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("fire_bolt".to_string(), 1_700_000_000_000i64);
+        let current = PersistSnapshot {
+            player_id: "7".into(),
+            persist_revision: 3,
+            captured_at_ms: 1_700_000_000_000,
+            x: 1.0,
+            y: 2.0,
+            level: 5,
+            exp: 100,
+            free_attr_points: 1,
+            rested_pool: 0,
+            idia: 42,
+            hp: 80,
+            mana: 30,
+            attributes: Default::default(),
+            char_class: "Adventurer".into(),
+            faction_transition: false,
+            weapon_skill: 2,
+            learned_abilities: vec!["fire_bolt".into()],
+            cooldowns: Some(map),
+            inventory: InventoryState::default(),
+            generation: 0,
+            dirty: PersistDirty::default(),
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .expect("Snapshot ist ein Objekt")
+            .remove("cooldowns");
+
+        let altformat = serde_json::to_string(&value).unwrap();
+        assert!(
+            !altformat.contains("cooldowns"),
+            "Altformat-Datei enthält kein Cooldown-Feld"
+        );
+        let snapshot: PersistSnapshot = serde_json::from_str(&altformat)
+            .expect("Altformat ohne Cooldown-Feld muss lesbar bleiben");
+        assert_eq!(snapshot.player_id, "7");
+        assert_eq!(snapshot.persist_revision, 3);
+        assert_eq!(snapshot.learned_abilities, vec!["fire_bolt".to_string()]);
+        assert_eq!(
+            snapshot.cooldowns, None,
+            "Fehlendes Feld wird als None unterschieden, nicht als leere Map"
+        );
+    }
+
+    /// `P-18`: Gegenprobe zum vorigen Test — eine **vorhandene** leere Map ist
+    /// `Some({})` und damit von `None` unterscheidbar. Genau diese
+    /// Unterscheidung macht das vollständige Ersetzen beim Anwenden möglich.
+    #[test]
+    fn p18_present_empty_cooldown_field_is_distinguishable_from_missing() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("fire_bolt".to_string(), 1_700_000_000_000i64);
+        let with_cooldowns = PersistSnapshot {
+            player_id: "7".into(),
+            persist_revision: 4,
+            captured_at_ms: 1,
+            x: 0.0,
+            y: 0.0,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            hp: 1,
+            mana: 1,
+            attributes: Default::default(),
+            char_class: "Adventurer".into(),
+            faction_transition: false,
+            weapon_skill: 1,
+            learned_abilities: vec![],
+            cooldowns: Some(map),
+            inventory: InventoryState::default(),
+            generation: 0,
+            dirty: PersistDirty::default(),
+        };
+        let json = serde_json::to_string(&with_cooldowns).unwrap();
+        assert!(
+            json.contains("\"cooldowns\""),
+            "Vorhandene Map wird serialisiert: {json}"
+        );
+        let back: PersistSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.cooldowns.unwrap().get("fire_bolt").copied(),
+            Some(1_700_000_000_000)
+        );
+
+        let mut empty = with_cooldowns.clone();
+        empty.cooldowns = Some(std::collections::BTreeMap::new());
+        let back: PersistSnapshot =
+            serde_json::from_str(&serde_json::to_string(&empty).unwrap()).unwrap();
+        assert_eq!(back.cooldowns, Some(std::collections::BTreeMap::new()));
     }
 
     impl PersistSnapshot {
