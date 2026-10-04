@@ -759,6 +759,8 @@ Die Warnung gilt auf **SERVER-/REALM-EBENE**, nicht pro Spieler.
 
 Die bisherige Save-Fehler-Semantik (Abschnitt 16) bleibt gültig und wird hier um die Spool-Persistenz ergänzt.
 
+Verhältnis zur Startup-Recovery: Der hier geregelte DEGRADED-Fall betrifft die **Übertragung im laufenden Betrieb**. Der Fehlerfall der **Startup-Recovery** ist davon getrennt in Abschnitt 28 geregelt: Dort geht der Zustand von RECOVERING auf DEGRADED über, die unerledigte Spool-Arbeit bleibt für eine Wiederholung erhalten und wird vom bestehenden periodischen Drainer fortgesetzt, **soweit die jeweilige Fehlerursache behoben ist**; READY folgt dort ausschließlich nach bestätigtem Abschluss der Start-Recovery (`P-22`). Die Betriebsregeln dieses Abschnitts werden dabei **nicht** pauschal auf den Start übertragen und der Start ergänzt **keine** weitergehende Zusicherung: Ein Fehler der Startup-Recovery beendet den Start **nicht**, trifft aber ebenso wenig eine Aussage über den Erfolg der nachfolgenden Initialisierungsschritte.
+
 ---
 
 ## 27. Stufe B – Monitoring-Vorbereitung
@@ -838,6 +840,23 @@ Erst wenn alle normal verarbeitbaren Spool-Snapshots erledigt oder ordnungsgemä
 Monitoring/Administration soll während **RECOVERING** weiterhin verfügbar sein.
 
 `P-23` (umgesetzt): Der Health-Server startet nach Erstellung seiner Abhängigkeiten (Config, Shared, Persistenz-Runtime) und **vor Beginn der Recovery**, damit Monitoring und Administration während **RECOVERING** erreichbar sind. Während der Recovery ist der Zustand über das Feld `persistence_status` in `/status` mit dem Wert `recovering` beobachtbar; danach tritt an seine Stelle `ready` oder `degraded` (Abschnitt 27). Die Monitoring-Erreichbarkeit ist **keine** Spielfreigabe: der WebSocket-Spielserver startet weiterhin erst nach der Recovery, Logins bleiben in **RECOVERING** blockiert, und ein Monitoring-Request verändert keinen Zustand.
+
+### Recovery-Fehlerfall: Start als DEGRADED (`P-28`)
+
+Die Recovery beginnt im Zustand **RECOVERING**. Endet sie mit einem **propagierten** Fehler aus dem Datenbank- oder Dateisystempfad, geht der Realm in **DEGRADED** über und die Startsequenz fährt im selben Prozess fort:
+
+* **Übergang RECOVERING → DEGRADED:** Der propagierte Fehler beendet den Recovery-Durchlauf, ohne den Start abzubrechen. Der Realm startet dann als **DEGRADED**; die Nicht-Abbrech-Eigenschaft gilt **nur** für die Recovery. Jede **weitere** Initialisierung (etwa das Laden der Inhaltsdefinitionen nach der Recovery) behält ihre eigene Fehlerbehandlung und kann den Start weiterhin abbrechen. Ein DEGRADED-Start belegt daher **nicht**, dass alle nachfolgenden Initialisierungsschritte erfolgreich waren.
+* **Erhalten der unerledigten Spool-Arbeit:** Die zum Zeitpunkt des Fehlers nicht verarbeiteten Spool-Batches verbleiben im Spool und stehen für eine Wiederholung zur Verfügung. Bereits bestätigte Einträge bleiben über die `persist_revision` und den Reverify-Nachweis gegen eine doppelte Übernahme geschützt.
+* **Fortsetzung durch den periodischen Drainer:** Der bestehende periodische Drainer arbeitet die verbliebene Spool-Arbeit weiter ab, **soweit die jeweilige Fehlerursache behoben ist**. Die Wiederverfügbarkeit der Datenbank allein genügt dafür nicht: Ein Dateisystemfehler des Ablagebereichs — insbesondere ein nicht lesbares Spool-Verzeichnis (`count_batches`, `src/realm-rs/src/spool.rs:714-716`) oder das fehlgeschlagene Verschieben einer Datei in die Quarantäne (`src/realm-rs/src/spool.rs:1369`) — wird dadurch **nicht** behoben, und der Realm bleibt dann DEGRADED. Nicht anlegbare Verzeichnisse betreffen dagegen bereits die Spool-Initialisierung **vor** der Recovery und brechen den Start ab; sie sind kein Recovery-Fehlerfall.
+* **Abschluss gemäß P-22:** Der Übergang zu **READY** erfolgt ausschließlich nach **bestätigtem Abschluss** der Start-Recovery, also erst wenn keine relevante Restarbeit in `<base>/spool/` mehr offen ist. Ein einzelner erfolgreicher Drain-Schritt hebt DEGRADED nicht vorzeitig auf; solange die Start-Recovery offen ist, bleibt der Zustand DEGRADED, bis der Abschluss bestätigt ist.
+* **DEGRADED blockiert HELLO nicht pauschal:** Die Spielfreigabe ist an RECOVERING gebunden. Im Status DEGRADED ist der HELLO-Einstieg grundsätzlich möglich; die **charakterbezogenen fail-closed-Prüfungen bleiben unverändert wirksam**: das fail-closed Auflösen des Charakterladens (`resolve_character_lookup`, `src/realm-rs/src/handlers.rs:107-121`), die Quarantäne-Verfügbarkeitsprüfung (`src/realm-rs/src/handlers.rs:287-298`) und die Pending-Revision-Prüfung (`src/realm-rs/src/handlers.rs:300-313`, `db_row_is_stale` in `src/realm-rs/src/world.rs:418-424`, bei `Err` gilt die Zeile als veraltet). Ein nicht verifizierter Zustand wird nicht als aktiver Player registriert.
+* **Beobachtbarkeit:** Der Zustand bleibt über `persistence_status` in `/status` mit dem Wert `degraded` beobachtbar (Abschnitt 27, `P-23`); Monitoring und Administration bleiben erreichbar.
+
+**Abgrenzung zur regulären Quarantäne:** Nicht jede fehlerhafte oder beschädigte Datei erzeugt einen propagierten Fehler. Einträge, die der reguläre Drain nicht anwenden kann (unlesbar, fehlerhaft, unbekanntes Format, unbekannter Charakter), werden in die Quarantäne überführt und gelten dort als abgeschlossener Recovery-Anteil (Abschnitt 33, `P-14`, `P-30`); sie gelten **nicht** als offene Restarbeit der Start-Recovery (`P-22`). Erst der propagierte Fehler des Durchlaufs führt zum Übergang in DEGRADED. Für den propagierten Fehler wird **keine** allgemeine Datenverlustfreiheit behauptet: es gilt das oben genannte Erhalten der unerledigten Spool-Arbeit sowie der Schutz bereits bestätigter Einträge.
+
+**Keine übernommene Sammelgarantie:** Die Einträge eines Batches werden nach `P-12` einzeln verarbeitet und einzeln bestätigt. Eine pauschale Rollback-Garantie für einen gesamten Batch wird hier **nicht** übernommen.
+
+**Statusbeobachtung:** `P-28` ist **kein** Nachweis dafür, dass alle Server-Tasks vollständig überwacht sind. Insbesondere endet ein Fehler innerhalb der per Task gestarteten Spielserver-Instanz nur diese Task und wird nicht zu einem Prozessfehler; die betroffene Aufgabe ist dann nicht verfügbar, während der Prozess weiterläuft. Diese Abgrenzung ist in `docs/Security.md` unter `P-28` festgehalten.
 
 ---
 
