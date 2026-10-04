@@ -70,8 +70,76 @@ Ein Service erhält pro Endpoint 403, dessen Berechtigung ihm fehlt.
 | POST | `/devices/list` | `device.list` | `{devices:[{id,label,confirmed_at}]}` — keine token_hash/Secrets |
 | POST | `/devices/revoke` | `device.revoke` | `{revoked}` — widerruft ein bestätigtes Gerät; unbekannt → 404 |
 | POST | `/security/events` | `security.events` | `{events:[{id,event_type,created_at}]}` — Sicherheits-Log des Accounts (neueste zuerst) |
-| GET | `/status` | — (offen) | `{status, uptime}` |
+| GET | `/status` | — (offen) | `{status, uptime, sessions:{…}}` — `sessions` ist das read-only Monitoring (P-33) |
 | GET | `/health` | — (offen) | `{status}` |
+
+## Session-Monitoring auf `/status` (`P-33`)
+
+`/status` bleibt offen und liefert zusätzlich den Block `sessions`.
+Ausgegeben werden **ausschließlich aggregierte** Werte: Zähler, ein Alter in
+Tagen, eine Netto-Bestandsänderung, InnoDB-**Schätzwerte** und Laufzeiten.
+Kein Token, kein Token-Hash, keine Session-ID, keine `account_id`, kein
+Benutzername, keine Einzelzeile und **kein Rohfehler der Datenbank** — die
+Fehlerausgabe ist ein neutraler Zustand, der Text geht nur ins Log.
+
+Ablauf: Die Erhebung ist **bedarfsgetriggert** über `/status`. Der Handler
+ rendert zuerst den Cache und **wartet nie** auf die Datenbank; danach wird
+höchstens **ein** Worker für den Versuch zugelassen (ein Versuch zurzeit,
+kein Ticker, keine History, keine unbegrenzte Goroutine-Vermehrung). Vor der
+ersten erfolgreichen Erhebung sind alle Zähler `null` (unbekannt), niemals `0`.
+Bei Fehler bleibt der letzte erfolgreiche Stand erhalten; `state`, `in_flight`,
+`collected_at`, `last_attempt_at`, `last_attempt_ok`, `age_seconds` und
+`attempts` unterscheiden „noch nie erhoben", „läuft", „erfolgt", „veraltet"
+und „fehlerhaft". Metadatenfehler (`size_state`) machen erfolgreiche Zähler
+nicht ungültig; `no_access` erscheint nur bei tatsächlich erkannbarer
+Berechtigungsverweigerung, eine fehlende Metadatenzeile bleibt `unknown`.
+
+`total_delta` ist die **Netto-Bestandsänderung** gegenüber dem letzten
+erfolgreichen Stand (keine Neuanlagen); `delta_window_seconds` ist das
+tatsächlich verstrichene Fenster. `session_status_batch_*` beschreibt den
+produktiven `BatchSessionStatus`-DB-Aufruf, **nicht** die HTTP-Latenz; das
+Maximum gilt prozessseitig seit Start.
+
+`stale_after_seconds` ist das **Alter, ab dem ein Stand als veraltet gilt**,
+und zwar **dieselbe** Schwelle, nach der auch der Zustand `stale` vergeben
+wird: das Doppelte des wirksamen Mindestabstands, ausgegeben in Sekunden.
+Definition und Ausgabe stammen aus **einer** Quelle, können also nicht
+auseinanderlaufen. Das Feld ist eine **reine Darstellungskonvention** dieser
+lesenden Sicht: **keine** Aufbewahrungsfrist, **keine** Aktionsschwelle und
+**kein** Löschsignal. Solange `stale` gilt, bleibt der letzte erfolgreiche
+Stand sichtbar und nutzbar; es wird nichts gelöscht, widerrufen oder
+zurückgesetzt.
+
+Konfiguration in `config.env`:
+
+| Variable | Default | Einheit | Bedeutung |
+|---|---|---|---|
+| `SESSION_STATS_ENABLED` | `true` | bool | Abschaltung; der Zustand `disabled` wird ausgegeben |
+| `SESSION_STATS_MIN_INTERVAL_SECS` | `60` | Sekunden | Mindestabstand zwischen zwei Versuchen (ab Versuchsbeginn, also auch nach Fehlern) |
+| `SESSION_STATS_TIMEOUT_MS` | `5000` | Millisekunden | Timeout eines **gesamten** Versuchs |
+
+**Auswertung der Werte (wie implementiert):** `SESSION_STATS_ENABLED` wird als
+Bool gelesen. Nicht gesetzt, leer oder nicht parsbar bedeutet **Default**, also
+**`true`** — die Erhebung bleibt dann **an**. `1`, `true`, `yes` und `on`
+(jeweils ohne Beachtung der Groß-/Kleinschreibung) bedeuten `true`; `0`,
+`false`, `no` und `off` bedeuten `false`. Jeder **andere** Wert (z. B. `ja`,
+`enabled`, `2`) ist **nicht** als Fehler erkennbar und fällt deshalb auf den
+Default `true` zurück; es wird **keine** Warnung ausgegeben. Für die beiden
+Zahlenwerte gilt: nicht parsbar oder `<= 0` → der jeweilige Default
+(`60` Sekunden bzw. `5000` Millisekunden). Die wirksamen Werte werden
+zusätzlich als `min_interval_seconds` ausgegeben.
+
+Das Monitoring ist **rein lesend**: es löscht nichts, widerruft nichts und legt
+keine Aufbewahrungsfrist fest.
+
+**Shutdown-Verhalten:** `close()` sperrt die Zulassung sofort und unter
+derselben Sperre, bricht einen laufenden Versuch über dessen Kontext ab und
+wartet ihn mit einer **begrenzten** Grace-Zeit aus, bevor der Pool geschlossen
+wird. Ein Store, der den **Kontextabbruch nicht beachtet**, wird dadurch
+**nicht** zwangsweise beendet: Die Goroutine läuft weiter, das Warten endet
+nach der Grace-Zeit und der Pool wird geschlossen. Ein wiederholtes `close()`
+erzeugt **keine** weiteren Versuche, **keinen** weiteren Abschluss und **keinen**
+zweiten Pool-Schluss.
 
 ## Datenminimierung
 

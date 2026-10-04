@@ -28,6 +28,14 @@ type ServiceCred struct {
 	Permissions []string
 }
 
+// Defaults for the P-33 session monitoring. They bound the demand-driven
+// collection on /status: at most one attempt per minimum interval, and at
+// most defaultSessionStatsTimeoutMS per whole attempt.
+const (
+	defaultSessionStatsMinIntervalSecs = 60
+	defaultSessionStatsTimeoutMS       = 5000
+)
+
 // Config is loaded from an EnvironmentFile-style file. Optional
 // argument:
 //
@@ -56,6 +64,15 @@ type Config struct {
 	// Rate limiting: burst allowed concurrently + requests per minute.
 	RateLimitBurst  int
 	RateLimitPerMin int
+	// Session monitoring (P-33, read-only aggregates on /status).
+	// SessionStatsEnabled=false suppresses the collection entirely and is
+	// reported as such. The two limits bound one collection attempt:
+	// SessionStatsMinIntervalSeconds is the minimum distance between two
+	// attempts, SessionStatsTimeoutMS bounds a whole attempt. A value <= 0
+	// falls back to the default (60 s / 5000 ms).
+	SessionStatsEnabled         bool
+	SessionStatsMinIntervalSecs int
+	SessionStatsTimeoutMS       int
 	// E-mail encryption key (32 bytes, hex) used for email_encrypted.
 	// Loaded from config.env (outside git); never written to logs.
 	EncryptionKey string
@@ -76,6 +93,32 @@ func intEnv(env map[string]string, key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// positiveEnv behaves like intEnv but maps a non-positive or unparsable
+// value back to the default, so a limit can never be configured away.
+func positiveEnv(env map[string]string, key string, def int) int {
+	n := intEnv(env, key, def)
+	if n <= 0 {
+		return def
+	}
+	return n
+}
+
+// boolEnv reads a boolean switch. Absent, empty or unparsable values keep
+// the default; "1", "true", "yes" and "on" (any case) mean true.
+func boolEnv(env map[string]string, key string, def bool) bool {
+	v := strings.TrimSpace(env[key])
+	if v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 
 // parseEnvFile reads KEY=VALUE lines; '#' comments and leading
@@ -178,10 +221,17 @@ func loadConfig(path string) (*Config, error) {
 		NewAccountBan:   time.Duration(intEnv(env, "NEW_ACCOUNT_BAN_SECONDS", 60)) * time.Second,
 		RateLimitBurst:  intEnv(env, "RATE_LIMIT_BURST", 10),
 		RateLimitPerMin: intEnv(env, "RATE_LIMIT_PER_MIN", 120),
-		EncryptionKey:   get("ENCRYPTION_KEY"),
-		TLSCertFile:     get("TLS_CERT_FILE"),
-		TLSKeyFile:      get("TLS_KEY_FILE"),
-		MigrationsDir:   get("AUTHAPI_MIGRATIONS_DIR"),
+		// Session monitoring (P-33). Names, defaults and units:
+		//   SESSION_STATS_ENABLED            bool, default true
+		//   SESSION_STATS_MIN_INTERVAL_SECS  int seconds, default 60 (<=0 -> 60)
+		//   SESSION_STATS_TIMEOUT_MS         int milliseconds, default 5000 (<=0 -> 5000)
+		SessionStatsEnabled:         boolEnv(env, "SESSION_STATS_ENABLED", true),
+		SessionStatsMinIntervalSecs: positiveEnv(env, "SESSION_STATS_MIN_INTERVAL_SECS", defaultSessionStatsMinIntervalSecs),
+		SessionStatsTimeoutMS:       positiveEnv(env, "SESSION_STATS_TIMEOUT_MS", defaultSessionStatsTimeoutMS),
+		EncryptionKey:               get("ENCRYPTION_KEY"),
+		TLSCertFile:                 get("TLS_CERT_FILE"),
+		TLSKeyFile:                  get("TLS_KEY_FILE"),
+		MigrationsDir:               get("AUTHAPI_MIGRATIONS_DIR"),
 	}, nil
 }
 

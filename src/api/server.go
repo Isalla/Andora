@@ -5,11 +5,13 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -21,6 +23,9 @@ const (
 	readHeaderTimeout = 15 * time.Second
 	// verifyDBTimeout bounds database work during a verify request.
 	verifyDBTimeout = 5 * time.Second
+	// sessionStatsCloseGrace bounds how long shutdown waits for a
+	// demand-triggered session collection before the pool is closed.
+	sessionStatsCloseGrace = 2 * time.Second
 )
 
 // Server holds configuration, the auth-database pool, the data store
@@ -31,6 +36,39 @@ type Server struct {
 	store AuthStore
 	rl    *rateLimit
 	start time.Time
+
+	// Session monitoring (P-33). sessionStatsMu guards the admission
+	// decision (closing AND in-flight AND minimum distance) AND the
+	// published snapshot together: separate atomics alone would not prove a
+	// correct admission decision, because admission has to read and change
+	// all of these facts at once. sessionStatsPub always points to an
+	// immutable snapshot that is replaced, never mutated in place.
+	sessionStatsMu          sync.Mutex
+	sessionStatsPub         *sessionStatsSnapshot
+	sessionStatsInFlight    bool
+	sessionStatsNextAllowed time.Time
+	sessionStatsAttempts    uint64
+	// sessionStatsRunning counts the admitted-and-not-yet-finished attempts
+	// and sessionStatsDone is closed by the LAST returning attempt. Both are
+	// guarded by sessionStatsMu. A WaitGroup is deliberately NOT used: its
+	// Add/Wait contract cannot express "admission is closed" and would
+	// allow an Add after a Wait had already started.
+	sessionStatsRunning int
+	sessionStatsDone    chan struct{}
+	// sessionStatsCancel aborts the currently running attempt. close() calls
+	// it so a running collection is cancelled instead of only waited for.
+	sessionStatsCancel context.CancelFunc
+	// sessionStatsClosing is set once, under sessionStatsMu, at the beginning
+	// of close(). From then on admission always refuses, which is what makes
+	// the wait in close() finite: no new attempt can appear.
+	sessionStatsClosing bool
+	// sessionStatsPoolClosed guards the pool close so a repeated or concurrent
+	// close() never closes the pool twice.
+	sessionStatsPoolClosed bool
+	// sessionStatsSignal is a test seam: the collector does one
+	// non-blocking send after each publication. It stays nil in
+	// production.
+	sessionStatsSignal chan struct{}
 }
 
 // newServer opens the auth DB, applies pending migrations and wires
@@ -56,10 +94,55 @@ func newServer(cfg *Config) (*Server, error) {
 	return &Server{cfg: cfg, db: db, store: newSQLStore(db), rl: newRateLimit(cfg), start: time.Now()}, nil
 }
 
-// close releases the database pool.
+// close releases the database pool. A demand-triggered collection may still
+// be running: it is cancelled first and gets a bounded grace period, so the
+// pool is never closed underneath a running query and the wait itself never
+// becomes unbounded.
+//
+// The admission decision is closed under the SAME lock that close() uses, so
+// no new attempt can be admitted once closing has begun. That is what keeps
+// the wait finite without a per-call waiter goroutine. A store that IGNORES
+// its context is NOT force-terminated; the bounded grace applies and the pool
+// is closed afterwards. A repeated or concurrent close() does nothing.
 func (s *Server) close() {
-	if s.db != nil {
-		s.db.Close()
+	s.sessionStatsMu.Lock()
+	if s.sessionStatsClosing {
+		// Repeated or concurrent close: no second waiter, no second
+		// cancellation and no second pool close.
+		s.sessionStatsMu.Unlock()
+		return
+	}
+	// From here on admission refuses every attempt.
+	s.sessionStatsClosing = true
+	cancel := s.sessionStatsCancel
+	done := s.sessionStatsDone
+	s.sessionStatsMu.Unlock()
+
+	if cancel != nil {
+		// Targeted abort of the running attempt. This is a cooperative
+		// cancellation: it reaches a store that honours ctx (the production
+		// *sql.DB does, via QueryRowContext).
+		cancel()
+	}
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(sessionStatsCloseGrace):
+			log.Printf("authapi close: session collection still running after %s, closing pool anyway",
+				sessionStatsCloseGrace)
+		}
+	}
+
+	s.sessionStatsMu.Lock()
+	if s.sessionStatsPoolClosed {
+		s.sessionStatsMu.Unlock()
+		return
+	}
+	s.sessionStatsPoolClosed = true
+	db := s.db
+	s.sessionStatsMu.Unlock()
+	if db != nil {
+		db.Close()
 	}
 }
 

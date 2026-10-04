@@ -233,6 +233,20 @@ func (f *fakeStore) BatchSessionStatus(_ context.Context, tokens []string) ([]Se
 	return statuses, accountIDs, nil
 }
 
+// SessionInventory is the P-33 monitoring aggregate. The fake has no
+// database: it reports an EMPTY table (all counters 0, partition holds,
+// no oldest row) and no timing. This is a fake result, NOT a MariaDB
+// execution.
+func (f *fakeStore) SessionInventory(_ context.Context) (SessionInventory, error) {
+	return SessionInventory{PartitionOK: true}, nil
+}
+
+// SessionTableSize reports "unknown": the fake has no metadata. A nil
+// field means unknown, never 0.
+func (f *fakeStore) SessionTableSize(_ context.Context) (SessionTableSize, error) {
+	return SessionTableSize{}, nil
+}
+
 func (f *fakeStore) RevokeSession(_ context.Context, sessionID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

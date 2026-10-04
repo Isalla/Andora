@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -12,7 +13,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	mysqlerr "github.com/go-sql-driver/mysql"
 )
 
 // Session is the persisted state of one login session.
@@ -146,6 +150,12 @@ type AuthStore interface {
 	// keeps its boolean contract and does not use them.
 	SessionStatusOf(ctx context.Context, rawToken string) (SessionStatus, int, error)
 	BatchSessionStatus(ctx context.Context, tokens []string) ([]SessionStatus, []int, error)
+	// SessionInventory and SessionTableSize back the P-33 session
+	// monitoring. Both are strictly read-only and return aggregates or
+	// estimates only: no token, session id, account id or username ever
+	// leaves the store. Neither deletes nor revokes anything.
+	SessionInventory(ctx context.Context) (SessionInventory, error)
+	SessionTableSize(ctx context.Context) (SessionTableSize, error)
 	CreateHandoff(ctx context.Context, accountID, realmID int, ttl time.Duration) (string, time.Time, error)
 	ValidateHandoff(ctx context.Context, rawToken string) (*Handoff, error)
 	ListRealms(ctx context.Context) ([]Realm, error)
@@ -294,6 +304,9 @@ func hashRecoveryCode(rawCode string) string {
 // sQLStore is the production AuthStore on top of the auth database.
 type sQLStore struct {
 	db *sql.DB
+	// batchTiming measures the productive batch session-status lookup
+	// (P-33). Zero value is ready to use.
+	batchTiming batchLookupTiming
 }
 
 func newSQLStore(db *sql.DB) *sQLStore { return &sQLStore{db: db} }
@@ -692,6 +705,10 @@ func (s *sQLStore) BatchSessionStatus(ctx context.Context, tokens []string) (sta
 	if len(tokens) == 0 {
 		return statuses, accountIDs, nil
 	}
+	// P-33: measure the productive DB lookup including row processing.
+	// No additional query is issued; only a fully successful lookup is
+	// recorded, so an error keeps the previous measurement intact.
+	lookupStart := time.Now()
 	// One placeholders string, one query, len(tokens) bound parameters.
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(tokens)), ",")
 	args := make([]any, 0, len(tokens))
@@ -733,6 +750,7 @@ func (s *sQLStore) BatchSessionStatus(ctx context.Context, tokens []string) (sta
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("batch session rows: %w", err)
 	}
+	s.batchTiming.record(time.Since(lookupStart), time.Now())
 	return statuses, accountIDs, nil
 }
 
@@ -750,6 +768,179 @@ func (s *sQLStore) RevokeSession(ctx context.Context, sessionID string) error {
 		return fmt.Errorf("revoke session: %w", err)
 	}
 	return nil
+}
+
+// --- session inventory (P-33 monitoring, read-only) ---
+
+// SessionInventory is the aggregated session stock of ONE collection.
+// It carries counts and one age in days only; it is deliberately free of
+// any identifying data. PartitionOK reports whether the three status
+// classes add up to the total and is meant to be carried along as a
+// self-check with every collection.
+type SessionInventory struct {
+	Total             int64
+	Active            int64
+	ExpiredNotRevoked int64
+	Revoked           int64
+	PartitionOK       bool
+	// OldestRowAgeDays is nil when the table is empty: an unknown age is
+	// reported as unknown, never as 0.
+	OldestRowAgeDays *int64
+	// QueryMS is the duration of the inventory query itself. It is only
+	// set on success; a failed query yields the zero value.
+	QueryMS float64
+}
+
+// SessionTableSize carries the InnoDB ESTIMATES for the sessions table.
+// A nil field means "unknown" (metadata row absent, not readable).
+// These are estimates, not exact values.
+type SessionTableSize struct {
+	TableRows  *int64
+	DataBytes  *int64
+	IndexBytes *int64
+}
+
+// errSessionSizeNoAccess marks a metadata query that was rejected
+// because of missing privileges. It is a classification, never a raw
+// driver message, so it can be reported without leaking details.
+var errSessionSizeNoAccess = errors.New("session table size: metadata access denied")
+
+// SessionInventory counts the session rows in ONE aggregate round with a
+// single DB-side NOW(), so all counters of one evaluation share one time
+// base (docs/Security.md P-33). The classification follows sessionStatusOf:
+// revoked is checked BEFORE expiry, which makes the three classes disjoint
+// and their sum the total.
+//
+// created_at and expires_at are written from the Go clock on insert,
+// while NOW() is the DB clock; a clock difference can therefore shift a
+// row at the expiry border. The existing time sources are NOT changed.
+func (s *sQLStore) SessionInventory(ctx context.Context) (SessionInventory, error) {
+	start := time.Now()
+	var inv SessionInventory
+	var oldest sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT
+		   COUNT(*)                                                                              AS total,
+		   COALESCE(SUM(CASE WHEN revoked_at IS NULL AND expires_at >= NOW() THEN 1 ELSE 0 END), 0) AS active,
+		   COALESCE(SUM(CASE WHEN revoked_at IS NULL AND expires_at <  NOW() THEN 1 ELSE 0 END), 0) AS expired_not_revoked,
+		   COALESCE(SUM(CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END), 0)                  AS revoked,
+		   CASE WHEN COUNT(*) = 0 THEN NULL
+		        ELSE TIMESTAMPDIFF(DAY, MIN(created_at), NOW()) END                              AS oldest_row_age_days
+		 FROM sessions`).
+		Scan(&inv.Total, &inv.Active, &inv.ExpiredNotRevoked, &inv.Revoked, &oldest)
+	if err != nil {
+		// No counters, no duration: a failed query is not a measurement.
+		return SessionInventory{}, fmt.Errorf("session inventory: %w", err)
+	}
+	if oldest.Valid {
+		d := oldest.Int64
+		inv.OldestRowAgeDays = &d
+	}
+	inv.PartitionOK = inv.Total == inv.Active+inv.ExpiredNotRevoked+inv.Revoked
+	inv.QueryMS = float64(time.Since(start).Microseconds()) / 1000
+	return inv, nil
+}
+
+// SessionTableSize reads the InnoDB estimates for the sessions table of
+// the CURRENT database. information_schema.TABLES lists only objects the
+// user may see, so a missing row means "unknown" and NOT "denied"; a
+// genuinely rejected query is classified as errSessionSizeNoAccess.
+// The estimates are approximate and are reported as such.
+func (s *sQLStore) SessionTableSize(ctx context.Context) (SessionTableSize, error) {
+	var rows, data, index sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH
+		 FROM information_schema.TABLES
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sessions'`).
+		Scan(&rows, &data, &index)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// No visible row: unknown, not an error and not zero.
+		return SessionTableSize{}, nil
+	case err != nil:
+		if isMetadataAccessDenied(err) {
+			return SessionTableSize{}, errSessionSizeNoAccess
+		}
+		return SessionTableSize{}, fmt.Errorf("session table size: %w", err)
+	}
+	out := SessionTableSize{}
+	if rows.Valid {
+		v := rows.Int64
+		out.TableRows = &v
+	}
+	if data.Valid {
+		v := data.Int64
+		out.DataBytes = &v
+	}
+	if index.Valid {
+		v := index.Int64
+		out.IndexBytes = &v
+	}
+	return out, nil
+}
+
+// isMetadataAccessDenied reports whether err is a MariaDB/MySQL
+// privilege rejection. The message text is deliberately not inspected.
+func isMetadataAccessDenied(err error) bool {
+	var me *mysqlerr.MySQLError
+	if !errors.As(err, &me) {
+		return false
+	}
+	switch me.Number {
+	case 1044, // ER_DBACCESS_DENIED_ERROR
+		1045, // ER_ACCESS_DENIED_ERROR
+		1142: // ER_TABLEACCESS_DENIED_ERROR
+		return true
+	}
+	return false
+}
+
+// batchLookupTiming holds the measured durations of the PRODUCTIVE batch
+// session-status lookup. Deliberately NOT a series: only the last
+// successful measurement, the process-wide maximum since start and the
+// wall-clock time of that measurement. Concurrent lookups are
+// synchronised; a failed lookup records nothing, so a previous success is
+// never presented as a new measurement.
+type batchLookupTiming struct {
+	mu         sync.Mutex
+	last       time.Duration
+	max        time.Duration
+	measuredAt time.Time
+	measured   bool
+}
+
+// record stores one fully successful lookup measurement.
+func (t *batchLookupTiming) record(d time.Duration, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.last = d
+	if d > t.max {
+		t.max = d
+	}
+	t.measuredAt = at
+	t.measured = true
+}
+
+// snapshot returns the current measurement state; ok is false until the
+// first successful lookup.
+func (t *batchLookupTiming) snapshot() (last, max time.Duration, measuredAt time.Time, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.last, t.max, t.measuredAt, t.measured
+}
+
+// batchLookupTimer is implemented by stores that measure the productive
+// batch session-status lookup. It is read by the /status collector, not
+// by the lookup path itself.
+type batchLookupTimer interface {
+	BatchLookupTiming() (last, max time.Duration, measuredAt time.Time, ok bool)
+}
+
+// BatchLookupTiming returns the last successful lookup duration, the
+// process-wide maximum since start and when it was measured. It is NOT
+// the HTTP latency of the batch endpoint and contains no percentiles.
+func (s *sQLStore) BatchLookupTiming() (time.Duration, time.Duration, time.Time, bool) {
+	return s.batchTiming.snapshot()
 }
 
 // --- realms / world servers / handoffs ---
