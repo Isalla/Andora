@@ -720,6 +720,192 @@ mod tests {
         );
     }
 
+    // ── Audit 4.4: Rate-Fenster, geteilte Budgets, Verletzungszweig ──────
+    //
+    // Diese Tests rufen die **Produktionsfunktionen** `check_rate` und
+    // `gate_frame` mit kontrolliertem `now` auf; es wird keine Rate-Formel
+    // nachgebaut. Der Burst-Nachweis „genau `limit` sofort zulässig" ist für
+    // Selten bereits durch `flood_of_rare_requests_is_capped` und für
+    // Bewegung durch `movement_limit_exceeds_rare_limit` erbracht und wird hier
+    // **nicht** wiederholt.
+
+    /// L-2: Die Fenstergrenze ist **exklusiv bei 1000 ms**. Ein Eintrag bleibt
+    /// exakt 1000 ms belegt und verfällt erst ab 1001 ms (Ganzmillisekunden-
+    /// Trunkierung von `duration_since(...).as_millis() > 1000`).
+    #[test]
+    fn rate_window_boundary_is_exclusive_at_1000_ms() {
+        let mut cfg = SecurityCfg::default();
+        cfg.movement_per_sec = 1;
+        let mut g = ConnGuard::default();
+        let t0 = Instant::now();
+        assert!(g.check_rate(&cfg, crate::protocol::c2s::MOVE, t0));
+        assert!(
+            !g.check_rate(
+                &cfg,
+                crate::protocol::c2s::MOVE,
+                t0 + std::time::Duration::from_millis(1000)
+            ),
+            "exakt 1000 ms bleibt noch belegt"
+        );
+        assert!(
+            g.check_rate(
+                &cfg,
+                crate::protocol::c2s::MOVE,
+                t0 + std::time::Duration::from_millis(1001)
+            ),
+            "ab 1001 ms ist der Slot wieder frei"
+        );
+    }
+
+    /// L-2: **Abgewiesene** Versuche werden nicht in die Queue geschrieben und
+    /// verlängern das Fenster daher nicht. Wäre `push_back` auch im
+    /// Abweisungszweig, bliebe der Slot bis 1600 ms belegt.
+    #[test]
+    fn rejected_rate_attempts_do_not_extend_the_window() {
+        let mut cfg = SecurityCfg::default();
+        cfg.rare_per_sec = 2;
+        let mut g = ConnGuard::default();
+        let t0 = Instant::now();
+        let t = crate::protocol::c2s::SPEND_ATTRIBUTE;
+        assert!(g.check_rate(&cfg, t, t0));
+        assert!(g.check_rate(&cfg, t, t0));
+        for _ in 0..50 {
+            assert!(
+                !g.check_rate(&cfg, t, t0 + std::time::Duration::from_millis(600)),
+                "Budget nach zwei erlaubten Versuchen erschöpft"
+            );
+        }
+        assert!(
+            g.check_rate(&cfg, t, t0 + std::time::Duration::from_millis(1001)),
+            "die 50 Abweisungen bei 600 ms dürfen das Fenster nicht verlängert haben"
+        );
+    }
+
+    /// L-3: Typen **derselben** Klasse teilen **ein** Budget. ATTACK, ABILITY
+    /// und PICKUP liegen alle in `MsgClass::Combat` und verbrauchen dieselbe
+    /// `VecDeque`.
+    #[test]
+    fn two_types_of_same_class_share_one_budget() {
+        let mut cfg = SecurityCfg::default();
+        cfg.combat_per_sec = 2;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        assert!(g.check_rate(&cfg, crate::protocol::c2s::ATTACK, now));
+        assert!(g.check_rate(&cfg, crate::protocol::c2s::ABILITY, now));
+        assert!(
+            !g.check_rate(&cfg, crate::protocol::c2s::ATTACK, now),
+            "ATTACK und ABILITY verbrauchen dasselbe Combat-Budget"
+        );
+        assert!(!g.check_rate(&cfg, crate::protocol::c2s::PICKUP, now));
+    }
+
+    /// L-3: Eine erschöpfte Klasse bleibt ohne Wirkung auf andere Klassen —
+    /// jede Klasse hat ihre eigene Queue.
+    #[test]
+    fn exhausted_class_does_not_affect_other_classes() {
+        let mut cfg = SecurityCfg::default();
+        cfg.movement_per_sec = 1;
+        cfg.rare_per_sec = 1;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        assert!(g.check_rate(&cfg, crate::protocol::c2s::MOVE, now));
+        assert!(!g.check_rate(&cfg, crate::protocol::c2s::MOVE, now));
+        assert!(
+            g.check_rate(&cfg, crate::protocol::c2s::SPEND_ATTRIBUTE, now),
+            "Selten bleibt von einem leeren Bewegungsbudget unberührt"
+        );
+        assert!(!g.check_rate(&cfg, crate::protocol::c2s::SPEND_ATTRIBUTE, now));
+    }
+
+    /// L-5: Der Session-Zweig **zählt, trennt aber nicht**. Der Rückgabewert
+    /// von `add_violation` wird dort bewusst verworfen (`security.rs`), daher
+    /// bleibt der `GateDecision` auch oberhalb der Schwelle `Drop`. Zusätzlich
+    /// belegt: Session-Verstöße verbrauchen **kein** Klassenbudget, weil
+    /// `check_rate` erst nach der Session-Prüfung läuft.
+    ///
+    /// **Offene Schutzentscheidung** (Audit 4.4, R-5): Der Test hält das
+    /// Bestandsverhalten fest. Er ist **keine** Aussage, dass ein nicht
+    /// angemeldeter Flood dadurch ausreichend begrenzt wird, und **keine**
+    /// Empfehlung, eine Straf-, Bann- oder Disconnect-Regel zu ergänzen.
+    #[test]
+    fn session_gate_violations_never_return_disconnect() {
+        let mut cfg = SecurityCfg::default();
+        cfg.disconnect_after_violations = 1;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        for i in 1..=5u32 {
+            assert_eq!(
+                gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, false, now),
+                GateDecision::Drop,
+                "Session-Verstoß {i} muss Drop bleiben, auch über der Schwelle"
+            );
+        }
+        assert_eq!(g.violations, 5, "jeder Session-Verstoß wird gezählt");
+        // Budget der betroffenen Klasse ist unberührt: genau `combat_per_sec`
+        // nachgelagerte, nun angemeldete Versuche passieren.
+        let mut allowed = 0;
+        for _ in 0..500 {
+            if gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, true, now)
+                == GateDecision::Allow
+            {
+                allowed += 1;
+            }
+        }
+        assert_eq!(
+            allowed, cfg.combat_per_sec as usize,
+            "Session-Verstöße dürfen kein Klassenbudget verbrauchen"
+        );
+    }
+
+    /// L-4 (Bestand, keine Empfehlung): `rare_per_sec = 0` **sperrt** die
+    /// gesamte Selten-Klasse, weil `window.len() >= 0` immer gilt. Ein `0` ist
+    /// damit **keine** Abschaltung, sondern eine Blockade — auch für HELLO.
+    #[test]
+    fn zero_rate_limit_locks_the_whole_class() {
+        let mut cfg = SecurityCfg::default();
+        cfg.rare_per_sec = 0;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        for t in [
+            crate::protocol::c2s::HELLO,
+            crate::protocol::c2s::SPEND_ATTRIBUTE,
+            crate::protocol::c2s::GROUP_INVITE,
+            crate::protocol::c2s::AUCTION_BUY,
+        ] {
+            assert_eq!(
+                gate_frame(&cfg, &mut g, t, true, now),
+                GateDecision::Drop,
+                "Typ {t} muss bei Limit 0 verworfen werden"
+            );
+        }
+        assert_eq!(
+            g.violations, 4,
+            "das gesperrte Budget erzeugt weiterhin Auffälligkeiten"
+        );
+    }
+
+    /// L-4 (Bestand): `disconnect_after_violations = 0` wirkt über `.max(1)` als
+    /// **1** — die erste Auffälligkeit trennt. Geprüft wird über den Rate-Pfad,
+    /// weil **erlaubte** Nachrichten den Zähler nicht verändern (erst ein
+    /// tatsächlich abgewiesener Versuch erzeugt eine Auffälligkeit).
+    #[test]
+    fn zero_disconnect_threshold_acts_as_one() {
+        let mut cfg = SecurityCfg::default();
+        cfg.disconnect_after_violations = 0;
+        cfg.rare_per_sec = 1;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::SPEND_ATTRIBUTE, true, now),
+            GateDecision::Allow
+        );
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::SPEND_ATTRIBUTE, true, now),
+            GateDecision::Disconnect,
+            "0 wird über max(1) als Schwelle 1 wirksam"
+        );
+    }
+
     // 8b) Übergröße wird vor dem Parsen erkannt.
     //
     // Geltungsgrenze: dieser Test belegt **nur die Grenzfunktion**

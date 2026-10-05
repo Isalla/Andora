@@ -121,11 +121,11 @@ Paketgröße (vor dem Parsen) → JSON-Format → Typ-Whitelist
 
 | Stufe | Ort | Funktion |
 |---|---|---|
-| Paketgröße | `read_loop` (`net.rs:582`) | `security::frame_too_large` |
-| JSON-Format | `read_loop` (`net.rs:592`) | `serde_json::from_str` |
-| Typ-Whitelist | `read_loop` (`net.rs:602`) | `security::is_known_c2s` |
-| Sequenzbeobachtung | `dispatch` (`net.rs:831`) | `ConnGuard::note_seq` |
-| Session + Rate Limit | `dispatch` (`net.rs:836`) | `security::gate_frame` |
+| Paketgröße | `read_loop` (`net.rs:609`) | `security::frame_too_large` |
+| JSON-Format | `read_loop` (`net.rs:619`) | `serde_json::from_str` |
+| Typ-Whitelist | `read_loop` (`net.rs:629`) | `security::is_known_c2s` |
+| Sequenzbeobachtung | `dispatch` (`net.rs:864`) | `ConnGuard::note_seq` |
+| Session + Rate Limit | `dispatch` (`net.rs:876`) | `security::gate_frame` |
 
 `security::gate_frame` prüft **ausschließlich Session und Rate Limit**, in
 dieser Reihenfolge. Größe, Parse und Whitelist liegen **beim Aufrufer**
@@ -133,7 +133,7 @@ dieser Reihenfolge. Größe, Parse und Whitelist liegen **beim Aufrufer**
 Funktion allein belegt also **keine** vollständige Abdeckung.
 
 - Übergröße/unparsbar/unbekannt: verwerfen + Auffälligkeit zählen
-  (`net.rs:583`, `:595`, `:603`). Jede dieser drei Stufen zählt über
+  (`net.rs:616`, `:622`, `:631`). Jede dieser drei Stufen zählt über
   `ConnGuard::violations` genau eine Auffälligkeit; das ist der vorhandene
   Diagnosewert, über den sich die Ablehnungsstufe eindeutig zuordnen lässt.
 - Ohne Session (außer HELLO): verwerfen (`no_session`).
@@ -177,14 +177,14 @@ eingeführt.
 
 - `ConnGuard::note_seq` berechnet nur, ob ein Wert über dem bisherigen Höchstwert
   liegt, und schreibt den **Rückgabewert nicht in eine Entscheidung**: der
-  einzige Aufrufer verwirft ihn (`src/realm-rs/src/net.rs:831`).
+  einzige Aufrufer verwirft ihn (`src/realm-rs/src/net.rs:864`).
 - `ConnGuard.last_seq` ist damit der **höchste bisher gesehene** `seq`-Wert
   dieser Verbindung, **nicht** der zuletzt gesehene: Er wird nur bei
   `seq > last_seq` fortgeschrieben (`src/realm-rs/src/security.rs:230-233`) und
   läuft bei älteren oder doppelten Werten **nicht** zurück. Der Begleitzustand
   `seen_any_seq` unterscheidet „noch keine Sequenz gesehen" von „Wert 0".
 - Die Beobachtung liegt **nach** den Vorprüfungen des Read-Loops (Paketgröße,
-  JSON-Format, Typ-Whitelist: `src/realm-rs/src/net.rs:582,592,602`) und
+  JSON-Format, Typ-Whitelist: `src/realm-rs/src/net.rs:609,619,629`) und
   **vor** dem Session- und Rate-Gate (`:836`). Übergrößene, unparsbare und
   unbekannte Typen werden deshalb **nicht** sequenzbeobachtet; Frames, die das
   Session- oder Rate-Gate verwirft, **werden** es.
@@ -197,7 +197,7 @@ eingeführt.
 - Gleiche, ältere, negative oder fehlende `seq` werden von der Sequenzbeobachtung **nicht abgelehnt**; alle übrigen Prüfungen (Whitelist, Session, Rate-Limits, Zustands- und Zielvalidierung im jeweiligen Handler) gelten unverändert weiter.
 - Es findet **keine** sequenzbasierte Deduplizierung und **keine** Ergebniswiederholung statt: `seq` löst weder eine Wiederholung einer vorherigen Antwort aus noch verhindert sie eine erneute Ausführung derselben Absicht.
 - **Rate-Limits sind kein Idempotenznachweis.** Sie begrenzen die Häufigkeit je Verbindung und Kategorie (`SEC_*_PER_SEC`), nicht die Einmaligkeit einer Operation.
-- Der sequentielle Read-Loop verarbeitet die Frames einer Verbindung **der Reihe nach** (`src/realm-rs/src/net.rs:566-615`), verhindert aber **nicht**, dass der Client dieselbe Nachricht **zweimal sendet**.
+- Der sequentielle Read-Loop verarbeitet die Frames einer Verbindung **der Reihe nach** (`src/realm-rs/src/net.rs:593-642`), verhindert aber **nicht**, dass der Client dieselbe Nachricht **zweimal sendet**.
 - **Gleicher Inhalt mit neuer `seq`** und **Wiederholung über eine neue Verbindung** werden durch `seq` **nicht** geschützt. Maßgeblich ist in beiden Fällen allein die Servervalidierung des jeweiligen Handlers.
 - Für zustandsändernde Operationen bleibt deshalb die **fachliche** Absicherung maßgeblich, nicht die Nachrichtennummer. Beispiel: Der veröffentlichte Fix `b121766` schützt den Angriffstakt (`docs/Kampfsystem.md` §3.1) über den **RAM-gebundenen** Zeitpunkt des zuletzt ausgeführten Schlags — unabhängig von `seq`, gleicher oder neuer Nummer, gleichem oder anderem Ziel. Das gilt an den Zustand dieses Player-Objekts gebunden und ist **keine** allgemeine Reconnect- und **keine** allgemeine Idempotenzgarantie.
 - **Korrelationsfeld ist `Frame.seq`.** Für `MOVE` nennt der Typkommentar zusätzlich ein Payload-Feld `seq` (`src/realm-rs/src/protocol.rs:12`); der Handler wertet dieses **nicht** aus und liest ausschließlich `dir`/`x`/`y` (`src/realm-rs/src/handlers.rs:635-640`). Der Kommentar bleibt als Bestandsbeschreibung unverändert; verbindlich ist allein das Feld `Frame.seq` im Rahmen der Nachricht.
@@ -222,20 +222,77 @@ Zulässigkeitsentscheidung verwendet.
 | Bewegung | MOVE | 30 | `SEC_MOVE_PER_SEC` |
 | Interaktiv | CHAT, HEARTBEAT, PARENTAL | 10 | `SEC_INTERACTIVE_PER_SEC` |
 | Kampf | ATTACK, ABILITY, PICKUP | 10 | `SEC_COMBAT_PER_SEC` |
-| Selten | Attribute, Auktion, Gruppe, NPC, Unbekannt | 5 | `SEC_RARE_PER_SEC` |
+| Selten | HELLO, Attribute, Auktion, Gruppe, NPC | 5 | `SEC_RARE_PER_SEC` |
+
+Die Selten-Klasse umfasst **13 Typen**: `HELLO`, `NPC_TALK`,
+`AUCTION_LIST`, `AUCTION_BID`, `AUCTION_BUY`, `GROUP_INVITE`,
+`GROUP_INVITE_REACT`, `GROUP_SUGGEST`, `GROUP_SUGGEST_DECIDE`,
+`GROUP_LEAVE`, `GROUP_KICK`, `GROUP_TRANSFER`, `SPEND_ATTRIBUTE`. **HELLO
+liegt in Selten** und verbraucht das Selten-Budget; das ist hier festgehalten
+und **nicht** neu festgelegt.
 
 **Whitelisted, aber nicht implementiert:** `NPC_TALK` (6), `AUCTION_LIST`
 (7) und `AUCTION_BID` (8) stehen in `security::is_known_c2s`
 (`security.rs:285-309`) und im Protokoll (`protocol.rs:16-18`), besitzen aber
-**keinen** Dispatch-Arm in `net.rs:869-930`. Sie passieren Whitelist und
-Gate und enden im `other`-Zweig (`net.rs:929`) **ohne Handler und ohne
-Zustandswirkung** — bewusst fail-closed. `AUCTION_BUY` (9) hat dagegen einen
-Arm und wird fail-closed abgelehnt (`handle_auction_buy`, `handlers.rs:1326`),
-weil kein Auktionshaus-State existiert.
+**keinen** Dispatch-Arm in `net.rs:909-970`. Sie passieren Whitelist und
+Gate und enden im `other`-Zweig (`net.rs:969`) **ohne Handler und ohne
+Zustandswirkung** — bewusst fail-closed. Sie **verbrauchen dabei aber das
+Selten-Budget der Rate-Stufe** (siehe §3.4): die Rate-Prüfung läuft vor dem
+Dispatch. `AUCTION_BUY` (9) hat dagegen einen Arm und wird fail-closed
+abgelehnt (`handle_auction_buy`, `handlers.rs:1326`), weil kein
+Auktionshaus-State existiert.
 
-Sliding-Window (1000 ms) je Verbindung und Kategorie, reine RAM-Operation
-(`ConnGuard`). 500 Spend-Requests in 1 s → 5 passieren, 495 werden vor
-jeder Logik/DB verworfen. Unbekannte Typen fallen fail-closed in Selten.
+Sliding Window über Zeitstempel, 1000 ms, **je Verbindung und Kategorie**,
+reine RAM-Operation (`ConnGuard::windows`, `security.rs:195`). Verhalten am
+Code:
+
+- **Unbekannte Typen** (nicht whitelisted) werden **vor** der Rate-Stufe
+  verworfen (`read_loop`, `net.rs:629`) und verbrauchen **kein** Budget. Der
+  Rare-Fallback in `MsgClass::of` greift ausschließlich für **whitelisted**
+  Typen, die in keine der drei benannten Klassen fallen.
+- **Ein Queue je Klasse:** alle Typen derselben Klasse teilen **ein** Budget.
+- **Exakt `limit`** Nachrichten je Klasse im 1000-ms-Fenster sind zulässig;
+  die Grenze ist **strikt** (`> 1000 ms`), ein Slot wird also erst ab 1001 ms
+  wieder frei.
+- **Abgewiesene Versuche** werden nicht in die Queue geschrieben: sie
+  verbrauchen kein Budget und verlängern das Fenster nicht.
+- **Speicher:** bei Defaults höchstens `30 + 10 + 10 + 5 = 55` Einträge;
+  konfigurierbare Limits können diese Grenze erhöhen.
+- 500 Spend-Requests in 1 s → 5 passieren, 495 werden vor jeder Logik/DB
+  verworfen.
+
+**Verletzungszähler:** kumulativ über die Verbindungsdauer, ohne Abklingen,
+`violations >= disconnect_after_violations.max(1)` trennt (Default 50). Er
+wird erhöht bei Größe, Parse, unbekanntem Typ, fehlender Session und
+Rate-Verstoß; **fachlich unzulässige Spielabsichten erhöhen ihn nicht**
+(`handlers.rs`, nur `sec-reject`-Log mit Zählerstand 0). Erlaubte Nachrichten
+verändern ihn nicht. **Größe, Parse, unbekannter Typ und Rate-Verstoß können
+an der Schwelle die Verbindung trennen**; der **Session-Zweig zählt, trennt
+aber derzeit nicht** — der Rückgabewert von `add_violation` wird dort
+verworfen (`security.rs:264-267`). Ob das angemessen begrenzt ist, ist eine
+**offene Schutzentscheidung** (docs/Security.md Abschnitt 4.4.1, R-5); V1
+führt sie ausdrücklich **nicht** als gelöst und leitet **keine** neue Straf-,
+Bann- oder Disconnect-Regel daraus ab.
+
+**Verbindungsgrenze:** Budgets **und** Zähler sind **verbindungslokal**. Ein
+Reconnect oder Takeover erzeugt einen neuen `ConnGuard` (`net.rs:509`) und
+setzt damit **beides vollständig zurück**. Über Verbindungsgrenzen hinweg
+existiert **keine** gemeinsame Begrenzung; es wird hier auch keine behauptet.
+
+**Keine empirische Angemessenheitsgarantie:** Im Repository existiert **kein**
+Clientcode, der C2S sendet (`shared/protocol.gd:24` bietet nur `encode` ohne
+Aufrufer; keine `.gd`-Datei nutzt `WebSocketPeer`/`ws://`). Die Schwellwerte
+sind deshalb **nicht** gegen eine reale Clientfrequenz geprüft. Insbesondere
+bleibt offen, ob das geteilte Interaktiv-Budget (10/s für HEARTBEAT, CHAT und
+PARENTAL gemeinsam) und das Selten-Budget (5/s für 13 Typen einschließlich
+HELLO) eine legitime Kombination begrenzen könnten — ohne Clientfrequenz ist
+das **nicht** entscheidbar. Die Klassenzuordnung von HELLO und die geteilten
+Budgets werden hier **nicht** neu festgelegt.
+
+Rate-Limits begrenzen **Nachrichten**, nicht Schadensrate,
+Bewegungsgeschwindigkeit, Idempotenz oder sämtliche Ressourcenlast. Der
+serverseitige Angriffstakt (§3.5a) bleibt ein **eigener** Schutz und ist von
+`SEC_COMBAT_PER_SEC` unabhängig.
 
 ### 3.5 Tod und Instanz-Isolation
 
@@ -293,7 +350,37 @@ Basis für eine spätere GM-/Anti-Cheat-Auswertung (nicht Teil von V1).
 `SEC_INTERACTIVE_PER_SEC` (10), `SEC_COMBAT_PER_SEC` (10),
 `SEC_RARE_PER_SEC` (5), `SEC_DISCONNECT_AFTER_VIOLATIONS` (50).
 
-## 5. Tests (`security.rs`, 16 Tests — alle 8 Pflichtfälle)
+**Parsergrenzen** (`config::security_config`, `config.rs:416-431`; Helfer
+`num1`, `:254-258`): ungültige Strings und negative Werte fallen je einzeln auf
+den **Default** zurück. Ein explizites **`0` wird jedoch akzeptiert** — der
+Helfer klemmt **nicht** trotz seines Namens. Werte zwischen `u32::MAX` und
+`u64::MAX` werden per `as u32` **still trunkiert** (z. B. 2³² → 0);
+`SEC_MAX_FRAME_BYTES` hat den Zieltyp `usize` und ist auf 64 Bit **nicht**
+betroffen. `SEC_DISCONNECT_AFTER_VIOLATIONS=0` wirkt über `.max(1)` als 1.
+Diese Punkte sind **Bestandsverhalten** (dokumentiert in
+`config.rs`-Tests), **keine** Empfehlung und **keine** Freigabe einer
+Fehlkonfiguration; ob ein Clamping eingeführt wird, ist offen
+(docs/Security.md Abschnitt 4.4.1, R-6). Insbesondere sperrt
+`SEC_RARE_PER_SEC=0` die gesamte Selten-Klasse **einschließlich HELLO** und
+damit den Einstieg.
+
+## 5. Tests (`security.rs`, 25 Tests — alle 8 Pflichtfälle, dazu
+Rate-Fenster, geteilte Budgets und Konfigurationsgrenzen)
+
+Die Rate-Nachweise (Audit 4.4) liegen in `security.rs`
+(`rate_window_boundary_is_exclusive_at_1000_ms`,
+`rejected_rate_attempts_do_not_extend_the_window`,
+`two_types_of_same_class_share_one_budget`,
+`exhausted_class_does_not_affect_other_classes`,
+`session_gate_violations_never_return_disconnect`,
+`zero_rate_limit_locks_the_whole_class`,
+`zero_disconnect_threshold_acts_as_one`), zusätzlich **am echten
+`read_loop`** in `net.rs` (`read_loop_rate_gate_drops_excess_frames_and_
+keeps_other_classes`, `read_loop_rate_violation_at_threshold_ends_
+processing`, `read_loop_session_violations_count_but_never_disconnect`)
+sowie **gegen den echten Parser** in `config.rs` (sechs
+`security_config_*`-Tests) sowie der Regressionsnachweis zur Abfrageposition der Uhr (`clock_is_queried_only_after_the_world_lock_is_released`). Vollständige Suite: **664** Tests.
+Einzelheiten: `docs/Security.md` Abschnitt 4.4.1.
 
 1. Manipulierter Attributwert (`strength=999`) → nur +1 ab Serverwert;
    unbekannte Attribute (`gold`, `strength999`) → Ablehnung ohne Mutation.

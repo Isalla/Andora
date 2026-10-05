@@ -769,4 +769,101 @@ mod tests {
         let v6litb = bind_addrs("[::1]", 3001).unwrap();
         assert_eq!(v6lit, v6litb);
     }
+
+    // ── Audit 4.4 / L-4: `security_config` gegen den echten Parser ───────
+    //
+    // Diese Tests halten **Bestandsverhalten** fest. Sie sind ausdrücklich
+    // **keine** Empfehlung und **keine** Freigabe einer Fehlkonfiguration.
+    // `num1` klemmt nicht (trotz des Namens) und konvertiert per `as u32`
+    // für alle `*_per_sec`- sowie die Verletzungsschwelle.
+
+    /// Ohne `SEC_*`-Variablen gelten die Defaults unverändert.
+    #[test]
+    fn security_config_uses_defaults_when_unset() {
+        let c = security_config(&env_of(&[]));
+        let d = SecurityCfg::default();
+        assert_eq!(c.max_frame_bytes, d.max_frame_bytes);
+        assert_eq!(c.movement_per_sec, d.movement_per_sec);
+        assert_eq!(c.interactive_per_sec, d.interactive_per_sec);
+        assert_eq!(c.combat_per_sec, d.combat_per_sec);
+        assert_eq!(c.rare_per_sec, d.rare_per_sec);
+        assert_eq!(c.disconnect_after_violations, d.disconnect_after_violations);
+    }
+
+    /// Ungültiger String, negativer Wert und Leerwert fallen je **einzeln**
+    /// auf den Default zurück — der Parser ist fail-safe, kein `0`.
+    #[test]
+    fn security_config_falls_back_to_default_on_unparsable_values() {
+        let d = SecurityCfg::default();
+        for bad in ["abc", "-5", "", " 5", "5.5", "1e3"] {
+            let c = security_config(&env_of(&[("SEC_RARE_PER_SEC", bad)]));
+            assert_eq!(
+                c.rare_per_sec, d.rare_per_sec,
+                "Wert {bad:?} muss auf den Default fallen"
+            );
+        }
+    }
+
+    /// `0` wird **akzeptiert** (kein Clamping trotz Helfername `num1`).
+    /// Wirkt im Sicherheitsmodul als vollständige Sperre der Klasse
+    /// (`zero_rate_limit_locks_the_whole_class` in `security.rs`), hier nur
+    /// als Parserbefund.
+    #[test]
+    fn security_config_accepts_zero_without_clamping() {
+        let c = security_config(&env_of(&[
+            ("SEC_RARE_PER_SEC", "0"),
+            ("SEC_MOVE_PER_SEC", "0"),
+            ("SEC_DISCONNECT_AFTER_VIOLATIONS", "0"),
+            ("SEC_MAX_FRAME_BYTES", "0"),
+        ]));
+        assert_eq!(c.rare_per_sec, 0);
+        assert_eq!(c.movement_per_sec, 0);
+        assert_eq!(c.disconnect_after_violations, 0);
+        assert_eq!(c.max_frame_bytes, 0);
+    }
+
+    /// `as u32` **trunkiert** still: `u32::MAX` bleibt erhalten, `2^32` wird zu
+    /// 0. Betroffen sind alle `*_per_sec` und die Verletzungsschwelle.
+    #[test]
+    fn security_config_truncates_above_u32_max() {
+        let c = security_config(&env_of(&[
+            ("SEC_RARE_PER_SEC", "4294967295"),
+            ("SEC_MOVE_PER_SEC", "4294967296"),
+            ("SEC_INTERACTIVE_PER_SEC", "4294967301"),
+            ("SEC_DISCONNECT_AFTER_VIOLATIONS", "4294967297"),
+        ]));
+        assert_eq!(c.rare_per_sec, u32::MAX, "u32::MAX bleibt unverändert");
+        assert_eq!(c.movement_per_sec, 0, "2^32 trunkiert auf 0");
+        assert_eq!(
+            c.interactive_per_sec, 5,
+            "2^32 + 5 trunkiert auf die unteren Bits"
+        );
+        assert_eq!(c.disconnect_after_violations, 1, "2^32 + 1 trunkiert auf 1");
+    }
+
+    /// Werte oberhalb von `u64::MAX` scheitern bereits am `u64`-Parse und
+    /// fallen damit auf den Default zurück — nicht auf einen trunkierten Wert.
+    #[test]
+    fn security_config_falls_back_on_u64_parse_overflow() {
+        let d = SecurityCfg::default();
+        for big in ["18446744073709551616", "99999999999999999999999"] {
+            let c = security_config(&env_of(&[("SEC_RARE_PER_SEC", big)]));
+            assert_eq!(
+                c.rare_per_sec, d.rare_per_sec,
+                "u64-Überlauf bei {big:?} muss Default ergeben"
+            );
+        }
+    }
+
+    /// Das Frame-Limit hat den Zieltyp `usize` (64 Bit) und wird **nicht**
+    /// trunkiert — derselbe Wert, der `*_per_sec` auf 0 bringt, bleibt hier
+    /// erhalten. Das ist eine Eigenschaft des Zieltyps, keine Empfehlung.
+    #[test]
+    fn security_config_frame_limit_is_not_truncated() {
+        let c = security_config(&env_of(&[("SEC_MAX_FRAME_BYTES", "4294967296")]));
+        assert_eq!(
+            c.max_frame_bytes, 4294967296,
+            "usize ist 64 Bit — hier entsteht keine u32-Trunkation"
+        );
+    }
 }

@@ -882,10 +882,10 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 - **Bekannte Ausgangslage (unverändert gültig):** Die Gate-Reihenfolge führt die Sequenz als reine Beobachtungsstufe; der Test `seq_duplicates_are_tolerated` zeigt, dass Duplikate toleriert werden.
 - **Festgelegte Entscheidung (war `ZU PRÜFEN` → entschieden, keine Codeänderung):** `seq` ist **Korrelation**, nicht Berechtigung und nicht Idempotenzschlüssel. Der Client übermittelt Absichten; der Server prüft **unabhängig von `seq`**, ob und wann diese ausgeführt werden dürfen. Es wurde **keine** Sequenz-Ablehnung, **keine** Strafregel, **keine** Disconnect-Regel und **keine** Clientpflicht eingeführt. Die bestehende Semantik „Duplikate/Out-of-Order nur vermerken" wird damit **festgehalten statt geändert**.
 - **Verifizierte Belege (aktueller Stand, HEAD `b12176671f57f303bef3c3304f45fa7f3078cc65`):**
-  1. `Frame.seq` ist `i64` mit `#[serde(default)]` (`src/realm-rs/src/protocol.rs:71-72`): ein **fehlendes** Feld ergibt `0`. Andere JSON-Typen (`null`, String, Float) sind für `i64` kein gültiger Wert und landen damit im Fehlerzweig des Parse-Pfads (`src/realm-rs/src/net.rs:592-601`) als `bad_frame`; `type` besitzt **kein** `default` und ist daher Pflicht. Dieser Schluss folgt aus Feldtyp und Fehlerzweig und ist **nicht** durch einen Testlauf belegt.
-  2. `note_seq` (`src/realm-rs/src/security.rs:229-236`) lehnt nie ab. Der Rückgabewert wird vom einzigen Aufrufer **verworfen** (`src/realm-rs/src/net.rs:831`); es existiert keine weitere Lesestelle von `last_seq`/`seen_any_seq` außerhalb von `note_seq` und dem zugehörigen Test.
+  1. `Frame.seq` ist `i64` mit `#[serde(default)]` (`src/realm-rs/src/protocol.rs:71-72`): ein **fehlendes** Feld ergibt `0`. Andere JSON-Typen (`null`, String, Float) sind für `i64` kein gültiger Wert und landen damit im Fehlerzweig des Parse-Pfads (`src/realm-rs/src/net.rs:624-633`) als `bad_frame`; `type` besitzt **kein** `default` und ist daher Pflicht. Dieser Schluss folgt aus Feldtyp und Fehlerzweig und ist **nicht** durch einen Testlauf belegt.
+  2. `note_seq` (`src/realm-rs/src/security.rs:229-236`) lehnt nie ab. Der Rückgabewert wird vom einzigen Aufrufer **verworfen** (`src/realm-rs/src/net.rs:864`); es existiert keine weitere Lesestelle von `last_seq`/`seen_any_seq` außerhalb von `note_seq` und dem zugehörigen Test.
   3. **`last_seq` ist der höchste bisher gesehene Wert, nicht der zuletzt gesehene:** die Zuweisung erfolgt nur unter `seq > last_seq` bzw. beim ersten Wert (`src/realm-rs/src/security.rs:230-233`); bei älteren oder doppelten Werten läuft er nicht zurück. `seen_any_seq` unterscheidet „noch nichts gesehen" von „Wert 0".
-  4. **Beobachtungszeitpunkt:** nach Paketgröße, JSON-Format und Typ-Whitelist (`src/realm-rs/src/net.rs:582,592,602`) und **vor** Session- und Rate-Gate (`:836`). Übergrößene, unparsbare und unbekannte Typen werden nicht sequenzbeobachtet; vom Gate verworfene Frames werden es.
+  4. **Beobachtungszeitpunkt:** nach Paketgröße, JSON-Format und Typ-Whitelist (`src/realm-rs/src/net.rs:609,619,629`) und **vor** Session- und Rate-Gate (`:864`). Übergrößene, unparsbare und unbekannte Typen werden nicht sequenzbeobachtet; vom Gate verworfene Frames werden es.
   5. `ConnGuard` ist verbindungslokal und je Verbindung neu (`src/realm-rs/src/net.rs:509`); eine neue Verbindung beginnt ohne Sequenzhistorie.
   6. Quittung: `HEARTBEAT` erzeugt als einziger Typ `SYNC {ack_seq}` (`src/realm-rs/src/handlers.rs:1393`). `WELCOME` (`:583`), `PARENTAL_RESULT` (`:891`), `ATTRIBUTE_RESULT` (`:1276`, `:1303`) und die System-Chat-Antwort (`:1362`) spiegeln die Nummer nur im S2C-Rahmen; die übrigen S2C-Frames senden `seq = 0` (z. B. `handlers.rs:913,983,992,1008`).
   7. Für `MOVE` nennt der Typkommentar ein Payload-Feld `seq` (`src/realm-rs/src/protocol.rs:12`); der Handler wertet es **nicht** aus und liest nur `dir`/`x`/`y` (`src/realm-rs/src/handlers.rs:635-640`; im gesamten Handler findet sich kein `data.get("seq")`). Verbindlich ist allein `Frame.seq`.
@@ -909,7 +909,7 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
   - **Eingangswege geprüft:** Text (einziger Anwendungspfad), Close, Lesefehler sowie die stillschweigend ignorierten Kontroll-/Binärframes; **keine** Dekompressions- oder Kompressionspfade im Realm (`src/realm-rs/Cargo.toml` ohne entsprechende Abhängigkeit) — es wird keiner unterstellt.
   - **Alle 20 C2S-Typen** aus `src/realm-rs/src/protocol.rs:10-35` geprüft; die whitelisted, aber nicht implementierten Typen `NPC_TALK` (6), `AUCTION_LIST` (7) und `AUCTION_BID` (8) sind als solche ausgewiesen (siehe N-1).
   - **Tatsächliche Gate-Reihenfolge dokumentiert** und mit dem Produktionscode belegt (B-1/B-2 unten; normativ `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3): Größe → Parse → Whitelist → Sequenzbeobachtung → Session → Rate → Dispatch → Fachprüfung. `security::gate_frame` prüft ausschließlich Session und Rate Limit.
-  - **T-1 geschlossen:** sieben Tests am **echten** `read_loop` mit echten `Message::Text`-Frames (Namen in Abschnitt 4.3.1). Die Zuordnung der Ablehnungsstufe folgt aus Testdaten, Kontrollfluss und beobachteter Wirkung gemeinsam; `ConnGuard::violations` allein unterscheidet die Stufen nicht. „Größe vor Parse" ist strukturell am Produktionscode belegt (`net.rs:582` mit `continue` vor `net.rs:592`).
+  - **T-1 geschlossen:** sieben Tests am **echten** `read_loop` mit echten `Message::Text`-Frames (Namen in Abschnitt 4.3.1). Die Zuordnung der Ablehnungsstufe folgt aus Testdaten, Kontrollfluss und beobachteter Wirkung gemeinsam; `ConnGuard::violations` allein unterscheidet die Stufen nicht. „Größe vor Parse" ist strukturell am Produktionscode belegt (`net.rs:609` mit `continue` vor `net.rs:619`).
   - **M-1:** vier MOVE-Grenztests belegen die konkret geprüften Eingaben (`1e308` → begrenzte Bewegung, `1e400` → Parse-Ablehnung, zwei sehr große endliche Werte → endliches No-Op, entartete und falsch typisierte `dir`-Formen → folgenlos). Das ist **keine** vollständige Zahlenvalidierung und **keine** Behauptung, alle Zahlenkonstellationen seien abgedeckt.
   - **Übernommener, in diesem Abschluss nicht neu ausgeführter Stand:** **647** erfolgreiche Realm-Tests (`cargo test --offline`, Manifest `src/realm-rs/Cargo.toml`) — Basis 636 zuzüglich der sieben `read_loop_*`- und vier `move_frame_*`-Tests. Die Zahl ist ein gemeldeter Lauf des vorangegangenen Arbeitsauftrags und **keine** Quelltextzählung. Ebenso **nicht** neu ausgeführt: `cargo clippy --offline --all-targets --all-features` mit **44 = 44** normalisierten Meldungen im zeilennormalisierten Mengenvergleich gegen eine aus HEAD aufgebaute Vergleichsbasis (keine neue, keine entfallene Warnung). Dieser Vergleich ist **methodisch nicht** mit den früheren 58-Meldungen-Vergleichen anderer Abschnitte dieses Dokuments gleichzusetzen; er ist ein eigener, hier nur berichteter Vergleichsstand. Rust-Toolchain über `source .tmp/rust/env.sh`; Prüfartefakte unter `.tmp/audit-4-3-gating-tests/`, nach Pfadprüfung entfernt. `git diff --check` ohne Befund.
   - **Redaktionelle Korrekturen K-1 bis K-4** aus der Finalprüfung sind behoben: MOVE-Prosa in `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` aus der Mitte der §2-Tabelle hinter die vollständige Tabelle verschoben (Tabelleninhalt und Zeilenreihenfolge gegenüber HEAD unverändert); zwei Test-Kommentarverweise in `net.rs` auf den `add_violation`-Aufruf (`security.rs:265`) bzw. den tatsächlichen `pipeline()`-Helfer (`security.rs:916`) korrigiert; ein Abschnittskommentar aus der Doc-Beschreibung des ersten Tests in einen normalen Abschnittskommentar verschoben. Testattribute, Funktionskörper und Assertions blieben unverändert.
@@ -920,7 +920,7 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 
 **B-1 — Code-/Doku-Widerspruch (korrigiert).** Dokumentiert war „Session →
 Sequenz → Rate-Limit". Tatsächlich führt `dispatch` die Sequenzbeobachtung
-**vor** Session und Rate aus (`net.rs:831` vor `net.rs:836`). Die
+**vor** Session und Rate aus (`net.rs:864` vor `net.rs:876`). Die
 Sequenzstufe ist **kein** Gate und entscheidet nichts, die Abweichung hatte
 daher keine sicherheitsrelevante Wirkung. Korrigiert in
 `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3 und im
@@ -929,7 +929,7 @@ daher keine sicherheitsrelevante Wirkung. Korrigiert in
 **B-2 — Code-/Doku-Widerspruch (korrigiert).** Die Doku schrieb Größe,
 JSON-Format und Typ-Whitelist `gate_frame` zu. `gate_frame` prüft
 tatsächlich **nur Session und Rate Limit**; die drei anderen Stufen liegen
-im Aufrufer `read_loop` (`net.rs:582`, `:592`, `:602`). Der Name der
+im Aufrufer `read_loop` (`net.rs:609`, `:619`, `:629`). Der Name der
 Funktion allein belegt keine vollständige Abdeckung. Korrigiert in §3.3 des
 Serverautoritätsdokuments und im `gate_frame`-Dokument; die Modellierungs-
 Tests in `security.rs` sind jetzt ausdrücklich als solche gekennzeichnet.
@@ -951,8 +951,8 @@ Der Kontrolltest `read_loop_delivers_valid_known_message_to_handler` belegt,
 dass das Gerüst überhaupt den Wirkungspfad erreicht; die Zuordnung der
 einzelnen Ablehnungsstufen erfolgt über den vorhandenen Diagnosewert
 `ConnGuard::violations`. Die Reihenfolge „Größe vor Parse" ist **strukturell
-am Produktionscode** belegt (Größenprüfung `:582` mit `continue` vor dem
-Parse `:592`), nicht aus fehlender Handler-Wirkung abgeleitet.
+am Produktionscode** belegt (Größenprüfung `:609` mit `continue` vor dem
+Parse `:619`), nicht aus fehlender Handler-Wirkung abgeleitet.
 
 **B-3 — Externe Betriebsgrenze (nicht geändert).** `SEC_MAX_FRAME_BYTES`
 ist ein Anwendungslimit; es greift nach dem Transportpuffer. Das Projekt
@@ -962,7 +962,7 @@ Abschnitt wurde **keine** Transportkonfiguration geändert.
 
 **N-1 — Whitelisted, nicht implementiert.** `NPC_TALK` (6),
 `AUCTION_LIST` (7), `AUCTION_BID` (8) stehen in `is_known_c2s`, haben aber
-keinen Dispatch-Arm und enden im `other`-Zweig (`net.rs:929`) ohne Wirkung.
+keinen Dispatch-Arm und enden im `other`-Zweig (`net.rs:969`) ohne Wirkung.
 Fail-closed, kein Fehler.
 
 **M-1 — MOVE-Zahlen-/Arraygrenzen (geprüft, kein Defekt reproduziert).**
@@ -984,11 +984,103 @@ belegte Parser-Grenze, nicht die Robustheit von `world::apply_move`
 - **Status:** `ZU PRÜFEN`
 - **Priorität:** offen (im Audit-Auftrag nicht vergeben)
 - **Betroffener Bereich:** Rate-Limits pro Verbindung (`src/realm-rs/src/security.rs`, `src/realm-rs/src/config.rs`)
-- **Bekannte Ausgangslage:** Gestaffelte Rate-Limits existieren (`check_rate` in `src/realm-rs/src/security.rs:167`); vorhandene Tests: `flood_of_rare_requests_is_capped` (`src/realm-rs/src/security.rs:576`), `movement_limit_exceeds_rare_limit` (`src/realm-rs/src/security.rs:598`), `repeated_violations_disconnect` (`src/realm-rs/src/security.rs:616`). Die Werte und die Verbands-/Disconnect-Semantik sind im Configuration-Modul hinterlegt (`src/realm-rs/src/config.rs`).
+- **Historische Ausgangslage (überholt, nicht mehr geltend):** Gestaffelte Rate-Limits existierten (`check_rate` in `src/realm-rs/src/security.rs:167`); vorhandene Tests: `flood_of_rare_requests_is_capped` (`src/realm-rs/src/security.rs:576`), `movement_limit_exceeds_rare_limit` (`src/realm-rs/src/security.rs:598`), `repeated_violations_disconnect` (`src/realm-rs/src/security.rs:616`). Diese Zeilenangaben sowie die implizite Annahme einer Angemessenheit der Schwellwerte sind **nicht mehr geltend** und **kein** Beleg; die aktuellen Fundstellen und die tatsächliche Semantik stehen unten.
 - **Offene Frage / Entscheidung:** Angemessenheit der Schwellwerte und der Disconnect-Auswirkung; Vollständigkeit der Testabdeckung aller gestaffelten Klassen.
-- **Verifizierte Belege:** `src/realm-rs/src/security.rs:167` (`check_rate`), die drei genannten Tests, `src/realm-rs/src/config.rs` (SecurityCfg).
-- **Nächster zulässiger Schritt:** Read-only Prüfung der Schwellwerte und Testauswertung im Folgeauftrag; Tests dürfen dabei ausgeführt werden, neue Tests werden nicht geschrieben.
+- **Verifizierte Belege:** siehe Abschnitt 4.4.1 (aktuelle Fundstellen, Klassenzuordnung, Fenster-, Verletzungs- und Konfigurationssemantik sowie Testnachweise).
+- **Nächster zulässiger Schritt:** Für diesen Eintrag nichts offen. Die noch zu bewertenden Entscheidungen R-5 und R-6 aus Abschnitt 4.4.1 sind **gesonderte** Vorhaben und werden aus diesem Eintrag nicht abgeleitet.
 - **Abschlussnachweis:** ausstehend.
+
+#### 4.4.1 Tatsächliche Rate-Semantik, Befunde und Nachweise
+
+**Klassenzuordnung aller 20 C2S-Typen** (`MsgClass::of`, `src/realm-rs/src/security.rs:42-59`; Budget je Klasse in `ConnGuard::windows`, `security.rs:195`):
+
+| Klasse | Typen | Default | Env | gemeinsames Budget |
+|---|---|---|---|---|
+| Movement | MOVE | 30 | `SEC_MOVE_PER_SEC` | nur MOVE |
+| Interactive | CHAT, HEARTBEAT, PARENTAL | 10 | `SEC_INTERACTIVE_PER_SEC` | **alle drei teilen ein Budget** |
+| Combat | ATTACK, ABILITY, PICKUP | 10 | `SEC_COMBAT_PER_SEC` | **alle drei teilen ein Budget** |
+| Rare | HELLO, NPC_TALK, AUCTION_LIST, AUCTION_BID, AUCTION_BUY, GROUP_INVITE, GROUP_INVITE_REACT, GROUP_SUGGEST, GROUP_SUGGEST_DECIDE, GROUP_LEAVE, GROUP_KICK, GROUP_TRANSFER, SPEND_ATTRIBUTE | 5 | `SEC_RARE_PER_SEC` | **alle 13 teilen ein Budget** |
+
+HELLO liegt damit in der **Selten**-Klasse und verbraucht das Selten-Budget auch bei einem erneuten HELLO derselben Verbindung (`CommitOutcome::Refreshed`).
+
+**Fenster-, Burst- und Budgetsemantik** (`check_rate`, `src/realm-rs/src/security.rs:204-219`) — am Code benannt als **Sliding Window über Zeitstempel** (kein Token Bucket):
+
+- **Datenstruktur:** `HashMap<MsgClass, VecDeque<Instant>>` — **eine Queue je Klasse**, alle Typen einer Klasse teilen sie.
+- **Begrenzung:** **verbindungslokal**. `ConnGuard` entsteht genau einmal pro Verbindung (`src/realm-rs/src/net.rs:509`) und wird per `&mut` an `read_loop` gereicht. Es gibt **keine** konto-, spieler- oder IP-bezogene Begrenzung.
+- **Fensterdauer und Zeitquelle:** 1000 ms, `std::time::Instant`; in Produktion `Instant::now()` (`net.rs:876`).
+- **Exakte Fenstergrenze:** `now.duration_since(*t).as_millis() > 1000` (`:210`) ist **strikt größer**. Ein Eintrag bleibt exakt 1000 ms belegt und verfällt erst ab 1001 ms (Ganzmillisekunden-Trunkierung). Nachweis: `rate_window_boundary_is_exclusive_at_1000_ms`.
+- **Sofort zulässig:** `window.len() as u32 >= limit` (`:214`) ⇒ **genau `limit`** Nachrichten je Klasse im Fenster. Nachweis für Selten: `flood_of_rare_requests_is_capped` (500 gleiche Zeitstempel ⇒ genau 5 `Allow`); für Bewegung: `movement_limit_exceeds_rare_limit`.
+- **Burst:** die ersten `limit` passieren, weitere werden abgewiesen; erst wenn der älteste Eintrag das Fenster verlässt, wird wieder ein Slot frei.
+- **Abgewiesene Versuche** werden **nicht** in die Queue geschrieben (`:215` vor `:217`) und **verbrauchen kein Budget**; sie verlängern das Fenster nicht. Nachweis: `rejected_rate_attempts_do_not_extend_the_window`.
+- **Geteilte Budgets:** Nachweis `two_types_of_same_class_share_one_budget` (ATTACK + ABILITY teilen das Combat-Budget) und `exhausted_class_does_not_affect_other_classes`.
+- **Speicher:** bei Defaults höchstens `30 + 10 + 10 + 5 = 55` Einträge (vier Klassen); **konfigurierbare Limits können diese Grenze erhöhen**. Abgereinigt wird nur am Kopf beim Aufruf von `check_rate` (`:208-213`).
+- **Reconnect/Takeover:** neuer `ConnGuard` ⇒ **alle Budgets und der Verletzungszähler vollständig zurückgesetzt**. Budgets wirken ausschließlich verbindungsintern.
+- **HELLO und HEARTBEAT:** HELLO ist die einzige vor Login zulässige Nachricht und verbraucht Selten-Budget. HEARTBEAT ist **keine** Ausnahme — er unterliegt demselben Session-Gate (siehe Abschnitt 4.3).
+
+**Verletzungszählung** (`add_violation`, `src/realm-rs/src/security.rs:222-225`; `saturating_add`):
+
+| Fehlerklasse | Fundstelle | Zähler | Disconnect an der Schwelle? |
+|---|---|---|---|
+| Größe | `net.rs:619` | +1 | **ja** (`if add_violation { break }`) |
+| Parse | `net.rs:628` | +1 | **ja** |
+| unbekannter Typ | `net.rs:639` | +1 | **ja** |
+| fehlende Session | `security.rs:265` | +1 | **nein** — Rückgabewert wird verworfen |
+| Rate-Verstoß | `security.rs:270` | +1 | **ja** (`Disconnect`) |
+| fachlich unzulässige Spielabsicht | `handlers.rs:719, 852, 1292, 1351` | **+0** | nein — nur `log_reject(..., 0)` |
+
+- **Kumulativ, ohne Abklingen:** Der Zähler steigt monoton über die Verbindungsdauer und wird **nie zurückgesetzt**; er hat **keine** Zeitkomponente.
+- **Schwelle:** `violations >= disconnect_after_violations.max(1)` (`:224`). Der **50.** Verstoß trennt bei Default 50.
+- **Erlaubte Nachrichten verändern den Zähler nicht** — nur `add_violation` schreibt.
+- **Fachlich unzulässige Spielabsichten erhöhen den Zähler nicht** (`attacker_dead`, Ability-Failed, `unknown_attribute`/`no_attribute_points`, `auction_unavailable` loggen mit hart kodiertem `0`). „Ungültig ≠ Cheat" ist damit strukturell gewahrt.
+- **Zeitpunkt:** `check_rate` läuft im `read_loop`-Task vor `dispatch`; der Zeitstempel entsteht bei `gate_frame`, unabhängig von Laufzeit oder Parallelität laufender Handler. Ein langer Handler **verzögert** die Prüfung Folgender Frames (sequentieller Read-Loop), verfälscht sie aber nicht.
+
+**Konfigurationsgrenzen** (`security_config`, `src/realm-rs/src/config.rs:416-431`; Helfer `num1`, `:254-258`): `env.get(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(def)` — **kein Clamping**, trotz des Helfernamens.
+
+| Eingabe | Verhalten | Test |
+|---|---|---|
+| ungültiger String, negativ, leer, `"5.5"` | `u64`-Parse schlägt fehl → **Default** | `security_config_falls_back_to_default_on_unparsable_values` |
+| `"0"` | **akzeptiert**, kein Clamp | `security_config_accepts_zero_without_clamping` |
+| `≤ u32::MAX` | unverändert übernommen | `security_config_uses_defaults_when_unset`, `security_config_truncates_above_u32_max` |
+| in (`u32::MAX`, `u64::MAX`] | `as u32` **trunkiert still** (z. B. 2³² → 0) | `security_config_truncates_above_u32_max` |
+| `> u64::MAX` | `u64`-Parse schlägt fehl → Default | `security_config_falls_back_on_u64_parse_overflow` |
+| `SEC_MAX_FRAME_BYTES` | Zieltyp `usize` (64 Bit) ⇒ **keine** u32-Trunkation | `security_config_frame_limit_is_not_truncated` |
+
+**Folgen:** `SEC_RARE_PER_SEC=0` sperrt die **gesamte** Selten-Klasse einschließlich HELLO (Nachweis `zero_rate_limit_locks_the_whole_class`) — ein `0` ist damit **keine** Abschaltung, sondern eine Blockade des Einstiegs. `SEC_MAX_FRAME_BYTES=0` verwirft jeden Frame. `SEC_DISCONNECT_AFTER_VIOLATIONS=0` wirkt über `.max(1)` als **1** (Nachweis `zero_disconnect_threshold_acts_as_one`).
+
+**Befunde, getrennt nach Art:**
+
+- **R-1 — Code-/Doku-Widerspruch (korrigiert):** „Unbekannte Typen fallen fail-closed in Selten" war ungenau. Nicht-whitelisted Typen werden bereits in `read_loop` bei `is_known_c2s` (`net.rs:629`) verworfen, **vor** `gate_frame`, und verbrauchen **kein** Budget. Der Rare-Fallback greift nur für **whitelisted** Typen.
+- **R-2 — Code-/Doku-Widerspruch (korrigiert):** Die whitelisted, aber **nicht implementierten** Typen `NPC_TALK`, `AUCTION_LIST`, `AUCTION_BID` passieren Whitelist **und** `gate_frame`, **verbrauchen also Selten-Budget**, und enden danach im `other`-Zweig (`net.rs:969`) ohne Wirkung. Der Budgetverbrauch ohne Wirkung ist im Bestand und wird hier als Benennung festgehalten.
+- **R-3 — Code-/Doku-Widerspruch (korrigiert):** Die Fundstellen dieses Abschnitts wurden aktualisiert (siehe oben).
+- **R-4 — Code-/Doku-Widerspruch (korrigiert):** Die Verbindungstrennung war nur dem Rate-Verstoß zugeschrieben. Tatsächlich trennen **auch** Größe, Parse und unbekannter Typ ab Schwellwert, während der **Session**-Zweig **nie** trennt.
+- **R-5 — Offene Schutzentscheidung (nicht entschieden):** Ein nicht angemeldeter Flood erhöht den Verletzungszähler beliebig, löst aber **niemals** eine Trennung aus; das Klassenbudget wird dabei nicht verbraucht (Nachweis `session_gate_violations_never_return_disconnect` und `read_loop_session_violations_count_but_never_disconnect`). Die Verbindung bleibt offen; der Aufwand je Frame ist eine World-Sperre plus Zählerinkrement. Ob das angemessen begrenzt ist, ist **offen** — der Test hält Bestandsverhalten fest und ist **keine** Empfehlung für eine Straf-, Bann- oder Disconnect-Regel.
+- **R-6 — Offene Konfigurationsentscheidung (nicht entschieden):** `num1` klemmt nicht und `as u32` trunkiert still. Die oben genannten Tests dokumentieren **Bestandsverhalten**; sie sind **keine** Empfehlung und **keine** Freigabe einer Fehlkonfiguration. Ob ein Clamping eingeführt wird, ist offen.
+- **R-7 — Externe Betriebsgrenze:** Budgets und Zähler sind rein verbindungslokal; Reconnect und Takeover setzen sie vollständig zurück.
+- **R-8 — Offene fachliche Entscheidung:** Geteilte Budgets (Interactive 10/s für HEARTBEAT+CHAT+PARENTAL; Rare 5/s für 13 Typen einschließlich HELLO) sind **hier nicht neu festgelegt**. Ob ein plausibles Muster (10 Heartbeats/s **plus** Chat) das Budget überschreitet, ist ohne Clientfrequenz **nicht** entscheidbar.
+- **R-9 — Externe Lastmessungsgrenze:** Im Repository existiert **kein** Clientcode, der C2S sendet: `shared/protocol.gd:24` (`encode`) hat keinen Aufrufer, und keine `.gd`-Datei nutzt `WebSocketPeer`/`ws://`. Eine **empirische Angemessenheitsgarantie** der Schwellwerte ist daher **nicht** möglich. Die Tickrate beträgt `TICK_MS` Default 100 (10 Hz), `SEC_MOVE_PER_SEC=30` erlaubt das Dreifache davon.
+- **R-10 — Aussagegrenze:** Rate-Limits begrenzen **Nachrichten**, nicht Schadensrate, Bewegungsgeschwindigkeit, Idempotenz oder sämtliche Ressourcenlast. Der serverseitige ATTACK-Taktfix (`b121766`, RAM-gebundenes `last_strike`) bleibt ein **eigener** Schutz und ist von `SEC_COMBAT_PER_SEC` unabhängig.
+
+**Testnachweise (Neuergänzung zu Audit 4.4):**
+
+| Test | Ebene | Grenze/Klasse | Zeitsteuerung | Nachweist |
+|---|---|---|---|---|
+| `read_loop_rate_gate_drops_excess_frames_and_keeps_other_classes` | **echter `read_loop`** | Movement 2/1000 ms; Combat unabhängig | eingefrorene Uhr über `read_loop_with_clock` | erlaubte Frames bewegen (x = 2.0), Rate-Verstöße ändern nichts, `violations == 2`, **andere Klasse wirkt** (`combat` bewaffnet) |
+| `read_loop_rate_violation_at_threshold_ends_processing` | **echter `read_loop`** | Movement 1, Schwelle 2 | eingefrorene Uhr | erster Verstoß `Drop`, Schwelle beendet kontrolliert, Folgeframe **nicht** verarbeitet (`combat.is_none()`) |
+| `read_loop_session_violations_count_but_never_disconnect` | **echter `read_loop`** | Schwelle 1, nicht angemeldet | eingefrorene Uhr | 3 Frames gezählt und weiterverarbeitet, keine Trennung, keine Wirkung |
+| `rate_window_boundary_is_exclusive_at_1000_ms` | `check_rate` | Movement 1 | injiziertes `now` | 1000 ms belegt, 1001 ms frei |
+| `rejected_rate_attempts_do_not_extend_the_window` | `check_rate` | Rare 2 | injiziertes `now` | 50 Abweisungen bei 600 ms verlängern nicht |
+| `two_types_of_same_class_share_one_budget` | `check_rate` | Combat 2 | injiziertes `now` | ATTACK + ABILITY teilen ein Budget |
+| `exhausted_class_does_not_affect_other_classes` | `check_rate` | Movement 1 / Rare 1 | injiziertes `now` | Klassen unabhängig |
+| `session_gate_violations_never_return_disconnect` | `gate_frame` | Schwelle 1 | injiziertes `now` | `GateDecision::Drop` auch über der Schwelle; kein Budgetverbrauch |
+| `zero_rate_limit_locks_the_whole_class` | `gate_frame` | Rare 0 | injiziertes `now` | Limit 0 sperrt inkl. HELLO |
+| `zero_disconnect_threshold_acts_as_one` | `gate_frame` | Schwelle 0 | injiziertes `now` | `.max(1)` wirkt als 1 |
+| 6 × `security_config_*` (`config.rs`) | echter Parser | Defaults, ungültig, negativ, 0, u32-Grenze, 2³², u64-Überlauf | entfällt | Parserbefunde der Tabelle oben |
+
+**Zeit-Seam, bewusst klein und verhaltensneutral — mit gleicher Abfrageposition:** `read_loop` reicht die **Uhrfunktion** an `read_loop_with_clock` und damit an `dispatch` durch; `dispatch` fragt sie **erst nach der World-Sperre für `authenticated` und unmittelbar vor dem `gate_frame`-Aufruf** ab — dieselbe Position wie in der Basis `9d590502` (dort direkt im Argument von `gate_frame`). Zwischen Abfrage und Gate liegt bewusst **kein** `await`. Ein früher abgreifender Entwurf (Uhrabfrage als Aufrufargument von `dispatch`, also **vor** der World-Sperre) wurde erkannt und verworfen: er hätte den Zeitstempel unter Sperrkontention um die Wartezeit veraltet — eine **Verschiebung des Messzeitpunkts**, deren konkrete Leistungswirkung **nicht** gemessen wurde und hier **nicht** behauptet wird. Regressionsnachweis: `clock_is_queried_only_after_the_world_lock_is_released` (`src/realm-rs/src/net.rs`) hält die World-Sperre fest und belegt ereignisgesteuert (ohne `sleep`, ohne Annahme über Task-Scheduling), dass die Uhr vor der Freigabe **nicht** und danach genau einmal abgefragt wird. **Im Betrieb wird weiterhin ausschließlich
+
+**Verifikation (Arbeitsbaum):** `cargo test --offline` (Manifest `src/realm-rs/Cargo.toml`): **664 bestanden, 0 fehlgeschlagen, 0 ignoriert** — Basis 647 zuzüglich 17 neuer Tests (3 `read_loop`-Rate-Tests, 1 Regressionsnachweis zur Abfrageposition der Uhr, 7 `security.rs`, 6 `config.rs`); die Zahl wurde tatsächlich ermittelt. `cargo clippy --offline --all-targets --all-features --message-format=short`: **0 Fehler**, **44 = 44** normalisierte Meldungen im zeilennormalisierten Mengenvergleich gegen eine aus HEAD `9d590502400b2f240f76515b51764391e2499388` aufgebaute Vergleichsbasis (isolierte Kopie der drei geänderten Quellen) — **keine neue und keine entfallene** Meldung. Dieser Vergleich ist ein **eigener** und **nicht** mit den 58-Meldungen-Vergleichen anderer Abschnitte dieses Dokuments gleichzusetzen. `rustfmt --check --edition 2021` auf allen drei Scope-Dateien: **keine Abweichung** (Basis ebenso). `git diff --check`: ohne Befund. Rust-Toolchain über `source .tmp/rust/env.sh`; Prüfartefakte unter `.tmp/audit-4-4-rate-evidence/`, nach Pfadprüfung entfernt.
+
+**Verhältnis zu anderen Punkten:** Audit 4.2 und 4.3 bleiben geschlossen; **Audit 4.7 und `P-33` bleiben offen**. `AUTH-03A`/`P-30` bleiben wie geschrieben. Keine neue P-ID und keine Prioritätsänderung.
 
 ### 4.5 Logging und Schutz sensibler Daten
 

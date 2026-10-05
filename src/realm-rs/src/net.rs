@@ -559,9 +559,44 @@ async fn read_loop<S>(
     conn_id: u64,
     guard: &mut crate::security::ConnGuard,
     sec_cfg: &crate::security::SecurityCfg,
-    mut stream: S,
+    stream: S,
 ) where
     S: Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
+{
+    // Produktion liest die Uhr unverändert aus `Instant::now()`; die Uhr wird
+    // nur als **Funktion** durchgereicht, damit die Rate-Stufe **am echten
+    // `read_loop`** deterministisch prüfbar ist (Audit 4.4, L-1). Ohne diese
+    // Seam müsste ein Test annehmen, dass sein Lauf sicher unter 1000 ms
+    // bleibt — das wäre eine Annahme, kein Nachweis. Es gibt **keine**
+    // verhaltensändernde Konfigurationsmöglichkeit: die Uhr ist kein
+    // WebSocket-Eingang und nicht von außen steuerbar.
+    //
+    // Die Uhr wird bewusst **nicht** hier abgefragt: `dispatch` fragt sie erst
+    // nach der World-Sperre ab, damit die Abfragezeit wie in der Basis
+    // unmittelbar vor dem Gate liegt (siehe Kommentar dort).
+    read_loop_with_clock(ctx, tx, conn_id, guard, sec_cfg, stream, Instant::now).await
+}
+
+/// Wie [`read_loop`], aber mit injizierbarer Uhrquelle.
+///
+/// Verhaltensneutral gegenüber `read_loop`: im Betrieb wird ausschließlich
+/// `read_loop` aufgerufen, das `Instant::now` setzt. Die Parameterübergabe
+/// dient allein der Testbarkeit der Rate-Stufe; der **Abfragezeitpunkt** der
+/// Uhr bleibt der der Basis (in `dispatch`, nach der World-Sperre).
+///
+/// Nachweis des Abfragezeitpunkts:
+/// `clock_is_queried_only_after_the_world_lock_is_released`.
+async fn read_loop_with_clock<S, F>(
+    ctx: &Arc<Ctx>,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    guard: &mut crate::security::ConnGuard,
+    sec_cfg: &crate::security::SecurityCfg,
+    mut stream: S,
+    now: F,
+) where
+    S: Stream<Item = Result<Message, tungstenite::Error>> + Unpin,
+    F: Fn() -> Instant + Sync,
 {
     while let Some(msg) = stream.next().await {
         let msg = match msg {
@@ -609,7 +644,7 @@ async fn read_loop<S>(
             }
             continue;
         }
-        if dispatch(ctx, tx, conn_id, guard, sec_cfg, frame).await {
+        if dispatch(ctx, tx, conn_id, guard, sec_cfg, frame, &now).await {
             break; // massive/wiederholte Überschreitung → Disconnect, kein Bann
         }
     }
@@ -825,6 +860,7 @@ async fn dispatch(
     guard: &mut crate::security::ConnGuard,
     sec_cfg: &crate::security::SecurityCfg,
     frame: Frame,
+    now: &(dyn Fn() -> Instant + Sync),
 ) -> bool {
     // Sequenz vermerken (Lag-tolerant: Duplikat/Out-of-Order ist kein Cheat,
     // wird nur vermerkt — keine Ablehnung, keine Verurteilung).
@@ -833,7 +869,14 @@ async fn dispatch(
         let world = ctx.shared.lock().await;
         world.by_conn.contains_key(&conn_id)
     };
-    match crate::security::gate_frame(sec_cfg, guard, frame.msg_type, authenticated, std::time::Instant::now()) {
+    // Die Uhr wird **hier** abgefragt — also nach dem Ermitteln von
+    // `authenticated` und nach dem Freigeben der World-Sperre, unmittelbar vor
+    // dem Gate. Das ist exakt die Position, an der die Uhr vor der
+    // Testbarkeit-Seam direkt beim `gate_frame`-Aufruf gelesen wurde (Basis
+    // `9d590502`). Zwischen dieser Abfrage und `gate_frame` liegt bewusst
+    // **kein** weiteres `await`: würde die Uhr früher abgefragt, wäre der
+    // Zeitstempel unter Sperrkontention um die Wartezeit veraltet.
+    match crate::security::gate_frame(sec_cfg, guard, frame.msg_type, authenticated, now()) {
         crate::security::GateDecision::Allow => {}
         crate::security::GateDecision::Drop => {
             let world = ctx.shared.lock().await;
@@ -3706,7 +3749,7 @@ mod tests {
     ) {
         let frame = crate::protocol::Frame::new(seq, crate::protocol::c2s::ATTACK, data);
         assert!(
-            !dispatch(ctx, tx, 7, guard, sec_cfg, frame).await,
+            !dispatch(ctx, tx, 7, guard, sec_cfg, frame, &Instant::now).await,
             "ATTACK-Frame darf hier keine Verbindung trennen"
         );
     }
@@ -4129,6 +4172,283 @@ mod tests {
         }
         let stream = futures_util::stream::iter(items);
         read_loop(ctx, &tx, 7, guard, sec_cfg, stream).await;
+    }
+
+    /// Füttert den echten `read_loop` mit **eingefrorener Uhr**.
+    ///
+    /// Audit 4.4 (L-1): Alle Frames liegen dadurch im selben 1000-ms-Fenster
+    /// der Rate-Stufe. Das ist deterministisch und braucht **keine** Annahme
+    /// darüber, dass der Testlauf sicher unter einer Sekunde bleibt, und
+    /// keinen `sleep`. Die Uhrquelle selbst ist der einzige Testeingriff;
+    /// der geprüfte Pfad (`read_loop` → `dispatch` → `gate_frame` →
+    /// Handler) ist unverändert der Produktionspfad.
+    async fn drive_read_loop_frozen(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        frames: Vec<String>,
+    ) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut items: Vec<Result<Message, tungstenite::Error>> =
+            Vec::with_capacity(frames.len());
+        for t in frames {
+            items.push(Ok(Message::Text(t.into())));
+        }
+        let base = Instant::now();
+        let stream = futures_util::stream::iter(items);
+        read_loop_with_clock(ctx, &tx, 7, guard, sec_cfg, stream, || base).await;
+    }
+
+    /// F-1-Regression (Audit 4.4): Die Uhr darf **erst nach** der
+    /// World-Sperre für `authenticated` abgefragt werden — also unmittelbar vor
+    /// dem Gate, wie in der Basis `9d590502`. Wird sie früher abgefragt, ist
+    /// der Zeitstempel unter Sperrkontention um die Wartezeit veraltet.
+    ///
+    /// **Ereignisgesteuert, ohne `sleep` und ohne Annahme über das
+    /// Task-Scheduling:** Der Test hält die World-Sperre selbst fest. Ein
+    /// `inspect`-Hook am Stream signalisiert, sobald der Frame *ausgeliefert*
+    /// wurde — das passiert im selben Poll, in dem `dispatch` betreten wird,
+    /// danach parkt der Read-Loop an der gesperrten World-Sperre. Erst wenn
+    /// die Sperre freigegeben ist, darf die Uhr laufen.
+    ///
+    /// Vor der Korrektur (Uhrabfrage als Aufrufargument von `dispatch`) wäre
+    /// `calls == 1`, **bevor** die Sperre freigegeben wird — der Test schlägt
+    /// dann genau an dieser Zeile fehl.
+    #[tokio::test]
+    async fn clock_is_queried_only_after_the_world_lock_is_released() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+
+        // Die World-Sperre selbst festhalten: `authenticated` kann erst ermittelt
+        // werden, wenn der Test sie wieder freigibt. Der Guard bleibt hier im
+        // Test-Scope, damit er gezielt freigegeben werden kann.
+        let guard_world = ctx.shared.lock().await;
+        let clock_calls = Arc::new(AtomicUsize::new(0));
+        let clock_saw_free_lock = Arc::new(AtomicUsize::new(0));
+        let base = Instant::now();
+        let shared = ctx.shared.clone();
+
+        let clock = {
+            let calls = clock_calls.clone();
+            let saw_free = clock_saw_free_lock.clone();
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                // War die World-Sperre zum Abfragezeitpunkt wieder frei?
+                if shared.try_lock().is_ok() {
+                    saw_free.store(1, Ordering::SeqCst);
+                }
+                base
+            }
+        };
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let frame_yielded = Arc::new(tokio::sync::Notify::new());
+        let stream = futures_util::stream::iter(vec![Ok::<
+            Message,
+            tungstenite::Error,
+        >(Message::Text(
+            c2s_text(crate::protocol::c2s::MOVE, serde_json::json!({"dir": [1, 0]}))
+                .into(),
+        ))])
+        .inspect({
+            let yielded = frame_yielded.clone();
+            move |_| {
+                yielded.notify_one();
+            }
+        });
+
+        let mut rate_guard = crate::security::ConnGuard::default();
+        let clock2 = clock.clone();
+        let ctx_arc: Arc<Ctx> = ctx.ctx.clone();
+        let reader = tokio::spawn(async move {
+            read_loop_with_clock(&ctx_arc, &tx, 7, &mut rate_guard, &sec_cfg, stream, clock2).await;
+        });
+
+        // Ereignis: der Frame wurde ausgeliefert. Ab hier ist der Read-Loop
+        // entweder an der World-Sperre geparkt (korrekt) oder hat die Uhr
+        // bereits abgefragt (Fehlerfall).
+        frame_yielded.notified().await;
+        assert_eq!(
+            clock_calls.load(Ordering::SeqCst),
+            0,
+            "die Uhr wurde abgefragt, bevor die World-Sperre freigegeben wurde"
+        );
+
+        // Sperre freigeben, dann den Read-Loop zu Ende laufen lassen.
+        drop(guard_world);
+        reader.await.expect("Read-Loop-Task");
+
+        assert_eq!(
+            clock_calls.load(Ordering::SeqCst),
+            1,
+            "die Uhr muss genau einmal abgefragt werden"
+        );
+        assert_eq!(
+            clock_saw_free_lock.load(Ordering::SeqCst),
+            1,
+            "zum Abfragezeitpunkt muss die World-Sperre frei sein"
+        );
+    }
+
+    /// L-1: Die Rate-Stufe wirkt **am echten `read_loop`**. Kleines
+    /// Klassenbudget (`movement_per_sec = 2`), Uhr eingefroren:
+    ///
+    /// 1. die ersten zwei MOVEs passieren das Gate und **bewegen** den Spieler,
+    /// 2. die folgenden zwei MOVEs derselben Klasse werden am Rate-Gate
+    ///    verworfen — sichtbar an unveränderter Position und am
+    ///    Verletzungszähler,
+    /// 3. eine Nachricht **anderer** Klasse (ATTACK) wirkt trotzdem,
+    /// 4. die Verbindung liest unterhalb der Verletzungsschwelle weiter.
+    #[tokio::test]
+    async fn read_loop_rate_gate_drops_excess_frames_and_keeps_other_classes() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100), ("b", 1.0, 0.0, 1000)]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.movement_per_sec = 2;
+        let mut guard = crate::security::ConnGuard::default();
+
+        let move_text = || {
+            crate::protocol::Frame::new(
+                1,
+                crate::protocol::c2s::MOVE,
+                serde_json::json!({"dir": [1, 0]}),
+            )
+            .encode()
+        };
+        drive_read_loop_frozen(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                move_text(),
+                move_text(),
+                move_text(),
+                move_text(),
+                c2s_text(
+                    crate::protocol::c2s::ATTACK,
+                    serde_json::json!({"target_id": "b"}),
+                ),
+            ],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        // `dir:[1,0]` ist ein **1-Einheiten-Schritt**: `apply_move`
+        // normalisiert die Richtung und begrenzt die Schrittlänge
+        // (`min(|d|, 21 m)` bei tick_ms = 100). Genau zwei MOVEs dürfen
+        // durch, also x = 2.0; die beiden weiteren verändern nichts.
+        assert_eq!(
+            world.players["a"].x, 2.0,
+            "genau die zwei erlaubten MOVEs dürfen wirken"
+        );
+        assert_eq!(
+            guard.violations, 2,
+            "jeder Rate-Verstoß zählt genau einmal"
+        );
+        // Wirkungsnachweis der anderen Klasse: `combat` wird **bewaffnet**
+        // (Zustandswechsel), nicht die Schlagfolge — der Taktfix darf die
+        // Beobachtung nicht verdecken.
+        let armed = world.players["a"].combat.as_ref().map(|c| c.target_id.clone());
+        assert_eq!(
+            armed.as_deref(),
+            Some("b"),
+            "ATTACK (andere Klasse) muss trotz erschöpftem MOVE-Budget wirken"
+        );
+    }
+
+    /// L-1: Ein Rate-Verstoß **an der Verletzungsschwelle** beendet die
+    /// Verarbeitung kontrolliert. `disconnect_after_violations = 2`:
+    /// erster Verstoß ⇒ `Drop` (Verbindung liest weiter), zweiter ⇒
+    /// `Disconnect`. Die danach folgenden Frames werden nicht mehr verarbeitet —
+    /// belegt an der **ausbleibenden** Bewaffnung des Angriffs, nicht an einem
+    /// unveränderten Combat-Takt.
+    #[tokio::test]
+    async fn read_loop_rate_violation_at_threshold_ends_processing() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100), ("b", 1.0, 0.0, 1000)]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.movement_per_sec = 1;
+        sec_cfg.disconnect_after_violations = 2;
+        let mut guard = crate::security::ConnGuard::default();
+
+        let move_text = || {
+            crate::protocol::Frame::new(
+                1,
+                crate::protocol::c2s::MOVE,
+                serde_json::json!({"dir": [1, 0]}),
+            )
+            .encode()
+        };
+        drive_read_loop_frozen(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                move_text(),
+                move_text(),
+                move_text(),
+                c2s_text(
+                    crate::protocol::c2s::ATTACK,
+                    serde_json::json!({"target_id": "b"}),
+                ),
+            ],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        assert_eq!(world.players["a"].x, 1.0, "nur das erste MOVE darf wirken");
+        assert_eq!(guard.violations, 2, "Pfad endet genau am Schwellwert");
+        assert!(
+            world.players["a"].combat.is_none(),
+            "nach der Schwelle darf kein weiterer Frame verarbeitet werden"
+        );
+    }
+
+    /// L-5: Nicht angemeldete, bekannte Spielnachrichten erhöhen den
+    /// Verletzungszähler, verbrauchen **kein** Klassenbudget und lösen im
+    /// Session-Zweig derzeit **auch beim Erreichen der Schwelle keinen
+    /// Disconnect** aus. Hier am echten `read_loop` bestätigt: mit
+    /// `disconnect_after_violations = 1` ist die Schwelle ab dem ersten
+    /// Verstoß erreicht, die Schleife liest dennoch alle drei Frames.
+    ///
+    /// Das ist eine **offene Schutzentscheidung**, keine Aussage, dass das
+    /// Verhalten ausreichend oder unbedenklich ist (Audit 4.4, R-5).
+    #[tokio::test]
+    async fn read_loop_session_violations_count_but_never_disconnect() {
+        let ctx = test_ctx().await;
+        // Player vorhanden, aber bewusst KEINE by_conn-Zuordnung.
+        insert_players(&ctx.shared, &["a"]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.disconnect_after_violations = 1;
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop_frozen(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                );
+                3
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            guard.violations, 3,
+            "alle drei Frames wurden verarbeitet und gezählt (kein break)"
+        );
+        let world = ctx.shared.lock().await;
+        assert_eq!(
+            (world.players["a"].x, world.players["a"].y),
+            (0.0, 0.0),
+            "ohne Session darf keine Spielabsicht wirken"
+        );
     }
 
     // Die folgenden Tests liegen bewusst hier (am Ende des Moduls) und nicht
