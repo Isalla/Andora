@@ -95,6 +95,57 @@ Paketgröße (vor dem Parsen) → JSON-Format → Typ-Whitelist → Session
 - Sequenz: Duplikate/Out-of-Order durch Lag werden nur vermerkt, nie als
   Cheat gewertet oder abgelehnt.
 
+#### 3.3.1 Verbindlicher Vertrag: `seq` ist Korrelation (normativ)
+
+**Entscheidung:** `seq` ist ein **Korrelationsobjekt**. Es bestimmt weder
+Zulässigkeit noch Zeitpunkt einer Spielaktion und ist **kein** Berechtigungs-
+oder Idempotenzschlüssel. Der Client übermittelt Absichten; der Server prüft
+**unabhängig von `seq`**, ob und wann diese ausgeführt werden dürfen. Es wird
+**keine** Sequenz-Ablehnung, **keine** Strafregel und **keine** Clientpflicht
+eingeführt.
+
+**Beobachtung, nicht Entscheidung** (`src/realm-rs/src/security.rs:229-236`):
+
+- `ConnGuard::note_seq` berechnet nur, ob ein Wert über dem bisherigen Höchstwert
+  liegt, und schreibt den **Rückgabewert nicht in eine Entscheidung**: der
+  einzige Aufrufer verwirft ihn (`src/realm-rs/src/net.rs:831`).
+- `ConnGuard.last_seq` ist damit der **höchste bisher gesehene** `seq`-Wert
+  dieser Verbindung, **nicht** der zuletzt gesehene: Er wird nur bei
+  `seq > last_seq` fortgeschrieben (`src/realm-rs/src/security.rs:230-233`) und
+  läuft bei älteren oder doppelten Werten **nicht** zurück. Der Begleitzustand
+  `seen_any_seq` unterscheidet „noch keine Sequenz gesehen" von „Wert 0".
+- Die Beobachtung liegt **nach** den Vorprüfungen des Read-Loops (Paketgröße,
+  JSON-Format, Typ-Whitelist: `src/realm-rs/src/net.rs:582,592,602`) und
+  **vor** dem Session- und Rate-Gate (`:836`). Übergrößene, unparsbare und
+  unbekannte Typen werden deshalb **nicht** sequenzbeobachtet; Frames, die das
+  Session- oder Rate-Gate verwirft, **werden** es.
+- `ConnGuard` ist **verbindungslokal** und wird je Verbindung neu erzeugt
+  (`src/realm-rs/src/net.rs:509`). Eine neue Verbindung beginnt ohne
+  Sequenzhistorie.
+
+**Was daraus folgt (ausdrücklich):**
+
+- Gleiche, ältere, negative oder fehlende `seq` werden von der Sequenzbeobachtung **nicht abgelehnt**; alle übrigen Prüfungen (Whitelist, Session, Rate-Limits, Zustands- und Zielvalidierung im jeweiligen Handler) gelten unverändert weiter.
+- Es findet **keine** sequenzbasierte Deduplizierung und **keine** Ergebniswiederholung statt: `seq` löst weder eine Wiederholung einer vorherigen Antwort aus noch verhindert sie eine erneute Ausführung derselben Absicht.
+- **Rate-Limits sind kein Idempotenznachweis.** Sie begrenzen die Häufigkeit je Verbindung und Kategorie (`SEC_*_PER_SEC`), nicht die Einmaligkeit einer Operation.
+- Der sequentielle Read-Loop verarbeitet die Frames einer Verbindung **der Reihe nach** (`src/realm-rs/src/net.rs:566-615`), verhindert aber **nicht**, dass der Client dieselbe Nachricht **zweimal sendet**.
+- **Gleicher Inhalt mit neuer `seq`** und **Wiederholung über eine neue Verbindung** werden durch `seq` **nicht** geschützt. Maßgeblich ist in beiden Fällen allein die Servervalidierung des jeweiligen Handlers.
+- Für zustandsändernde Operationen bleibt deshalb die **fachliche** Absicherung maßgeblich, nicht die Nachrichtennummer. Beispiel: Der veröffentlichte Fix `b121766` schützt den Angriffstakt (`docs/Kampfsystem.md` §3.1) über den **RAM-gebundenen** Zeitpunkt des zuletzt ausgeführten Schlags — unabhängig von `seq`, gleicher oder neuer Nummer, gleichem oder anderem Ziel. Das gilt an den Zustand dieses Player-Objekts gebunden und ist **keine** allgemeine Reconnect- und **keine** allgemeine Idempotenzgarantie.
+- **Korrelationsfeld ist `Frame.seq`.** Für `MOVE` nennt der Typkommentar zusätzlich ein Payload-Feld `seq` (`src/realm-rs/src/protocol.rs:12`); der Handler wertet dieses **nicht** aus und liest ausschließlich `dir`/`x`/`y` (`src/realm-rs/src/handlers.rs:635-640`). Der Kommentar bleibt als Bestandsbeschreibung unverändert; verbindlich ist allein das Feld `Frame.seq` im Rahmen der Nachricht.
+
+**Nachweisgrenzen (keine Annahmen als Tatsachen):** Im Repository existiert
+**kein** Clientcode, der `seq` erzeugt oder erhöht (`shared/protocol.gd:24`
+bietet nur den Helfer `encode`, ohne einen einzigen Aufrufer), und **keine**
+Auswertung von `ack_seq`. Ein Quittungsfeld wird ausschließlich für
+`HEARTBEAT` erzeugt (`src/realm-rs/src/handlers.rs:1393`, `SYNC {ack_seq}`);
+`WELCOME`, `PARENTAL_RESULT`, `ATTRIBUTE_RESULT` und die System-Chat-Antwort
+spiegeln die Nummer nur im S2C-Rahmen (`:583, :891, :1276, :1303, :1362`),
+übrige S2C-Frames senden `seq = 0`. Ein tatsächliches Zähler-, Reset- oder
+Retry-Verhalten des Clienten ist damit **nicht belegbar** und wird hier
+ausdrücklich nicht festgelegt; getrennte Clientzähler je Nachrichtentyp werden
+nicht als inkompatibel bewertet, solange der Server `seq` nicht zur
+Zulässigkeitsentscheidung verwendet.
+
 ### 3.4 Rate Limiting (gestaffelt)
 
 | Kategorie | Typen | Default/Sekunde | Env |
