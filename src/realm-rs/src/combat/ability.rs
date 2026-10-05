@@ -1048,6 +1048,7 @@ mod tests {
             armor: 0,
             weapon_skill: 1,
             combat: None,
+            last_strike: None,
             mana,
             max_mana: mana,
             effects: Vec::new(),

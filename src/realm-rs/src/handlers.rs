@@ -432,6 +432,7 @@ pub async fn handle_hello(
         idia: c.idia,
         weapon_skill,
         combat: None,
+        last_strike: None,
         effects: Vec::new(),
         cooldowns,
         active_cast: None,
@@ -759,12 +760,27 @@ pub async fn handle_attack(
     }
     let now = Instant::now();
     if let Some(me) = world.players.get_mut(&pid) {
+        // Serverautomatik: Der Angriffstakt ist eine Eigenschaft des
+        // Charakters, nicht der Absicht und nicht des Zieles. Maßgeblich ist
+        // der zuletzt TATSÄCHLICH ausgeführte Schlag (`last_strike`, nur vom
+        // Tick geschrieben); ein erneutes Eintreffen derselben Absicht — mit
+        // gleicher oder neuer `seq`, gleiches oder anderes Ziel, nach Stop
+        // oder nach Zieltod — setzt ihn nicht zurück und schaltet keinen
+        // zusätzlichen Sofortschlag frei. Ohne bisherigen Schlag (erstmalige
+        // Aktivierung in dieser RAM-Existenz) gilt der dokumentierte
+        // Sofortschlag: die Duration gilt als bereits abgelaufen.
+        //
+        // Die Absicht selbst bleibt vollständig gewahrt: Ziel, Reichweite und
+        // Lebendigkeit wurden oben bereits validiert, `combat` wird hier
+        // bewaffnet; `seq` ist an dieser Stelle nicht verfügbar und nicht
+        // erforderlich (Korrelation, keine Berechtigung).
+        let cadence_from = me.last_strike.unwrap_or_else(|| {
+            now.checked_sub(std::time::Duration::from_millis(cfg.weapon_duration_ms))
+                .unwrap_or(now)
+        });
         me.combat = Some(CombatState {
             target_id: target_id.to_string(),
-            // Erster Schlag sofort beim nächsten Tick; danach Duration-Takt.
-            last_attack: now
-                .checked_sub(std::time::Duration::from_millis(cfg.weapon_duration_ms))
-                .unwrap_or(now),
+            last_attack: cadence_from,
         });
     }
 }
@@ -1749,6 +1765,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2229,6 +2246,7 @@ mod tests {
             armor: 0,
             weapon_skill: 1,
             combat: None,
+            last_strike: None,
             mana: 50,
             max_mana: 50,
             effects: Vec::new(),
@@ -2549,6 +2567,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),
@@ -2599,6 +2618,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),
@@ -2709,6 +2729,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),
@@ -2759,6 +2780,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),
@@ -2829,6 +2851,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),
@@ -2914,6 +2937,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: std::vec::Vec::new(),
@@ -2971,6 +2995,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: std::vec::Vec::new(),

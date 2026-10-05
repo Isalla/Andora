@@ -48,6 +48,19 @@ Die Duration bestimmt, wie viel Zeit zwischen zwei automatischen Grundangriffen 
 
 Dadurch können verschiedene Waffen unterschiedliche Angriffsgeschwindigkeiten besitzen, ohne dass dafür unterschiedliche Grundkampfsysteme benötigt werden.
 
+### 3.1 Maßgeblicher Zeitpunkt des Angriffstakts (serverautoritativ)
+
+Der Client übermittelt ausschließlich die **Absicht** „Grundangriff beginnen/beenden“. Der Server bestimmt Zulässigkeit, Zeitpunkt und Wirkung.
+
+- Maßgeblich für die Duration ist der zuletzt **tatsächlich ausgeführte** Schlag, nicht eine eingegangene Absicht. Der Takt ist eine Eigenschaft des angreifenden Charakters, nicht des Zieles und nicht der Anfrage.
+- Der erste Schlag nach der Aktivierung erfolgt **sofort**: solange für den angreifenden Charakter **in seiner RAM-Existenz** — also solange dasselbe Player-Objekt — noch kein Schlag ausgeführt wurde, gilt die Duration als bereits abgelaufen.
+- Lebensdauer des Schlagzeitpunkts: Er gehört zum Player-Objekt und **nicht** zur Sitzung. Eine RAM-Übernahme (fehlgeschlagener Disconnect-Save, derselbe Player bleibt im RAM) **erhält** ihn; ein **neu konstruierter** Player — etwa beim Login — beginnt mit `last_strike: None` und damit mit dem Sofortschlag der erstmaligen Aktivierung. Der Wert ist RAM-only: nicht Teil des Snapshots, keine Migration, keine Persistenz. Daraus folgt **keine** allgemeine Reconnect-Garantie; nach einem erfolgreichen Disconnect, der den Player entfernt, und einem anschließenden Login gilt wieder der Sofortschlag.
+- Eine **wiederholte** Angriffsabsicht setzt den Takt **nicht** zurück und schaltet **keinen** zusätzlichen Sofortschlag frei. Das gilt ausdrücklich auch für eine Absicht mit identischem Inhalt, für einen Zielwechsel, für ein Beenden mit unmittelbarem Neubeginn und für einen Angriff, der auf einen nach dem Tod des bisherigen Ziels gesetzt wird.
+- Die Sequenznummer der Nachricht ist Korrelation, **keine** Berechtigung: Sie ist an der Angriffsverarbeitung nicht beteiligt und kann weder einen zusätzlichen Schlag noch eine Beschleunigung bewirken.
+- Ziel-, Reichweiten- und Lebendigkeitsprüfung sowie die Rate-Limits des Kampf-Pfads bleiben unverändert wirksam; eine Angriffsabsicht gegen ein ungültiges oder unerreichbares Ziel bewaffnet nicht und verändert den Takt nicht.
+
+Umsetzung: `CombatState.last_attack` ist der Bezugszeitpunkt, ab dem der nächste Schlag **fällig** ist; der ausgeführte Schlag wird zusätzlich als `Player.last_strike` festgehalten (RAM-only, nicht Teil des Snapshots). Nachweis: `docs/Security.md`, Abschnitt 4.7.
+
 ---
 
 ## 4. Kampfskills und Waffenbeherrschung

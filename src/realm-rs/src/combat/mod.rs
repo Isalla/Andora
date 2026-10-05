@@ -349,6 +349,10 @@ pub fn combat_tick(
             if let Some(c) = a.combat.as_mut() {
                 c.last_attack = now;
             }
+            // Maßgeblich für den Angriffstakt ist der tatsächlich ausgeführte
+            // Schlag, nicht eine eingegangene Absicht. Nur dieser Tick
+            // schreibt den Zeitpunkt; `handle_attack` liest ihn.
+            a.last_strike = Some(now);
         }
         let killed = match target_kind {
             TargetKind::Player => {
@@ -642,6 +646,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),

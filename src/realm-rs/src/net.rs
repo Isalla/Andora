@@ -1745,6 +1745,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: Default::default(),
@@ -2172,6 +2173,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2330,6 +2332,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2450,6 +2453,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2533,6 +2537,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2659,6 +2664,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2809,6 +2815,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -2939,6 +2946,7 @@ mod tests {
                     armor: 0,
                     weapon_skill: 1,
                     combat: None,
+                    last_strike: None,
                     mana: 50,
                     max_mana: 50,
                     effects: Vec::new(),
@@ -3071,6 +3079,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -3191,6 +3200,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -3277,6 +3287,7 @@ mod tests {
             armor: 0,
             weapon_skill: 1,
             combat: None,
+            last_strike: None,
             mana: 1,
             max_mana: 1,
             effects: Vec::new(),
@@ -3361,6 +3372,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -3456,6 +3468,7 @@ mod tests {
             armor: 0,
             weapon_skill: 1,
             combat: None,
+            last_strike: None,
             mana: 1,
             max_mana: 1,
             effects: Vec::new(),
@@ -3539,6 +3552,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
@@ -3593,5 +3607,474 @@ mod tests {
             7,
             ctx.persist.pending_revision("hero")
         ));
+    }
+
+    // ── 4.7-Teilbefund: serverseitiger Angriffstakt ───────────────────────
+    //
+    // Der Client übermittelt Absichten (ATTACK). Zulässigkeit, Zeitpunkt und
+    // Wirkung bestimmt der Server. `seq` ist dabei nur Korrelation
+    // (`ConnGuard::note_seq`, Rückgabe verworfen) und darf niemals einen
+    // zusätzlichen Schlag freischalten.
+    //
+    // Die folgenden Tests fahren den echten Produktionsweg: `dispatch`
+    // (Frame → Whitelist/Gate → `handlers::handle_attack`) und danach
+    // `combat::combat_tick` als Produktions-Schlagentscheidung. Der
+    // Taktnachweis erfolgt über die vom Tick selbst geschriebenen Werte
+    // (`CombatState.last_attack`) und über die Schadensanwendung am Ziel —
+    // ohne Sleep und ohne Nachbildung der Taktformel im Test.
+
+    /// Fester RNG-Wert: 0.9 ⇒ unter den Projektdefaults ein `Normal`-Treffer
+    /// (miss<100, dodge<200, parry<250, block<350; Kritik ab 0.1 also nicht).
+    /// Damit ist jeder ausgeführte Schlag exakt `weapon_damage` Schaden.
+    struct FixedRoll(f64);
+
+    impl crate::combat::CombatRng for FixedRoll {
+        fn next(&mut self) -> f64 {
+            self.0
+        }
+    }
+
+    /// Legt Spieler an Positionen an und verbindet `conn_id` mit `a`.
+    /// `ids` = (ID, x, y, hp).
+    async fn insert_cadence_players(ctx: &Arc<Ctx>, ids: &[(&str, f64, f64, i32)]) {
+        let mut w = ctx.shared.lock().await;
+        for (id, x, y, hp) in ids {
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            let mut p = crate::world::Player {
+                id: (*id).to_string(),
+                name: (*id).to_string(),
+                x: *x,
+                y: *y,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: *hp,
+                max_hp: *hp,
+                lang: "de".into(),
+                account_id: 1,
+                session_id: String::new(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                last_strike: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Default::default(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: *hp,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            };
+            p.last_activity = std::time::Instant::now();
+            w.players.insert((*id).to_string(), p);
+        }
+        w.by_conn.insert(7, "a".to_string());
+    }
+
+    /// Ein ATTACK-Frame über den echten Dispatcher (identische Absicht,
+    /// wählbare `seq`).
+    async fn attack_frame(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        seq: i64,
+        data: serde_json::Value,
+    ) {
+        let frame = crate::protocol::Frame::new(seq, crate::protocol::c2s::ATTACK, data);
+        assert!(
+            !dispatch(ctx, tx, 7, guard, sec_cfg, frame).await,
+            "ATTACK-Frame darf hier keine Verbindung trennen"
+        );
+    }
+
+    /// Eine Combat-Tick-Entscheidung mit übergebenem Zeitpunkt.
+    async fn strike_tick(ctx: &Arc<Ctx>, now: std::time::Instant) {
+        let groups = ctx.groups.lock().await;
+        let mut w = ctx.shared.lock().await;
+        crate::combat::combat_tick(
+            &mut w,
+            &ctx.cfg.combat,
+            &ctx.cfg.loot,
+            &ctx.cfg.progression,
+            &groups,
+            &mut FixedRoll(0.9),
+            now,
+            std::time::SystemTime::UNIX_EPOCH,
+            ctx.cfg.aofb_radius,
+        );
+    }
+
+    /// `P-4.7` Angriffstakt: erstmaliger Start schlägt sofort zu; wiederholte
+    /// Absicht — mit **gleicher** und mit **neuer** `seq` — erzeugt innerhalb
+    /// der Waffendauer keinen weiteren Schlag; nach Ablauf der Dauer ist der
+    /// nächste Schlag wieder zulässig.
+    #[tokio::test]
+    async fn attack_intent_repeats_never_accelerate_the_server_side_cadence() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100), ("b", 1.0, 0.0, 1000)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let duration = ctx.cfg.combat.weapon_duration_ms;
+        let dmg = ctx.cfg.combat.weapon_damage;
+
+        // 1) Erstmaliger zulässiger Start → Sofortschlag im ersten Tick.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            100,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].combat.as_ref().map(|c| c.target_id.clone()),
+                Some("b".to_string()),
+                "gültige Absicht muss bewaffnen"
+            );
+        }
+        strike_tick(&ctx, std::time::Instant::now()).await;
+        let hp_after_first = {
+            let w = ctx.shared.lock().await;
+            w.players["b"].hp
+        };
+        assert_eq!(
+            hp_after_first,
+            1000 - dmg,
+            "erstmaliger Start muss dokumentiert sofort schlagen"
+        );
+
+        // Takt-Referenz ist der vom Tick selbst geschriebene Zeitpunkt des
+        // ausgeführten Schlags — kein Wert aus dem Test nachgebildet.
+        let last_strike = {
+            let w = ctx.shared.lock().await;
+            w.players["a"]
+                .combat
+                .as_ref()
+                .expect("Angriff bleibt aktiv")
+                .last_attack
+        };
+        let just_before = last_strike + Duration::from_millis(duration - 1);
+        let at_duration = last_strike + Duration::from_millis(duration);
+
+        // 2) Identische Absicht mit GLEICHER seq → kein zusätzlicher Schlag.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            100,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, just_before).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            hp_after_first,
+            "wiederholtes ATTACK (gleiche seq) darf den Takt nicht zurücksetzen"
+        );
+
+        // 3) Gleiche Absicht mit NEUER seq → ebenfalls kein zusätzlicher Schlag.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            101,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, just_before).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            hp_after_first,
+            "neue seq darf den Takt nicht beschleunigen"
+        );
+
+        // 4) Nach Ablauf der Waffendauer ist der nächste Schlag zulässig.
+        strike_tick(&ctx, at_duration).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            hp_after_first - dmg,
+            "nach Duration-Ablauf muss der nächste Schlag erfolgen"
+        );
+    }
+
+    /// `P-4.7` Zielwechsel, Beenden/Neubeginn und Zieltod dürfen eine
+    /// **laufende** serverseitige Wartezeit nicht umgehen. Alle drei Wege sind
+    /// im Produktionscode erreichbar: `target_id`-Wechsel, `{"stop": true}`
+    /// und der Tick-Entwaffnung bei totem Ziel.
+    #[tokio::test]
+    async fn attack_target_switch_stop_and_target_death_do_not_bypass_the_wait() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(
+            &ctx,
+            &[
+                ("a", 0.0, 0.0, 100),
+                ("b", 1.0, 0.0, 1000),
+                ("d", 0.0, 1.5, 1000),
+                ("c", 1.5, 1.0, 10),
+            ],
+        )
+        .await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let duration = ctx.cfg.combat.weapon_duration_ms;
+        let dmg = ctx.cfg.combat.weapon_damage;
+
+        // Start + erster Sofortschlag gegen "b".
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            10,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, std::time::Instant::now()).await;
+        let hp_b = {
+            let w = ctx.shared.lock().await;
+            assert_eq!(w.players["b"].hp, 1000 - dmg, "Sofortschlag erwartet");
+            w.players["a"]
+                .combat
+                .as_ref()
+                .expect("bewaffnet")
+                .last_attack
+        };
+        let just_before = hp_b + Duration::from_millis(duration - 1);
+
+        // Zielwechsel auf ein anderes gültiges Ziel umgeht die Wartezeit nicht.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            11,
+            serde_json::json!({"target_id": "d"}),
+        )
+        .await;
+        strike_tick(&ctx, just_before).await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(w.players["b"].hp, 1000 - dmg, "kein Schlag auf b");
+            assert_eq!(w.players["d"].hp, 1000, "kein Schlag auf d");
+            assert_eq!(
+                w.players["a"].combat.as_ref().map(|c| c.target_id.clone()),
+                Some("d".to_string()),
+                "Zielwechsel wird übernommen"
+            );
+        }
+
+        // Beenden und unmittelbar neu beginnen umgeht sie ebenfalls nicht.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            12,
+            serde_json::json!({"stop": true}),
+        )
+        .await;
+        assert!(
+            ctx.shared.lock().await.players["a"].combat.is_none(),
+            "Stop entwaffnet"
+        );
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            13,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, just_before).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            1000 - dmg,
+            "Neubeginn darf keinen Sofortschlag auslösen"
+        );
+
+        // Nach Ablauf der Wartezeit ist der Schlag wieder zulässig.
+        let after_wait = hp_b + Duration::from_millis(duration);
+        strike_tick(&ctx, after_wait).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            1000 - 2 * dmg,
+            "nach Ablauf muss der Schlag erfolgen"
+        );
+
+        // Zieltod: der Tick entwaffnet den Angreifer. Der unmittelbar
+        // folgende Angriff auf ein anderes Ziel darf die Wartezeit nicht
+        // umgehen.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            14,
+            serde_json::json!({"target_id": "c"}),
+        )
+        .await;
+        let death_tick = after_wait + Duration::from_millis(duration);
+        strike_tick(&ctx, death_tick).await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(w.players["c"].hp, 0, "Ziel c stirbt am Schlag");
+            assert!(
+                w.players["a"].combat.is_none(),
+                "Zieltod entwaffnet den Angreifer"
+            );
+        }
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            15,
+            serde_json::json!({"target_id": "d"}),
+        )
+        .await;
+        strike_tick(&ctx, death_tick + Duration::from_millis(duration - 1)).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["d"].hp,
+            1000,
+            "Angriff nach Zieltod darf keinen Sofortschlag auslösen"
+        );
+    }
+
+    /// `P-4.7` Ungültige Absichten verändern den maßgeblichen Takt nicht: sie
+    /// bewaffnen nicht, sie verwerfen keine laufende Wartezeit und sie
+    /// verbrauchen den Sofortschlag der erstmaligen Aktivierung nicht.
+    #[tokio::test]
+    async fn invalid_attack_intent_neither_arms_nor_consumes_the_cadence() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(
+            &ctx,
+            &[
+                ("a", 0.0, 0.0, 100),
+                ("b", 1.0, 0.0, 1000),
+                ("far", 50.0, 0.0, 1000),
+            ],
+        )
+        .await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let duration = ctx.cfg.combat.weapon_duration_ms;
+        let dmg = ctx.cfg.combat.weapon_damage;
+
+        // Ungültige Absichten: unbekanntes Ziel, eigenes Ziel, leere Ziel-ID,
+        // Ziel außerhalb der Waffenreichweite.
+        for (seq, data) in [
+            (20, serde_json::json!({"target_id": "ghost"})),
+            (21, serde_json::json!({"target_id": "a"})),
+            (22, serde_json::json!({"target_id": ""})),
+            (23, serde_json::json!({"target_id": "far"})),
+        ] {
+            attack_frame(&ctx, &mut guard, &sec_cfg, &tx, seq, data).await;
+            assert!(
+                ctx.shared.lock().await.players["a"].combat.is_none(),
+                "ungültige Absicht darf nicht bewaffnen (seq {seq})"
+            );
+        }
+
+        // Der dokumentierte Sofortschlag der erstmaligen Aktivierung besteht.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            24,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, std::time::Instant::now()).await;
+        let hp_b = {
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["b"].hp,
+                1000 - dmg,
+                "erstmalige Aktivierung schlägt sofort zu"
+            );
+            w.players["a"]
+                .combat
+                .as_ref()
+                .expect("bewaffnet")
+                .last_attack
+        };
+
+        // Eine ungültige Absicht während der Wartezeit verwirft den Angriff
+        // nicht und beschleunigt den nächsten Schlag nicht.
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            25,
+            serde_json::json!({"target_id": "far"}),
+        )
+        .await;
+        assert_eq!(
+            ctx.shared.lock().await.players["a"]
+                .combat
+                .as_ref()
+                .map(|c| c.target_id.clone()),
+            Some("b".to_string()),
+            "ungültige Absicht darf einen laufenden Angriff nicht entwaffnen"
+        );
+        strike_tick(&ctx, hp_b + Duration::from_millis(duration - 1)).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            1000 - dmg,
+            "ungültige Absicht darf den Takt nicht verändern"
+        );
+
+        // Ein toter Angreifer erzeugt keinen Schlag (unveränderte V1-Regel).
+        ctx.shared.lock().await.players.get_mut("a").unwrap().hp = 0;
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            26,
+            serde_json::json!({"target_id": "b"}),
+        )
+        .await;
+        strike_tick(&ctx, hp_b + Duration::from_millis(duration)).await;
+        assert_eq!(
+            ctx.shared.lock().await.players["b"].hp,
+            1000 - dmg,
+            "toter Angreifer schlägt nicht zu"
+        );
     }
 }

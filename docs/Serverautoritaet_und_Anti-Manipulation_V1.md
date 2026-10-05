@@ -117,6 +117,19 @@ jeder Logik/DB verworfen. Unbekannte Typen fallen fail-closed in Selten.
 - Kein Instanzabbruch: Nur die ungültige Aktion wird verworfen; der Raid/
   Dungeon läuft für alle anderen normal weiter.
 
+### 3.5a Angriffstakt: Absicht ist keine Berechtigung
+
+`ATTACK` übermittelt eine Absicht. Maßgeblich für die Waffen-Duration ist der
+zuletzt **tatsächlich ausgeführte** Schlag (`Player.last_strike`, nur vom
+`combat_tick` geschrieben), nicht das Eintreffen der Absicht. Eine wiederholte
+Absicht — gleiche oder neue `seq`, gleiches oder anderes Ziel, nach `stop`
+oder nach Zieltod — setzt den Takt nicht zurück und schaltet keinen zusätzlichen
+Sofortschlag frei. Der erste Schlag nach der Aktivierung ohne vorherigen Schlag
+bleibt Sofortschlag. Die Sequenzstufe der Pipeline bleibt reine Vermerkung
+(§3.3); sie ist an der Angriffsverarbeitung nicht beteiligt. Nachweis und
+Teilbefund: `docs/Security.md` Abschnitt 4.7; normative Fassung
+`docs/Kampfsystem.md` §3.1.
+
 ### 3.6 Keine Cheat-Verurteilung, kein Bannsystem
 
 Ungültig ≠ Cheat (Lag, Duplikate, Client-/Serverfehler möglich). V1 lehnt

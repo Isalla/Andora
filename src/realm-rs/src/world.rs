@@ -68,6 +68,24 @@ pub struct Player {
     pub weapon_skill: u32,
     /// Aktueller Auto-Angriff (Combat V1): None = nicht im Kampf.
     pub combat: Option<CombatState>,
+    /// Maßgeblicher Zeitpunkt des zuletzt **tatsächlich ausgeführten** Grund-
+    /// angriffs (docs/Kampfsystem.md §3: die Duration bestimmt die Zeit
+    /// zwischen zwei Grundangriffen). `None` = in dieser RAM-Existenz wurde
+    /// noch kein Schlag ausgeführt.
+    ///
+    /// bewusst getrennt von `CombatState.last_attack`: dort steht der Bezugs-
+    /// zeitpunkt, ab dem der nächste Schlag **fällig** ist (erster Start ohne
+    /// Vorlauf), hier der Zeitpunkt eines **bereits erfolgten** Schlags. Nur
+    /// `combat_tick` schreibt `last_strike`; `handle_attack` liest es als
+    /// Takt-Referenz, damit wiederholte Absichten, ein Zielwechsel, ein
+    /// Beenden/Neubeginn oder ein Zieltod die laufende Wartezeit nicht
+    /// umgehen.
+    ///
+    /// Lebensdauer: RAM-only, nicht Teil des Snapshots und keiner Migration.
+    /// Es überlebt Kampfende, Tod und RAM-Übernahme (derselbe Player); ein
+    /// neuer Login baut einen neuen Player und damit den dokumentierten
+    /// Sofortschlag bei erstmaliger Aktivierung.
+    pub last_strike: Option<Instant>,
     /// Mana (Fähigkeits-Ressource, Ability-System.md §2).
     pub mana: i32,
     pub max_mana: i32,
@@ -707,6 +725,7 @@ mod tests {
                 armor: 0,
                 weapon_skill: 1,
                 combat: None,
+                last_strike: None,
                 mana: 50,
                 max_mana: 50,
                 effects: Vec::new(),
