@@ -236,9 +236,22 @@ impl ConnGuard {
     }
 }
 
-/// Frühe, billige Prüfung eines eingehenden Frames — Reihenfolge:
-/// Größe → Format (JSON, beim Aufrufer) → Session → Sequenz → Rate Limit.
-/// Erst danach darf Game Logic / DB betreten werden.
+/// Späte, billige Prüfung eines eingehenden Frames.
+///
+/// **Diese Funktion prüft genau zwei Stufen, in dieser Reihenfolge:**
+/// **Session → Rate Limit.** Sie prüft **weder** Größe **noch** JSON-Format
+/// **noch** Typ-Whitelist — diese drei liegen **beim Aufrufer** (`read_loop`
+/// in `net.rs`: Größe `:582`, Parse `:592`, Whitelist `:602`).
+///
+/// Die tatsächliche Gesamtreihenfolge einer Nachricht lautet:
+/// Größe → Parse → Whitelist → Sequenzbeobachtung → **Session → Rate
+/// Limit** (hier) → Dispatch → typabhängige Fachprüfung.
+///
+/// Die Sequenzbeobachtung (`ConnGuard::note_seq`) ist **kein** Gate: sie
+/// läuft im `dispatch` **vor** diesem Aufruf, wird dort nur vermerkt und
+/// entscheidet nichts (docs/Security.md Abschnitt 4.2, normative Fassung
+/// `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3.1). Sie ist hier
+/// deshalb bewusst nicht enthalten.
 pub fn gate_frame(
     cfg: &SecurityCfg,
     guard: &mut ConnGuard,
@@ -708,6 +721,14 @@ mod tests {
     }
 
     // 8b) Übergröße wird vor dem Parsen erkannt.
+    //
+    // Geltungsgrenze: dieser Test belegt **nur die Grenzfunktion**
+    // `frame_too_large`. Die tatsächliche Anordnung „Größe vor Parse" im
+    // Empfangspfad ist eine Eigenschaft des Aufrufers (`read_loop` in
+    // `net.rs`, Größenprüfung `:582` mit `continue` vor dem Parse `:592`)
+    // und wird dort belegt: `read_loop_drops_oversize_text_before_handler_
+    // effect` (net.rs). Ebenso ist die test-eigene `pipeline()` unten eine
+    // Modellierung, nicht der Produktionspfad.
     #[test]
     fn oversize_frames_rejected_before_parse() {
         let cfg = SecurityCfg::default();
@@ -885,6 +906,13 @@ mod tests {
     // 8) Ungültige Requests erreichen keine teuren Systeme: Die Pipeline
     //    (Größe → Format → Typ → Session → Rate) läuft vor jeder Logik.
     //    `expensive_calls` steht für DB/Kampf/Inventar/Welt/KI.
+    //
+    // **Diese Funktion ist eine Modellierung, kein Produktionspfad.** Sie
+    // bildet die Aufrufer-Stufen (Größe/Parse/Whitelist) vereinfacht nach und
+    // ruft nur `gate_frame` real auf; sie enthält bewusst **keinen** echten
+    // JSON-Parse und keine echte Sequenzbeobachtung. Der Nachweis am
+    // tatsächlichen Empfangs- und Dispatch-Pfad steht in `net.rs`
+    // (z. B. `read_loop_drops_oversize_text_before_handler_effect`).
     fn pipeline(
         cfg: &SecurityCfg,
         guard: &mut ConnGuard,

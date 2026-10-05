@@ -897,14 +897,87 @@ Ein eigenständiges Sicherheits-Audit wurde in dieser Aufgabe nicht durchgeführ
 
 ### 4.3 Protokoll- und Nachrichten-Gating
 
-- **Status:** `ZU PRÜFEN`
+- **Status:** `ERLEDIGT` — für die Prüfung des Protokoll- und Nachrichten-Gatings und den Nachweis am tatsächlichen Empfangspfad. Die unten ausdrücklich erhaltene Abschlussgrenze bleibt bestehen; dieser Abschluss sagt **nichts** über vollständige Payload-, Transport- oder Spielsystem-Sicherheit aus.
 - **Priorität:** offen (im Audit-Auftrag nicht vergeben)
 - **Betroffener Bereich:** Frame-Handling vor der Spiellogik (`src/realm-rs/src/security.rs`, `src/realm-rs/src/net.rs`)
-- **Bekannte Ausgangslage:** `gate_frame` prüft in der Reihenfolge Größe → Format (JSON) → Session → Sequenz → Rate-Limit, bevor Game-Logic/DB erreicht werden; Frames über der Größenlimite werden vor dem Parse verworfen (`frame_too_large`, Test `oversize_frames_rejected_before_parse`); ungültige Frames erreichen keine teuren Systeme (`invalid_requests_never_reach_expensive_systems`).
+- **Historische Ausgangslage (überholt, nicht mehr geltend):** `gate_frame` prüfe in der Reihenfolge Größe → Format (JSON) → Session → Sequenz → Rate-Limit, bevor Game-Logic/DB erreicht werde; Frames über der Größenlimite würden vor dem Parse verworfen (`frame_too_large`, Test `oversize_frames_rejected_before_parse`); ungültige Frames erreichten keine teuren Systeme (`invalid_requests_never_reach_expensive_systems`). Diese Beschreibung war **unvollständig und in der Reihenfolge falsch** und ist durch die Befunde B-1/B-2 in Abschnitt 4.3.1 sowie durch `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3 ersetzt. Sie beschreibt **nicht** den aktuellen Code und ist **kein** Beleg.
+- **Read-only-Prüfung (abgeschlossen):** Vollständigkeit aller Eingangswege und Nachrichtentypen wurde geprüft. Ergebnis und Korrekturen siehe Abschnitt 4.3.1.
 - **Offene Frage / Entscheidung:** Vollständigkeit (alle Nachrichtentypen, alle Pfade) und Konsistenz der Gate-Reihenfolge mit der Doku.
-- **Verifizierte Belege:** `src/realm-rs/src/security.rs:205-224` (Kopfkommentar Reihenfolge, Funktion `gate_frame`), Tests `oversize_frames_rejected_before_parse` (`src/realm-rs/src/security.rs:658`) und `invalid_requests_never_reach_expensive_systems` (`src/realm-rs/src/security.rs:814`); Doku `docs/Serverautoritaet_und_Anti-Manipulation_V1.md`.
-- **Nächster zulässiger Schritt:** Read-only Gegenprüfung Code/Doku im Folgeauftrag; Befunde hier vermerken.
-- **Abschlussnachweis:** ausstehend.
+- **Verifizierte Belege:** `src/realm-rs/src/security.rs:255` (`gate_frame`: prüft ausschließlich Session und Rate Limit), `:279` (`frame_too_large`), `:285` (`is_known_c2s`); Aufrufer-Stufen in `src/realm-rs/src/net.rs`: `:582` Größe, `:592` JSON-Parse, `:602` Whitelist, `:831` Sequenzbeobachtung, `:836` `gate_frame`-Aufruf; Modellierungs-Tests `oversize_frames_rejected_before_parse` (`security.rs:733`) und `invalid_requests_never_reach_expensive_systems` (`security.rs:939`); Nachweis am echten Empfangspfad: die sieben `read_loop_*`-Tests in `src/realm-rs/src/net.rs`; Doku `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3 und §3.3.1.
+- **Nächster zulässiger Schritt:** Für diesen Eintrag nichts offen. Ergänzende Payload-, Transport- oder Spielsystem-Prüfungen sind **gesonderte** Vorhaben und werden aus diesem Abschluss nicht abgeleitet.
+- **Abschlussnachweis:** read-only Prüfung und Nachweisergänzung am Arbeitsbaum auf Basis `2159b9208e9cb5a661cc85bd4c7508eb5b9bb0fc`, **ohne Änderung von Produktions- oder Testlogik** (die Änderungen betreffen ausschließlich Kommentare in `net.rs`/`security.rs` sowie die zugehörigen Statusdokumente).
+  - **Eingangswege geprüft:** Text (einziger Anwendungspfad), Close, Lesefehler sowie die stillschweigend ignorierten Kontroll-/Binärframes; **keine** Dekompressions- oder Kompressionspfade im Realm (`src/realm-rs/Cargo.toml` ohne entsprechende Abhängigkeit) — es wird keiner unterstellt.
+  - **Alle 20 C2S-Typen** aus `src/realm-rs/src/protocol.rs:10-35` geprüft; die whitelisted, aber nicht implementierten Typen `NPC_TALK` (6), `AUCTION_LIST` (7) und `AUCTION_BID` (8) sind als solche ausgewiesen (siehe N-1).
+  - **Tatsächliche Gate-Reihenfolge dokumentiert** und mit dem Produktionscode belegt (B-1/B-2 unten; normativ `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3): Größe → Parse → Whitelist → Sequenzbeobachtung → Session → Rate → Dispatch → Fachprüfung. `security::gate_frame` prüft ausschließlich Session und Rate Limit.
+  - **T-1 geschlossen:** sieben Tests am **echten** `read_loop` mit echten `Message::Text`-Frames (Namen in Abschnitt 4.3.1). Die Zuordnung der Ablehnungsstufe folgt aus Testdaten, Kontrollfluss und beobachteter Wirkung gemeinsam; `ConnGuard::violations` allein unterscheidet die Stufen nicht. „Größe vor Parse" ist strukturell am Produktionscode belegt (`net.rs:582` mit `continue` vor `net.rs:592`).
+  - **M-1:** vier MOVE-Grenztests belegen die konkret geprüften Eingaben (`1e308` → begrenzte Bewegung, `1e400` → Parse-Ablehnung, zwei sehr große endliche Werte → endliches No-Op, entartete und falsch typisierte `dir`-Formen → folgenlos). Das ist **keine** vollständige Zahlenvalidierung und **keine** Behauptung, alle Zahlenkonstellationen seien abgedeckt.
+  - **Übernommener, in diesem Abschluss nicht neu ausgeführter Stand:** **647** erfolgreiche Realm-Tests (`cargo test --offline`, Manifest `src/realm-rs/Cargo.toml`) — Basis 636 zuzüglich der sieben `read_loop_*`- und vier `move_frame_*`-Tests. Die Zahl ist ein gemeldeter Lauf des vorangegangenen Arbeitsauftrags und **keine** Quelltextzählung. Ebenso **nicht** neu ausgeführt: `cargo clippy --offline --all-targets --all-features` mit **44 = 44** normalisierten Meldungen im zeilennormalisierten Mengenvergleich gegen eine aus HEAD aufgebaute Vergleichsbasis (keine neue, keine entfallene Warnung). Dieser Vergleich ist **methodisch nicht** mit den früheren 58-Meldungen-Vergleichen anderer Abschnitte dieses Dokuments gleichzusetzen; er ist ein eigener, hier nur berichteter Vergleichsstand. Rust-Toolchain über `source .tmp/rust/env.sh`; Prüfartefakte unter `.tmp/audit-4-3-gating-tests/`, nach Pfadprüfung entfernt. `git diff --check` ohne Befund.
+  - **Redaktionelle Korrekturen K-1 bis K-4** aus der Finalprüfung sind behoben: MOVE-Prosa in `docs/Serverautoritaet_und_Anti-Manipulation_V1.md` aus der Mitte der §2-Tabelle hinter die vollständige Tabelle verschoben (Tabelleninhalt und Zeilenreihenfolge gegenüber HEAD unverändert); zwei Test-Kommentarverweise in `net.rs` auf den `add_violation`-Aufruf (`security.rs:265`) bzw. den tatsächlichen `pipeline()`-Helfer (`security.rs:916`) korrigiert; ein Abschnittskommentar aus der Doc-Beschreibung des ersten Tests in einen normalen Abschnittskommentar verschoben. Testattribute, Funktionskörper und Assertions blieben unverändert.
+  - **Ausdrücklich erhaltene Abschlussgrenze:** Dieser Abschluss belegt **keine** vollständige Payload-, Transport- oder Spielsystem-Sicherheit. `SEC_MAX_FRAME_BYTES` bleibt ein **Anwendungslimit**; das Projekt konfiguriert **keine** Transportpuffergrenze (kein eigenes `WebSocketConfig`/`max_message_size`, `net.rs:503`) — diese bleibt als benannte offene Betriebsgrenze bestehen und wird **nicht** in diesem Auftrag behoben. Es wird **keine** generische Replay-Abwehr behauptet (siehe Abschnitt 4.2, geschlossen) und **keine** vollständige Zahlenvalidierung der Bewegung. „Ungültig ≠ Cheat" bleibt maßgeblich; es wurden keine neuen Straf- oder Verbotsregeln eingeführt.
+  - **Verhältnis zu anderen Punkten:** `AUTH-03A`/`P-30` bleiben wie geschrieben und werden von diesem Abschluss nicht berührt. `AUTH-04`, `AUTH-06`, `AUTH-07` sowie die Abschnitte 4.4 bis 4.10 bleiben unverändert `ZU PRÜFEN`. Audit 4.2 bleibt geschlossen; **Audit 4.7 und `P-33` bleiben offen**. Keine neue P-ID und keine Prioritätsänderung.
+
+#### 4.3.1 Befunde der read-only Prüfung und Korrekturen
+
+**B-1 — Code-/Doku-Widerspruch (korrigiert).** Dokumentiert war „Session →
+Sequenz → Rate-Limit". Tatsächlich führt `dispatch` die Sequenzbeobachtung
+**vor** Session und Rate aus (`net.rs:831` vor `net.rs:836`). Die
+Sequenzstufe ist **kein** Gate und entscheidet nichts, die Abweichung hatte
+daher keine sicherheitsrelevante Wirkung. Korrigiert in
+`docs/Serverautoritaet_und_Anti-Manipulation_V1.md` §3.3 und im
+`gate_frame`-Dokument (`security.rs`).
+
+**B-2 — Code-/Doku-Widerspruch (korrigiert).** Die Doku schrieb Größe,
+JSON-Format und Typ-Whitelist `gate_frame` zu. `gate_frame` prüft
+tatsächlich **nur Session und Rate Limit**; die drei anderen Stufen liegen
+im Aufrufer `read_loop` (`net.rs:582`, `:592`, `:602`). Der Name der
+Funktion allein belegt keine vollständige Abdeckung. Korrigiert in §3.3 des
+Serverautoritätsdokuments und im `gate_frame`-Dokument; die Modellierungs-
+Tests in `security.rs` sind jetzt ausdrücklich als solche gekennzeichnet.
+
+**T-1 — Nachweislücke geschlossen.** Vorher war der echte Empfangspfad
+ungetestet: `oversize_frames_rejected_before_parse` prüft nur die
+Grenzfunktion, und `invalid_requests_never_reach_expensive_systems` nutzt
+eine test-eigene Modellierung (`security.rs`, `pipeline()`), die den
+Produktionspfad nicht abbildet. Neu sind sieben Tests über den echten
+`read_loop` mit echten `Message::Text`-Frames (`src/realm-rs/src/net.rs`):
+`read_loop_drops_oversize_text_before_handler_effect`,
+`read_loop_drops_invalid_json_text`,
+`read_loop_drops_unknown_message_type`,
+`read_loop_drops_valid_known_message_without_session`,
+`read_loop_delivers_valid_known_message_to_handler`,
+`read_loop_keeps_reading_after_single_rejected_frames`,
+`read_loop_stops_at_existing_disconnect_threshold`.
+Der Kontrolltest `read_loop_delivers_valid_known_message_to_handler` belegt,
+dass das Gerüst überhaupt den Wirkungspfad erreicht; die Zuordnung der
+einzelnen Ablehnungsstufen erfolgt über den vorhandenen Diagnosewert
+`ConnGuard::violations`. Die Reihenfolge „Größe vor Parse" ist **strukturell
+am Produktionscode** belegt (Größenprüfung `:582` mit `continue` vor dem
+Parse `:592`), nicht aus fehlender Handler-Wirkung abgeleitet.
+
+**B-3 — Externe Betriebsgrenze (nicht geändert).** `SEC_MAX_FRAME_BYTES`
+ist ein Anwendungslimit; es greift nach dem Transportpuffer. Das Projekt
+setzt kein eigenes `WebSocketConfig`/`max_message_size`
+(`accept_async` mit Standardkonfiguration, `net.rs:503`). In diesem
+Abschnitt wurde **keine** Transportkonfiguration geändert.
+
+**N-1 — Whitelisted, nicht implementiert.** `NPC_TALK` (6),
+`AUCTION_LIST` (7), `AUCTION_BID` (8) stehen in `is_known_c2s`, haben aber
+keinen Dispatch-Arm und enden im `other`-Zweig (`net.rs:929`) ohne Wirkung.
+Fail-closed, kein Fehler.
+
+**M-1 — MOVE-Zahlen-/Arraygrenzen (geprüft, kein Defekt reproduziert).**
+Über den tatsächlichen Parse- und Handlerpfad geprüft
+(`src/realm-rs/src/net.rs`): `dir:[1e308,0]` ergibt begrenzte endliche
+Bewegung; `1e400` wird vom Parser abgewiesen und am Parse-Gate verworfen,
+womit `±∞` über den Empfangspfad nicht erreichbar ist; `hypot`-Überlauf bei
+`dir:[1.7e308,1.7e308]` ergibt kontrolliertes No-Op bei endlicher Position.
+Entartete und falsch typisierte `dir`-Formen (`[]`, `[1]`, `["a",null]`,
+`null`, fehlend) erzeugen keine Bewegung und sind **kein** Gate-Verstoß.
+Vier Tests belegen dies. Die Aussage „JSON erlaubt kein NaN, daher kein
+Rechenüberlauf" wurde **nicht** übernommen: tragend ist die empirisch
+belegte Parser-Grenze, nicht die Robustheit von `world::apply_move`
+(`dx = ±∞` wäre dort nicht endlich, ist aber nicht erreichbar). Es wurde
+**keine** Produktionsänderung vorgenommen.
 
 ### 4.4 Rate-Limits und vorhandene Testnachweise
 

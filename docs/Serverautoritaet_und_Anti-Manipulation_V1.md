@@ -31,6 +31,33 @@ zusätzlichen DB-Pfade pro Request).
 | Einstieg | Handoff + Session, Account-Gleichheit, fail-closed | `handlers::verify_entry` |
 | Chat | Eltern-Gate, 240-Zeichen-Cap | `handle_chat` |
 
+Zur Zahlen- und Arraygrenze des MOVE-Pfads (`handle_move`,
+`handlers.rs:634-672`): Der Client liefert eine Richtung, keine Endposition.
+`dir` wird nur gelesen, wenn es ein Array mit **mindestens zwei** Elementen
+ist (`handlers.rs:636`); sonst greifen `x`/`y` mit Standard `0.0`. Falsch
+typisierte Elemente ergeben `0.0` (`as_f64().unwrap_or(0.0)`). Nach der
+Wegnormalisierung begrenzt `apply_move` den Schritt auf 210 m/s ×
+Tickintervall (`world.rs:679-687`).
+
+Belegte Randfälle am echten Parse-/Handlerpfad (Tests in `net.rs`, keine
+Sonderregel im Produktionscode):
+
+- Sehr große, aber endlich darstellbare Werte (`dir:[1e308,0]`) → begrenzte,
+  endliche Bewegung (`x = 21.0` bei 100-ms-Tick). Kein Rechenüberlauf.
+- Zahlen außerhalb des f64-Bereichs (`1e400`) → `serde_json` weist sie mit
+  „number out of range" ab; der Frame scheitert bereits an der
+  Frame-Deserialisierung und wird am Parse-Gate verworfen. Damit ist `±∞`
+  über den Empfangspfad **nicht erreichbar**.
+- Endliche Einzelwerte, deren Betragsquadratsumme überläuft
+  (`dir:[1.7e308,1.7e308]`, `hypot = ∞`) → kontrolliertes No-Op, Position
+  bleibt endlich bei `(0,0)`.
+
+`world::apply_move` wäre für `dx = ±∞` nicht endlich (`∞/∞ = NaN`). Das ist
+über den Empfangspfad nicht erreichbar; der tragende Nachweis ist die
+**Parser-Grenze**, nicht die Robustheit von `apply_move`. Der Sicherheits-
+bzw. Nicht-Befund ist ausdrücklich **kein** Beweis einer allgemeinen
+Bewegungsvalidierung — Positionsauthorität bleibt allein `apply_move`.
+
 Das Protokoll enthielt bereits **keine** `SET_*`-Nachrichten mit Endwerten
 (kein `SET_HP`/`SET_GOLD`/`SET_STRENGTH`, kein Client-Schaden) — es gab also
 keine Stelle, an der der Server Clientwerte als Wahrheit übernahm. Die
@@ -80,20 +107,62 @@ Gleiches Anschlussprinzip gilt später für Handel, Crafting und Sammeln
 
 ### 3.3 Frühe Netzwerkprüfung (`net.rs`)
 
-Reihenfolge pro Paket (billig → teuer):
+**Tatsächliche Reihenfolge** einer C2S-Nachricht (billig → teuer), wie im
+Produktionscode belegt:
 
 ```text
-Paketgröße (vor dem Parsen) → JSON-Format → Typ-Whitelist → Session
-→ Sequenz (nur vermerkt) → Rate Limit → Game Logic → ggf. Datenbank
+Paketgröße (vor dem Parsen) → JSON-Format → Typ-Whitelist
+→ Sequenzbeobachtung (nur vermerkt, kein Gate)
+→ Session-Gate → Rate-Gate → Dispatch → typabhängige Fachprüfung
+→ ggf. Game Logic / Datenbank
 ```
 
-- Übergröße/unparsbar/unbekannt: verwerfen + Auffälligkeit zählen.
+**Verteilung auf die Funktionen (wichtig für jede Code- und Doku-Aussage):**
+
+| Stufe | Ort | Funktion |
+|---|---|---|
+| Paketgröße | `read_loop` (`net.rs:582`) | `security::frame_too_large` |
+| JSON-Format | `read_loop` (`net.rs:592`) | `serde_json::from_str` |
+| Typ-Whitelist | `read_loop` (`net.rs:602`) | `security::is_known_c2s` |
+| Sequenzbeobachtung | `dispatch` (`net.rs:831`) | `ConnGuard::note_seq` |
+| Session + Rate Limit | `dispatch` (`net.rs:836`) | `security::gate_frame` |
+
+`security::gate_frame` prüft **ausschließlich Session und Rate Limit**, in
+dieser Reihenfolge. Größe, Parse und Whitelist liegen **beim Aufrufer**
+(`read_loop`); sie sind **nicht** Teil von `gate_frame`. Der Name der
+Funktion allein belegt also **keine** vollständige Abdeckung.
+
+- Übergröße/unparsbar/unbekannt: verwerfen + Auffälligkeit zählen
+  (`net.rs:583`, `:595`, `:603`). Jede dieser drei Stufen zählt über
+  `ConnGuard::violations` genau eine Auffälligkeit; das ist der vorhandene
+  Diagnosewert, über den sich die Ablehnungsstufe eindeutig zuordnen lässt.
 - Ohne Session (außer HELLO): verwerfen (`no_session`).
 - Rate Limit überschritten: verwerfen (`rate_limited`); bei massiver/
   wiederholter Überschreitung (`SEC_DISCONNECT_AFTER_VIOLATIONS`):
   Verbindung trennen — **kein permanenter Bann**.
 - Sequenz: Duplikate/Out-of-Order durch Lag werden nur vermerkt, nie als
-  Cheat gewertet oder abgelehnt.
+  Cheat gewertet oder abgelehnt. Die Sequenzstufe ist **kein** Gate und
+  entscheidet nichts (siehe §3.3.1).
+
+**Größenbegrenzung — Anwendung gegen Transport:** `SEC_MAX_FRAME_BYTES`
+(Standard 65536) ist ein **Anwendungslimit**: Es greift im `read_loop` vor
+dem JSON-Parsen und begrenzt Parse sowie Spiellogik. Es ist **keine**
+Transportpuffergrenze — zum Zeitpunkt der Prüfung hat die WebSocket-Schicht
+den Frame bereits angenommen und im Speicher gehalten. Das Projekt setzt
+**kein** eigenes `WebSocketConfig`/`max_message_size`
+(`tokio_tungstenite::accept_async` mit Standardkonfiguration,
+`net.rs:503`); die wirksame Transportgrenze ist damit die
+tungstenite-Vorgabe, nicht `SEC_MAX_FRAME_BYTES`.
+
+**Nachweis:** Die Gate-Reihenfolge am echten Empfangspfad ist durch Tests
+über den Produktions-`read_loop` belegt (`net.rs`:
+`read_loop_drops_oversize_text_before_handler_effect`,
+`read_loop_drops_invalid_json_text`,
+`read_loop_drops_unknown_message_type`,
+`read_loop_drops_valid_known_message_without_session`,
+`read_loop_delivers_valid_known_message_to_handler`,
+`read_loop_keeps_reading_after_single_rejected_frames`,
+`read_loop_stops_at_existing_disconnect_threshold`).
 
 #### 3.3.1 Verbindlicher Vertrag: `seq` ist Korrelation (normativ)
 
@@ -154,6 +223,15 @@ Zulässigkeitsentscheidung verwendet.
 | Interaktiv | CHAT, HEARTBEAT, PARENTAL | 10 | `SEC_INTERACTIVE_PER_SEC` |
 | Kampf | ATTACK, ABILITY, PICKUP | 10 | `SEC_COMBAT_PER_SEC` |
 | Selten | Attribute, Auktion, Gruppe, NPC, Unbekannt | 5 | `SEC_RARE_PER_SEC` |
+
+**Whitelisted, aber nicht implementiert:** `NPC_TALK` (6), `AUCTION_LIST`
+(7) und `AUCTION_BID` (8) stehen in `security::is_known_c2s`
+(`security.rs:285-309`) und im Protokoll (`protocol.rs:16-18`), besitzen aber
+**keinen** Dispatch-Arm in `net.rs:869-930`. Sie passieren Whitelist und
+Gate und enden im `other`-Zweig (`net.rs:929`) **ohne Handler und ohne
+Zustandswirkung** — bewusst fail-closed. `AUCTION_BUY` (9) hat dagegen einen
+Arm und wird fail-closed abgelehnt (`handle_auction_buy`, `handlers.rs:1326`),
+weil kein Auktionshaus-State existiert.
 
 Sliding-Window (1000 ms) je Verbindung und Kategorie, reine RAM-Operation
 (`ConnGuard`). 500 Spend-Requests in 1 s → 5 passieren, 495 werden vor

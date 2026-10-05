@@ -4077,4 +4077,414 @@ mod tests {
             "toter Angreifer schlägt nicht zu"
         );
     }
+
+    // ── Audit 4.3 / T-1: Nachweis der Gate-Kette am echten `read_loop` ────
+    //
+    // Alle Tests in diesem Abschnitt rufen die **Produktionsfunktion**
+    // `read_loop` mit echten `Message::Text`-Frames auf. Es wird bewusst
+    // **keine** zweite Gate-Pipeline nachgebaut — anders als die test-eigene
+    // `pipeline()` in `security.rs` (`security.rs:916`), die den echten
+    // Empfangspfad nicht abbildet.
+    //
+    // **Reihenfolge-Beleg:** Die Aussage „vor dem Parse" wird **nicht** aus
+    // fehlender Handler-Wirkung abgeleitet, sondern strukturell am
+    // Produktionscode belegt: der Größen-Gate steht in `read_loop` bei
+    // `net.rs:582` und endet mit `continue` (`:590`); der JSON-Parse
+    // (`net.rs:592`) ist für einen übergroßen Frame dadurch unerreichbar.
+    // Es folgen Typ-Whitelist (`:602`) und `dispatch` (`:612`); erst dort
+    // liegen Sequenzbeobachtung (`net.rs:831`), Session-/Rate-Gate
+    // (`security.rs:242`) und der Handler.
+    //
+    // **Zuordnung der Gate-Stufe:** Jede Stufe zählt über den vorhandenen
+    // Diagnosewert `ConnGuard::violations` genau eine Auffälligkeit
+    // (`net.rs:587`, `:596`, `:607`; Session-Zählung in `gate_frame`:
+    // `security.rs:265`). Dieser Zähler
+    // ordnet die Ablehnung eindeutig zu: ein unbekannter Typ, der die
+    // Whitelist passieren würde, liefe im `other`-Zweig von `dispatch`
+    // (`net.rs:929`) **ohne** Zählung; ein zu großer Frame, der die
+    // Größenstufe passieren würde, würde geparst, gewhitelistet und
+    // verlagert den Spieler.
+
+    /// Baut einen echten C2S-Frame über den Produktions-Encoder.
+    fn c2s_text(msg_type: i64, data: serde_json::Value) -> String {
+        crate::protocol::Frame::new(1, msg_type, data).encode()
+    }
+
+    /// Füttert den echten `read_loop` mit echten Anwendungsframes.
+    /// Verbindungs-ID 7 entspricht `insert_cadence_players`.
+    async fn drive_read_loop(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        frames: Vec<String>,
+    ) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Bewusst per Schleife statt per `map`: `tungstenite::Error` ist ein
+        // großer `Err`-Typ, den ein `map`-Closure als Rückgabetyp aufspannt
+        // (Clippy `result_large_err`) — die Basis hatte diese Warnung nicht.
+        let mut items: Vec<Result<Message, tungstenite::Error>> =
+            Vec::with_capacity(frames.len());
+        for t in frames {
+            items.push(Ok(Message::Text(t.into())));
+        }
+        let stream = futures_util::stream::iter(items);
+        read_loop(ctx, &tx, 7, guard, sec_cfg, stream).await;
+    }
+
+    // Die folgenden Tests liegen bewusst hier (am Ende des Moduls) und nicht
+    // neben `read_error_runs_through_central_cleanup`, weil sie dieselben
+    // Helfer (`test_ctx`, `insert_cadence_players`, `insert_players`,
+    // `SecurityCfg`) nutzen und die gemeinsame Lesereihenfolge
+    // (`read_loop` → `dispatch` → Handler) an einem Ort dokumentieren.
+
+    /// Übergroßer Text-Frame wird vor jeder Handler-Wirkung verworfen.
+    /// Der Frame ist bewusst **gültiges JSON**, **gültiger Typ** und trägt
+    /// eine wirksame `dir`-Angabe: fiele der Größen-Gate aus, bewegte sich
+    /// der Spieler. Damit belegt der Test die Wirkung des Gates und nicht
+    /// bloß das Fehlen einer Wirkung.
+    #[tokio::test]
+    async fn read_loop_drops_oversize_text_before_handler_effect() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+
+        let oversize = c2s_text(
+            crate::protocol::c2s::MOVE,
+            serde_json::json!({"dir": [1, 0], "pad": "x".repeat(sec_cfg.max_frame_bytes)}),
+        );
+        assert!(
+            oversize.len() > sec_cfg.max_frame_bytes,
+            "Testframe muss die Grenze wirklich überschreiten"
+        );
+        drive_read_loop(&ctx, &mut guard, &sec_cfg, vec![oversize]).await;
+
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        assert_eq!(
+            (p.x, p.y),
+            (0.0, 0.0),
+            "übergroßer Frame darf keine Bewegung auslösen"
+        );
+        assert_eq!(guard.violations, 1, "Größen-Gate zählt genau eine Auffälligkeit");
+    }
+
+    /// Ungültiges JSON wird verworfen (kein Crash, keine Wirkung).
+    #[tokio::test]
+    async fn read_loop_drops_invalid_json_text() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop(&ctx, &mut guard, &sec_cfg, vec!["{kein json".to_string()]).await;
+
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        assert_eq!((p.x, p.y), (0.0, 0.0));
+        assert_eq!(guard.violations, 1, "Parse-Gate zählt genau eine Auffälligkeit");
+    }
+
+    /// Unbekannter Nachrichtentyp wird an der Whitelist verworfen. Ohne die
+    /// Whitelist liefe der Frame im `other`-Zweig (`net.rs:929`) und **ohne**
+    /// Verletzungszählung; `violations == 1` ordnet ihn daher eindeutig der
+    /// Whitelist zu.
+    #[tokio::test]
+    async fn read_loop_drops_unknown_message_type() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![c2s_text(4242, serde_json::json!({}))],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        assert_eq!((p.x, p.y), (0.0, 0.0));
+        assert_eq!(guard.violations, 1, "Whitelist zählt genau eine Auffälligkeit");
+    }
+
+    /// Gültige, bekannte Nachricht einer **nicht eingeloggten** Verbindung
+    /// wird am Session-Gate verworfen. Der Player existiert dabei
+    /// ausdrücklich, ist aber über `by_conn` nicht verbunden — sonst ließe
+    /// sich die Gate-Wirkung nicht von der Wirkungslosigkeit des Handlers
+    /// unterscheiden (`handle_move` prüft selbst `by_conn`).
+    #[tokio::test]
+    async fn read_loop_drops_valid_known_message_without_session() {
+        let ctx = test_ctx().await;
+        // Spieler anlegen, aber bewusst KEINE by_conn-Zuordnung.
+        insert_players(&ctx.shared, &["a"]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![c2s_text(
+                crate::protocol::c2s::MOVE,
+                serde_json::json!({"dir": [1, 0]}),
+            )],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        assert_eq!(
+            (p.x, p.y),
+            (0.0, 0.0),
+            "Session-Gate muss greifen, obwohl der Handler bereit wäre"
+        );
+        assert_eq!(guard.violations, 1, "Session-Gate zählt genau eine Auffälligkeit");
+    }
+
+    /// Kontrollnachweis: dieselbe Testumgebung erreicht über `read_loop`
+    /// tatsächlich den Wirkungspfad. Ohne diesen Test wäre „keine Wirkung"
+    /// in den Fällen oben nicht aussagekräftig.
+    #[tokio::test]
+    async fn read_loop_delivers_valid_known_message_to_handler() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![c2s_text(
+                crate::protocol::c2s::MOVE,
+                serde_json::json!({"dir": [1, 0]}),
+            )],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        let x = world.players["a"].x;
+        assert!(x > 0.0, "gültige Nachricht muss den Handler erreichen (x={x})");
+        assert_eq!(guard.violations, 0, "gültige Nachricht ist kein Gate-Verstoß");
+    }
+
+    /// Nach einzelnen verworfenen Frames wird weitergelesen, solange die
+    /// vorhandene Verletzungsschwelle nicht erreicht ist: alle drei
+    /// Ablehnungsarten nacheinander, danach wirkt die gültige Nachricht.
+    #[tokio::test]
+    async fn read_loop_keeps_reading_after_single_rejected_frames() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        assert!(
+            sec_cfg.disconnect_after_violations > 3,
+            "Test setzt drei Ablehnungen unter die Schwelle"
+        );
+        let oversize = c2s_text(
+            crate::protocol::c2s::MOVE,
+            serde_json::json!({"dir": [1, 0], "pad": "x".repeat(sec_cfg.max_frame_bytes)}),
+        );
+
+        drive_read_loop(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                "{kein json".to_string(),
+                oversize,
+                c2s_text(4242, serde_json::json!({})),
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+            ],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        assert!(
+            world.players["a"].x > 0.0,
+            "nach drei Ablehnungen wird weiter gelesen und verarbeitet"
+        );
+        assert_eq!(guard.violations, 3, "jede Ablehnung zählt genau einmal");
+    }
+
+    /// Beim vorhandenen Disconnect-Schwellwert endet der Pfad kontrolliert:
+    /// bis zur Schwelle wird gezählt, der Folgeframe wird **nicht mehr**
+    /// verarbeitet. `read_loop` kehrt dabei normal zurück (kein Panic).
+    #[tokio::test]
+    async fn read_loop_stops_at_existing_disconnect_threshold() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.disconnect_after_violations = 3;
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                "{kein json".to_string(),
+                "{auch kein json".to_string(),
+                c2s_text(4242, serde_json::json!({})),
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+            ],
+        )
+        .await;
+
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        assert_eq!(
+            (p.x, p.y),
+            (0.0, 0.0),
+            "Frame nach erreichter Schwelle darf nicht mehr wirken"
+        );
+        assert_eq!(guard.violations, 3, "Pfad endet genau am Schwellwert");
+    }
+
+    // ── Audit 4.3: Zahlen- und Arraygrenzen des MOVE-Pfads ───────────────
+    //
+    // Die Aussage „JSON erlaubt kein NaN, daher kein Rechenüberlauf" wird
+    // hier **nicht** übernommen: JSON schließt NaN und ±∞ als Literale aus,
+    // aber ein endlicher f64-Eingabewert garantiert **keine** endlichen
+    // Zwischenergebnisse. Geprüft wird der tatsächliche Parse- und
+    // Handlerpfad (Text-Frame → Parse → Whitelist → Session-Gate →
+    // `handle_move` → `apply_move`).
+    //
+    // Hintergrund zum Nicht-Ändern: `apply_move` wäre für `dx = ±∞`
+    // tatsächlich nicht endlich (`∞/∞ = NaN`, siehe `world.rs:679`). Diese
+    // Eigenschaft ist über den Empfangspfad **nicht erreichbar**, weil der
+    // Parser eine außerhalb des f64-Bereichs liegende Zahl ablehnt (siehe
+    // `move_frame_numbers_outside_f64_range_never_reach_the_handler`). Der
+    // Sicherheitsnachweis ist damit die **Parser-Grenze**, nicht die
+    // Robustheit von `apply_move`. `apply_move` wird deshalb bewusst nicht
+    // geändert.
+
+    /// Fährt **einen** MOVE-Text-Frame über den echten `read_loop` und
+    /// liefert die resultierende Position samt Verletzungszähler.
+    async fn move_position_after(
+        ctx: &Arc<Ctx>,
+        sec_cfg: &crate::security::SecurityCfg,
+        text: &str,
+    ) -> (f64, f64, u32) {
+        // Frischer Ausgangszustand je Fall.
+        {
+            let mut world = ctx.shared.lock().await;
+            world.players.clear();
+            world.by_conn.clear();
+        }
+        insert_cadence_players(ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let mut guard = crate::security::ConnGuard::default();
+        drive_read_loop(ctx, &mut guard, sec_cfg, vec![text.to_string()]).await;
+        let world = ctx.shared.lock().await;
+        let p = &world.players["a"];
+        (p.x, p.y, guard.violations)
+    }
+
+    /// Sehr große, aber endlich darstellbare Werte: `dir:[1e308, 0]`.
+    /// Ergebnis muss eine **begrenzte, endliche** Bewegung sein. Der
+    /// erwartete Weg ist die Normalisierung (`dx/len`) und der Cap
+    /// (210 m/s × 100 ms Tick = 21 m), nicht das Versagen der Rechnung.
+    #[tokio::test]
+    async fn move_frame_with_finite_but_extreme_values_is_capped_not_overflowed() {
+        let ctx = test_ctx().await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let (x, y, violations) = move_position_after(
+            &ctx,
+            &sec_cfg,
+            r#"{"seq":1,"type":2,"data":{"dir":[1e308,0]}}"#,
+        )
+        .await;
+        assert_eq!(violations, 0, "gültiger Frame ist kein Gate-Verstoß");
+        assert!(x.is_finite() && y.is_finite(), "Position muss endlich sein ({x},{y})");
+        assert_eq!(
+            (x, y),
+            (21.0, 0.0),
+            "Richtungsnormierung und Speed-Cap müssen greifen"
+        );
+    }
+
+    /// Zahlen, die der Parser nicht als f64 darstellen kann (`1e400`):
+    /// `serde_json` weist sie ab („number out of range"), der Frame scheitert
+    /// damit schon an der `Frame`-Deserialisierung und wird am Parse-Gate
+    /// (`net.rs:592`) verworfen — **vor** Whitelist, Session-Gate und Handler.
+    /// Damit ist `±∞` (und damit die NaN-Eigenschaft von `apply_move`) über
+    /// den Empfangspfad nicht erreichbar.
+    #[tokio::test]
+    async fn move_frame_numbers_outside_f64_range_never_reach_the_handler() {
+        let ctx = test_ctx().await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let text = r#"{"seq":1,"type":2,"data":{"dir":[1e400,0]}}"#;
+        // Parser-Befund unabhängig vom Realm festhalten.
+        assert!(
+            serde_json::from_str::<crate::protocol::Frame>(text).is_err(),
+            "out-of-range Zahl muss den Parser scheitern lassen"
+        );
+        let (x, y, violations) = move_position_after(&ctx, &sec_cfg, text).await;
+        assert_eq!(violations, 1, "Parse-Gate zählt genau eine Auffälligkeit");
+        assert_eq!(
+            (x, y),
+            (0.0, 0.0),
+            "keine Bewegung und keine nicht endliche Position"
+        );
+    }
+
+    /// Endliche Einzelwerte, deren **Betragsquadratsumme** überläuft
+    /// (`hypot(1.7e308, 1.7e308) = ∞`): die Normalisierung teilt dann durch
+    /// `∞` und ergibt 0. Das Ergebnis ist kontrolliert (keine Bewegung) und
+    /// bleibt endlich — ein stilles No-op, kein Rechenüberlauf.
+    #[tokio::test]
+    async fn move_frame_with_overflowing_magnitude_stays_finite() {
+        let ctx = test_ctx().await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let (x, y, violations) = move_position_after(
+            &ctx,
+            &sec_cfg,
+            r#"{"seq":1,"type":2,"data":{"dir":[1.7e308,1.7e308]}}"#,
+        )
+        .await;
+        assert_eq!(violations, 0, "Frame ist syntaktisch und typseitig gültig");
+        assert!(x.is_finite() && y.is_finite(), "Position muss endlich sein ({x},{y})");
+        assert_eq!((x, y), (0.0, 0.0), "Überlauf führt zu kontrolliertem No-op");
+    }
+
+    /// Entartete und falsch typisierte `dir`-Formen: leeres Array, Array mit
+    /// einem Element, falsche Elementtypen. Alle sind gültiges JSON und
+    /// gültiger Typ, werden also **nicht** am Gate verworfen (keine
+    /// Verletzungszählung), sondern vom Handler selbst folgenlos behandelt.
+    #[tokio::test]
+    async fn move_frame_with_degenerate_or_mistyped_dir_makes_no_movement() {
+        let ctx = test_ctx().await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        for text in [
+            r#"{"seq":1,"type":2,"data":{"dir":[]}}"#,
+            r#"{"seq":1,"type":2,"data":{"dir":[1]}}"#,
+            r#"{"seq":1,"type":2,"data":{"dir":["a",null]}}"#,
+            r#"{"seq":1,"type":2,"data":{"dir":null}}"#,
+            r#"{"seq":1,"type":2,"data":{}}"#,
+        ] {
+            let (x, y, violations) = move_position_after(&ctx, &sec_cfg, text).await;
+            assert_eq!(
+                (x, y),
+                (0.0, 0.0),
+                "entartetes dir darf keine Bewegung auslösen: {text}"
+            );
+            assert!(
+                x.is_finite() && y.is_finite(),
+                "Position muss endlich bleiben: {text}"
+            );
+            assert_eq!(
+                violations, 0,
+                "diese Formen sind kein Gate-Verstoß, sondern Handler-Entscheidung: {text}"
+            );
+        }
+    }
 }
