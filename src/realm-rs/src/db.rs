@@ -12,6 +12,90 @@ use sqlx::{MySql, Pool, Row as _};
 
 use crate::config::DbConfig;
 
+// ── Fehlerklassifizierung für DB-Logs (Audit 4.5, B3) ───────────────────
+//
+// Grund: die Persistenzpfade in dieser Datei gaben bisher den ROHEN
+// sqlx-Fehlertext aus (`{e}`). Derselbe Roh-Treibertext, der hier bewusst
+// nicht erscheint, ist in den Fehlertexten anderer Komponenten bereits als
+// Grund für die Klassifizierung dokumentiert: er kann Verbindungs- oder
+// Zugangsdaten enthalten (siehe `net.rs`, `LogoutErrorClass`). Die
+// Klassifizierung ist damit KEINE neue Regel, sondern die konsequente
+// Anwendung der bestehenden auf diesen Dateibereich.
+//
+// Es werden ausschließlich stabile, neutrale Klassen ausgegeben: **kein**
+// Treibertext, **keine** DSN, **kein** SQL, **keine** Parameter.
+//
+// Die Zuordnung ist bewusst KONSERVATIV: nur Fehlerklassen, die sich ohne
+// Treibertext sicher unterscheiden lassen. Alles andere fällt in
+// `DbErrorClass::Other`. Es wird keine Detaildiagnose erfunden und keine
+// Fehlerbehandlung geändert — Rückgabewerte, Fehlerweitergabe, Retry und
+// alle DB-Operationen bleiben unverändert.
+
+/// Stabile Fehlerklasse einer DB-Operation im Log.
+///
+/// `Begin` und `Commit` bezeichnen Fehler, deren Klasse sich allein aus der
+/// Operation ergibt; sie werden in `save_idia` gesetzt. `Connect` ist derzeit
+/// ohne Produktionsaufrufer (`connect_pool` reicht seinen Fehler als
+/// `Err(String)` nach oben und loggt nicht selbst), gehört aber zur
+/// geschlossenen Klassenliste und wird deshalb nicht entfernt.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub(crate) enum DbErrorClass {
+    /// Der Verbindungsaufbau bzw. das Pool-Holen ist gescheitert.
+    Connect,
+    /// Die Transaktion konnte nicht gestartet werden.
+    Begin,
+    /// Das Commit ist fehlgeschlagen (Transaktion zurückgerollt).
+    Commit,
+    /// Ein Zeitlimit der Verbindung oder des Pools wurde überschritten.
+    Timeout,
+    /// Der Treiber meldete einen Fehler ohne näher benannten Grund.
+    Driver,
+    /// Sonstiger, nicht näher klassifizierter Fehler.
+    Other,
+}
+
+impl DbErrorClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Connect => "connect",
+            Self::Begin => "begin",
+            Self::Commit => "commit",
+            Self::Timeout => "timeout",
+            Self::Driver => "driver",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Bildet einen Fehler auf eine stabile Klasse ab. Nimmt bewusst **keinen**
+/// Fehlertext entgegen und gibt **niemals** Rohinhalt zurück.
+pub(crate) fn db_error_class(e: &sqlx::Error) -> DbErrorClass {
+    match e {
+        sqlx::Error::PoolTimedOut | sqlx::Error::Io(_) => DbErrorClass::Timeout,
+        sqlx::Error::Database(_) | sqlx::Error::AnyDriverError(_) => DbErrorClass::Driver,
+        _ => DbErrorClass::Other,
+    }
+}
+
+/// Zeile eines fehlgeschlagenen DB-Schreibvorgangs.
+///
+/// Enthält ausschließlich die Operation, die vorhandene zulässige Kennung
+/// und die Fehlerklasse. Bewusst **nicht** enthalten: Treibertext, DSN, SQL,
+/// Parameter, Session-ID, Token und Roh-IP.
+///
+/// `char_id`/`spawn_id`/`item_id` sind serverseitige, bereits kanonisch
+/// validierte Kennungen; sie laufen zur Sicherheit durch `reject_field`, damit
+/// auch hier keine Zeile entsteht oder ein Feld vorgetäuscht wird.
+pub(crate) fn db_error_line(operation: &str, id: &str, class: DbErrorClass) -> String {
+    format!(
+        "db_error operation={} id={} error_class={}",
+        operation,
+        crate::security::reject_field(id),
+        class.as_str(),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct Character {
     pub id: String,
@@ -273,7 +357,10 @@ pub async fn save_position(pool: &Pool<MySql>, char_id: &str, x: f64, y: f64) {
         .execute(pool)
         .await
     {
-        log::error!("savePosition: {e}");
+        log::error!(
+            "{}",
+            db_error_line("save_position", char_id, db_error_class(&e))
+        );
     }
 }
 
@@ -464,19 +551,35 @@ pub(crate) async fn write_idia(
 
 /// Speichert den Geldstand (idia; Fehler nur loggen — kein Crash).
 pub async fn save_idia(pool: &Pool<MySql>, char_id: &str, idia: i64) {
+    // Die Fehlerklasse von `begin` und `commit` ergibt sich aus der
+    // Operation selbst; der konkrete Fehlerwert wird bewusst nicht
+    // ausgewertet, weil daraus kein stabiler, treibertextfreier Zusatz
+    // zu gewinnen wäre.
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => {
-            log::error!("saveIdia {char_id}: {e}");
+        Err(_) => {
+            log::error!(
+                "{}",
+                db_error_line("save_idia_begin", char_id, DbErrorClass::Begin)
+            );
             return;
         }
     };
-    if let Err(e) = write_idia(&mut tx, char_id, idia).await {
-        log::error!("saveIdia {char_id}: {e}");
+    if write_idia(&mut tx, char_id, idia).await.is_err() {
+        // `write_idia` liefert bewusst `Result<(), String>` (kein
+        // `sqlx::Error`), weil der Spool-Drain sie mitnutzt. Der String wird
+        // hier nicht ausgegeben; die Klasse folgt aus der Operation.
+        log::error!(
+            "{}",
+            db_error_line("save_idia_write", char_id, DbErrorClass::Driver)
+        );
         return;
     }
-    if let Err(e) = tx.commit().await {
-        log::error!("saveIdia {char_id}: {e}");
+    if tx.commit().await.is_err() {
+        log::error!(
+            "{}",
+            db_error_line("save_idia_commit", char_id, DbErrorClass::Commit)
+        );
     }
 }
 
@@ -920,7 +1023,12 @@ pub async fn save_npc_state(
     .execute(pool)
     .await;
     if let Err(e) = result {
-        log::error!("saveNpcState {spawn_id}: {e}");
+        // `spawn_id` ist numerisch (i64); die Identität wird als Feld
+        // ausgegeben, nicht durch die String-Form des Rohfehlers.
+        log::error!(
+            "{}",
+            db_error_line("save_npc_state", &spawn_id.to_string(), db_error_class(&e))
+        );
     }
 }
 
@@ -1022,7 +1130,10 @@ pub async fn save_character_class(
             .execute(pool)
             .await
     {
-        log::error!("saveCharacterClass {char_id}: {e}");
+        log::error!(
+            "{}",
+            db_error_line("save_character_class", char_id, db_error_class(&e))
+        );
     }
 }
 
@@ -1162,8 +1273,14 @@ pub async fn load_item_definitions(
             attribute_bonuses: attrs.into_iter().collect(),
             resistances: resists.into_iter().collect(),
         };
-        if let Err(e) = def.validate() {
-            log::error!("Item-Definition {} ungültig: {e}", def.item_id);
+        if def.validate().is_err() {
+            // Der Validierungsfehler wird NICHT ausgegeben: `ItemError`
+            // sammelt freie Fehlertexte aus dem Content-Bestand. Es bleibt
+            // die stabile Klasse.
+            log::error!(
+                "{}",
+                db_error_line("load_item_definitions", &def.item_id, DbErrorClass::Other)
+            );
             continue;
         }
         defs.push(def);
@@ -1214,7 +1331,17 @@ pub async fn load_loot_tables(
             continue;
         };
         let Some(kind) = crate::loot::LootKind::from_db(&kind) else {
-            log::error!("Loot-Eintrag {id}: unbekannter kind '{kind}'; übersprungen");
+            // `kind` ist der ROHE Datenbank-Freitext aus `loot_entries.kind`
+            // und damit clientgleich kontrollierbar durch den Content-Bestand.
+            // Er wird über die bereits vorhandene sichere Feldformatierung
+            // `reject_field` ausgegeben (einzeilig, escaped, auf 64 Zeichen
+            // gekürzt); es gibt bewusst KEINE weitere Sanitizer-Implementierung
+            // in dieser Datei. Diagnosezweck und die numerischen Kennungen `id`
+            // bleiben erhalten, ebenso die Validierung und der `continue`.
+            log::error!(
+                "Loot-Eintrag {id}: unbekannter kind '{}'; übersprungen",
+                crate::security::reject_field(kind.as_str())
+            );
             continue;
         };
         // Mengen-Korrektur: bei max < min setzen wir beide auf max.
@@ -1794,4 +1921,254 @@ pub(crate) async fn guarded_complete_quest(
     .await
     .map_err(|e| format!("Questabschluss-Guard (char {char_id}, quest {quest_id}): {e}"))?;
     Ok(result.rows_affected() == 1)
+}
+
+// ── Tests: DB-Fehlerklassifizierung (Audit 4.5, B3) ─────────────────────
+//
+// Nachweis an der TATSÄCHLICH verwendeten Logformatierung (`db_error_line`),
+// nicht an einer nachgebauten Hilfsfunktion. Es ist **keine** echte Datenbank
+// nötig: die Klassen werden aus `sqlx::Error`-Werten gebildet, die ohne
+// Verbindung konstruierbar sind, und der Rohinhalt wird über einen
+// markierten String geprüft.
+
+#[cfg(test)]
+mod db_error_log_tests {
+    use super::*;
+
+    /// Ein Rohfehler mit eindeutigem Markierungsstring. Taucht dieses
+    /// Markierungszeichen in einer Logzeile auf, ist Rohinhalt ausgegeben.
+    const MARK: &str = "RAWLEAKMARKER";
+
+    fn marked_driver_error() -> sqlx::Error {
+        sqlx::Error::AnyDriverError(Box::new(std::io::Error::other(MARK)))
+    }
+
+    // B3, Nachweis 1: die Zeile enthält Operation, Identität und Klasse —
+    // und niemals den Rohfehler, weder als Text noch als SQL/DSN-Anteil.
+    #[test]
+    fn db_error_line_carries_operation_id_and_class_only() {
+        let line = db_error_line("save_position", "42", DbErrorClass::Driver);
+        assert_eq!(
+            line, "db_error operation=save_position id=42 error_class=driver",
+            "{line}"
+        );
+        for forbidden in [MARK, "SELECT", "UPDATE", "mysql://", "://", "err="] {
+            assert!(!line.contains(forbidden), "verboten {forbidden:?}: {line}");
+        }
+    }
+
+    // B3, Nachweis 2: ein markierter Rohfehler darf NICHT erscheinen. Der
+    // Fehler wird ausschließlich auf seine Klasse abgebildet.
+    #[test]
+    fn marked_raw_error_never_reaches_the_log_line() {
+        let e = marked_driver_error();
+        let line = db_error_line("save_position", "42", db_error_class(&e));
+        assert!(!line.contains(MARK), "Rohfehler im Log: {line}");
+        assert!(!line.contains("io error"), "Rohfehler-Art im Log: {line}");
+        // Operation und Klasse bleiben erkennbar.
+        assert!(line.contains("operation=save_position"), "{line}");
+        assert!(line.contains("error_class=driver"), "{line}");
+    }
+
+    // B3, Nachweis 3: die Zuordnung ist stabil und enthält keinen
+    // Treibertext. Jede Klasse hat genau eine Schreibweise.
+    #[test]
+    fn error_classes_are_stable_and_closed() {
+        let classes = [
+            (DbErrorClass::Connect, "connect"),
+            (DbErrorClass::Begin, "begin"),
+            (DbErrorClass::Commit, "commit"),
+            (DbErrorClass::Timeout, "timeout"),
+            (DbErrorClass::Driver, "driver"),
+            (DbErrorClass::Other, "other"),
+        ];
+        for (class, want) in classes {
+            assert_eq!(class.as_str(), want);
+            let line = db_error_line("op", "1", class);
+            assert_eq!(
+                line,
+                format!("db_error operation=op id=1 error_class={want}")
+            );
+        }
+    }
+
+    // B3, Nachweis 4: `db_error_class` bildet einen markierten Fehler auf
+    // eine Klasse ab, ohne Inhalt preiszugeben, und ist für gleiche
+    // Eingaben deterministisch.
+    #[test]
+    fn error_class_mapping_is_deterministic_and_contentless() {
+        let e = marked_driver_error();
+        let first = db_error_class(&e);
+        let second = db_error_class(&e);
+        assert_eq!(first, second, "Zuordnung muss deterministisch sein");
+        // AnyDriverError wird bewusst konservativ als `driver` geführt.
+        assert_eq!(first, DbErrorClass::Driver);
+        // Timeout-Pfad ohne Treibertext:
+        let t = sqlx::Error::PoolTimedOut;
+        assert_eq!(db_error_class(&t), DbErrorClass::Timeout);
+    }
+
+    // B3, Nachweis 5: die Identität läuft durch denselben Injektionsschutz
+    // wie das Ablehnungslog. Ein serverseitiger Wert kann keine Zeile
+    // erzeugen und kein Feld vortäuschen.
+    #[test]
+    fn db_error_line_escapes_and_bounds_the_identifier() {
+        let line = db_error_line("op", "a\r\nb", DbErrorClass::Other);
+        assert!(!line.contains('\r') && !line.contains('\n'), "{line}");
+        assert!(line.contains("id=a\\x0d\\x0ab"), "{line}");
+        // Genau vier durch Leerzeichen getrennte Felder: `db_error`,
+        // `operation=`, `id=` und `error_class=`. Ein Identifier mit
+        // Leerzeichen oder Umbruch kann kein zusätzliches Feld erzeugen.
+        assert_eq!(line.split_whitespace().count(), 4, "{line}");
+        // Gegenprobe: die Leerzeichen-Variante erzeugt ebenfalls kein Feld.
+        let spaced = db_error_line("op", "a b", DbErrorClass::Other);
+        assert_eq!(spaced.split_whitespace().count(), 4, "{spaced}");
+        assert!(spaced.contains("id=a\\x20b"), "{spaced}");
+
+        let long = db_error_line("op", &"x".repeat(500), DbErrorClass::Other);
+        let id_field = long
+            .split_whitespace()
+            .find(|f| f.starts_with("id="))
+            .expect("id-Feld");
+        assert_eq!(
+            id_field.chars().count(),
+            3 + crate::security::REJECT_FIELD_MAX_CHARS + 1,
+            "{id_field}"
+        );
+        assert!(id_field.ends_with('~'), "{long}");
+        assert_eq!(long.split_whitespace().count(), 4, "{long}");
+    }
+
+    // B3, Regressionsgrenze: eine normale, unauffällige Zeile bleibt exakt
+    // wie erwartet lesbar. Es wird keine Diagnoseinformation entfernt, die
+    // zuvor als Feld enthalten war.
+    #[test]
+    fn db_error_line_normal_output_is_readable() {
+        assert_eq!(
+            db_error_line("save_npc_state", "17", DbErrorClass::Timeout),
+            "db_error operation=save_npc_state id=17 error_class=timeout"
+        );
+        assert_eq!(
+            db_error_line("save_idia_commit", "42", DbErrorClass::Commit),
+            "db_error operation=save_idia_commit id=42 error_class=commit"
+        );
+    }
+
+    // ── Restbefund R-1: Freitext `loot_entries.kind` in der Ladezeile ──────
+    //
+    // Die Testaussage ist bewusst eng gefasst: geprueft wird die **tatsaechlich
+    // verwendete Logformatierung** — also exakt das Formatargument der
+    // Produktionsstelle in `load_loot_tables`, gerendert mit `reject_field`.
+    //
+    // Es wird **nicht** behauptet, die Produktionsstelle sei hiermit
+    // ausgefuehrt worden: sie braucht einen DB-Pool. Der Nachweis, dass die
+    // Stelle `reject_field` verwendet, ist ein **statischer Aufrufnachweis**
+    // (Fundstelle in `load_loot_tables`), kein Testlauf. Eine kuenstliche
+    // Baseline-Reproduktion wird ausdruecklich **nicht** behauptet.
+
+    /// Rendert die Loot-Art-Zeile exakt so, wie die Produktionsstelle es tut.
+    fn loot_kind_line(id: i64, kind: &str) -> String {
+        format!(
+            "Loot-Eintrag {id}: unbekannter kind '{}'; übersprungen",
+            crate::security::reject_field(kind)
+        )
+    }
+
+    /// Grundinvariante: die Zeile bleibt EINZeilig, ohne Steuerzeichen, und
+    /// behaelt ihre feste Feldstruktur. Der Freitextwert darf kein
+    /// zusaetzliches Feld erzeugen: die Zahl der Leerzeichen-getrennten
+    /// Felder muss unabhaengig vom Wert immer dieselbe sein (hier sechs:
+    /// `Loot-Eintrag`, `<id>:`, `unbekannter`, `kind`, `'<wert>';`,
+    /// `uebersprungen`).
+    fn assert_loot_kind_line_single_field(id: i64, kind: &str) -> String {
+        let line = loot_kind_line(id, kind);
+        for bad in ['\n', '\r'] {
+            assert!(!line.contains(bad), "Zeilenumbruch in {line:?}");
+        }
+        for bad in ['\u{0}', '\u{7}', '\u{1b}', '\u{7f}'] {
+            assert!(!line.contains(bad), "Steuerzeichen in {line:?}");
+        }
+        assert_eq!(
+            line.split_whitespace().count(),
+            6,
+            "Feldzahl geaendert: {line:?}"
+        );
+        assert!(line.starts_with(&format!("Loot-Eintrag {id}: unbekannter kind '")));
+        assert!(line.ends_with("'; übersprungen"), "{line:?}");
+        line
+    }
+
+    // R-1, Nachweis 1: CR/LF im Freitext erzeugen KEINE zweite Logzeile.
+    #[test]
+    fn loot_kind_value_escapes_crlf_and_stays_one_line() {
+        let line = assert_loot_kind_line_single_field(
+            7,
+            "item\r\nFAKE db_error operation=logout id=1 error_class=driver",
+        );
+        assert!(line.contains("\\x0d\\x0a"), "CR/LF nicht escaped: {line:?}");
+        // Der vorgetaeuschte Inhalt ist noch lesbar, aber harmlos als Text:
+        // auch seine Leerzeichen sind escaped, sodass er kein Feld erzeugt.
+        assert!(line.contains("FAKE\\x20db_error"), "{line:?}");
+        assert!(
+            !line.contains(" FAKE"),
+            "un-escapetes Feld im Log: {line:?}"
+        );
+    }
+
+    // R-1, Nachweis 2: Leerzeichen und Backslash werden escaped, sodass der
+    // Wert kein zusaetzliches Feld erzeugen und keine Escape-Sequente
+    // vortaeuschen kann.
+    #[test]
+    fn loot_kind_value_escapes_space_and_backslash() {
+        let line = assert_loot_kind_line_single_field(7, "a b c");
+        assert!(line.contains("a\\x20b\\x20c"), "{line:?}");
+
+        let line = assert_loot_kind_line_single_field(7, "a\\x0db");
+        // Der echte Backslash wird doppelt escaped; die vorgetaeuschte
+        // Steuerzeichen-Darstellung bleibt deshalb als Text erkennbar.
+        assert!(line.contains("a\\\\x0db"), "{line:?}");
+        assert!(!line.contains('\u{0}'), "{line:?}");
+    }
+
+    // R-1, Nachweis 3: ein ueberlanger Unicode-Freitext wird zeichenweise auf
+    // 64 Zeichen gekuerzt, die Zeile bleibt einzeilig und gueltiges UTF-8.
+    #[test]
+    fn loot_kind_value_bounds_long_unicode_without_splitting_a_char() {
+        let raw = "ü".repeat(crate::security::REJECT_FIELD_MAX_CHARS + 40);
+        let line = assert_loot_kind_line_single_field(7, &raw);
+
+        // Der geklammerte Wert ist der Teil zwischen dem ersten und dem letzten
+        // einfachen Anfuehrungszeichen.
+        let value = line
+            .split_once("kind '")
+            .and_then(|(_, rest)| rest.rsplit_once("';"))
+            .map(|(v, _)| v)
+            .expect("Wert zwischen den Anfuehrungszeichen");
+        assert_eq!(
+            value.chars().count(),
+            crate::security::REJECT_FIELD_MAX_CHARS + 1,
+            "Wert nicht auf 64 Zeichen + Marker begrenzt: {value:?}"
+        );
+        assert!(value.ends_with('~'), "Marker fehlt: {value:?}");
+        assert_eq!(
+            value.chars().filter(|c| *c == 'ü').count(),
+            crate::security::REJECT_FIELD_MAX_CHARS,
+            "Mehrbytezeichen mittig abgeschnitten: {value:?}"
+        );
+    }
+
+    // R-1, Regressionsgrenze: der NORMALE Fall bleibt unveraendert lesbar. Ein
+    // unbekannter, aber harmloser Wert erscheint weiterhin im Klartext; die
+    // Validierung selbst wird davon nicht beruehrt.
+    #[test]
+    fn loot_kind_line_normal_output_is_unchanged() {
+        assert_eq!(
+            loot_kind_line(3, "bogus"),
+            "Loot-Eintrag 3: unbekannter kind 'bogus'; übersprungen"
+        );
+        // Ein realer Wert wird weiterhin akzeptiert, der unbekannte weiterhin
+        // abgelehnt — die Zeile entsteht dann gar nicht erst.
+        assert!(crate::loot::LootKind::from_db("item").is_some());
+        assert!(crate::loot::LootKind::from_db("bogus").is_none());
+    }
 }

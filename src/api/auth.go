@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -213,24 +214,137 @@ func (rl *rateLimit) allow(key string) (bool, int) {
 	return true, 0
 }
 
-// loggingMiddleware adds a single per-request log line on the
-// server side. The line contains method, path, status and the
-// presenting service identity when authenticated; it never includes
-// a body, signature or any secret.
-func loggingMiddleware(next http.Handler) http.Handler {
-	type statusRecorder struct {
-		http.ResponseWriter
-		code int
+// accessLogPathMax is how many characters of a request-determined field may
+// appear in one access-log line before it is visibly truncated. It is a
+// bound of the LOG representation only: it changes neither the request nor
+// the answer. Every registered route is far shorter, so no legitimate path
+// is ever shortened.
+const accessLogPathMax = 64
+
+// accessLogField renders a request-determined value as exactly ONE bounded
+// line segment. The value reaches us percent-decoded (r.URL.Path), so it may
+// contain control characters and spaces; both are escaped here. Escaping the
+// space is what keeps the space-separated fields of the access log
+// unambiguous: a value can therefore never introduce an additional field.
+// A trailing "~" marks a value that was shortened.
+//
+// This is a display boundary. It is NOT a payload rule: it does not accept
+// or reject any request and does not alter any handler.
+func accessLogField(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+	count := 0
+	for _, r := range raw {
+		if count == accessLogPathMax {
+			b.WriteByte('~')
+			break
+		}
+		switch {
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r == ' ':
+			b.WriteString(`\x20`)
+		case r < 0x20 || r == 0x7f:
+			const hex = "0123456789abcdef"
+			b.WriteString(`\x`)
+			b.WriteByte(hex[byte(r)>>4])
+			b.WriteByte(hex[byte(r)&0x0f])
+		default:
+			b.WriteRune(r)
+		}
+		count++
 	}
+	return b.String()
+}
+
+// loggingMiddleware adds a single per-request log line on the
+// server side. The line contains method, path, status and duration.
+//
+// It deliberately contains NO header value: the presenting service
+// identity arrives in the unauthenticated X-Andora-Service header and is
+// therefore caller-controlled on every request, including rejected ones.
+// It is not logged at all, neither raw nor validated. Passing on the
+// AUTHORIZED identity would require threading the credential out of
+// authorize(); that is a separate decision and not needed here.
+//
+// Body, query values, signature and every other header stay out too.
+// The path is the only remaining request-determined field and it is
+// rendered through accessLogField (single line, escaped, bounded).
+// statusRecorder merkt sich den WIRKSAMEN finalen Antwortstatus einer
+// Anfrage.
+//
+// Vorher existierte kein WriteHeader-Override: der eingebettete
+// ResponseWriter erhielt den Aufruf, das Statusfeld blieb 0 und der Fallback
+// trug immer 200 ein — jede Ablehnung war im Access-Log ein Erfolg.
+//
+// Die Semantik folgt der net/http-Vertragslage (ResponseWriter.WriteHeader
+// und response.WriteHeader in net/http/server.go):
+//
+//   - WriteHeader(c) merkt c als final, solange noch keiner gesetzt ist.
+//   - 1xx (100..199, ohne 101) sind informative Antworten. net/http sendet
+//     sie sofort, setzt `wroteHeader` ausdrücklich NICHT und lässt `status`
+//     unverändert; eine beliebige Anzahl darf folgen. Sie sind daher KEIN
+//     finaler Status: sie werden durchgereicht, aber nicht gemerkt.
+//   - 101 (Switching Protocols) nimmt in net/http den nicht-informativen
+//     Pfad und ist damit final.
+//   - Ein späteres WriteHeader überschreibt einen bereits wirksamen finalen
+//     Status nicht; net/http verwirft solche Aufrufe als "superfluous". Der
+//     erste finale Status bleibt.
+//   - Write ohne vorheriges WriteHeader löst implizit 200 aus; der
+//     eigentliche Writer löst das ebenfalls auf, hier wird es nur
+//     mitgebucht, damit der Logwert stimmt.
+//   - Schreibt der Handler überhaupt nicht, gilt 200.
+type statusRecorder struct {
+	http.ResponseWriter
+	code      int
+	finalized bool
+}
+
+// writeHeader merkt einen finalen Status. Ist bereits ein finaler Status
+// wirksam, wird der Aufruf verworfen und der bestehende beibehalten.
+// Informative 1xx-Antworten werden durchgereicht, aber nicht gemerkt.
+func (sr *statusRecorder) writeHeader(code int) {
+	if code >= 100 && code <= 199 && code != http.StatusSwitchingProtocols {
+		sr.ResponseWriter.WriteHeader(code)
+		return
+	}
+	if sr.finalized {
+		return
+	}
+	sr.code = code
+	sr.finalized = true
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+// WriteHeader reicht den Status durch und merkt den finalen Status.
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.writeHeader(code)
+}
+
+// Write bucht den impliziten Status 200, falls noch keiner wirksam ist, und
+// reicht die Daten durch.
+func (sr *statusRecorder) Write(b []byte) (int, error) {
+	if !sr.finalized {
+		sr.writeHeader(http.StatusOK)
+	}
+	return sr.ResponseWriter.Write(b)
+}
+
+// statusOrOK liefert den wirksamen finalen Status; ohne jeden Schreibvorgang
+// gilt 200.
+func (sr *statusRecorder) statusOrOK() int {
+	if !sr.finalized {
+		return http.StatusOK
+	}
+	return sr.code
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
 	f := func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		rec := &statusRecorder{w, 0}
+		rec := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(rec, r)
-		if rec.code == 0 {
-			rec.code = http.StatusOK
-		}
-		svc := r.Header.Get("X-Andora-Service")
-		log.Printf("%s %s %d %s %v", r.Method, r.URL.Path, rec.code, svc, time.Since(start))
+		log.Printf("%s %s %d %v", r.Method, accessLogField(r.URL.Path), rec.statusOrOK(), time.Since(start))
 	}
 	return http.HandlerFunc(f)
 }

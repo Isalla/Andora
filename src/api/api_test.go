@@ -11,12 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	mysqlerr "github.com/go-sql-driver/mysql"
 )
@@ -1908,6 +1910,440 @@ func TestSessionStatsOutputCarriesNoSensitiveData(t *testing.T) {
 	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if strings.Contains(rec.Body.String(), "connection refused") {
 		t.Fatalf("raw driver error leaked: %s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Audit 4.5 / B1 — Access-Log der Auth-API
+//
+// Nachweis am ECHTEN loggingMiddleware-Pfad (srv.handler()), nicht an einer
+// nachgebauten Hilfsfunktion. Geprüft werden:
+//   1. eine abgewiesene Anfrage mit manipuliertem Service-Header,
+//   2. lange Werte und Steuerzeichen im Pfad,
+//   3. exakt eine Logzeile je Anfrage und kein ungeprüfter Headerinhalt.
+//
+// Der globale Standardlogger wird wie im vorhandenen P-35-Muster
+// (captureP35Logs, parental_test.go) umgeleitet und im Cleanup
+// wiederhergestellt; der Testmutex p35LogMu verhindert Wechselwirkungen mit
+// parallelen Tests.
+// ---------------------------------------------------------------------------
+
+// accessLogLines returns every captured line, in order.
+func accessLogLines(t *testing.T, buf *bytes.Buffer) []string {
+	t.Helper()
+	s := strings.TrimRight(buf.String(), "\n")
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+// serveLogged drives one request through the real middleware chain and
+// returns the access-log lines it produced.
+func serveLogged(t *testing.T, srv *Server, method, target string, hdr http.Header) []string {
+	t.Helper()
+	buf := captureP35Logs(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, target, nil)
+	for k, vs := range hdr {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	srv.handler().ServeHTTP(rec, req)
+	// KEIN p35Reset hier: der Puffer ist frisch und wird direkt gelesen.
+	return accessLogLines(t, buf)
+}
+
+// B1, Nachweis 1: eine ABGEWIESENE Anfrage mit manipuliertem
+// X-Andora-Service-Header darf den Headerinhalt nicht in die Zeile bringen.
+// Der Header ist auf jeder Anfrage caller-kontrolliert, gerade auch dort, wo
+// die Autorisierung fehlschlägt.
+func TestAccessLogOmitsUntrustedServiceHeader(t *testing.T) {
+	srv := testServer(t)
+
+	// Absichtlich kein gültiger Dienst, kein gültiger Zeitstempel, keine
+	// Signatur: die Anfrage wird abgewiesen (401).
+	hdr := http.Header{}
+	hdr.Set("X-Andora-Service", "svc-attacker\nFAKE injected_token=deadbeef")
+	hdr.Set("X-Andora-Signature", "deadbeef")
+	hdr.Set("X-Andora-Timestamp", "1")
+
+	lines := serveLogged(t, srv, "GET", "/session/validate", hdr)
+
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one access-log line, got %d: %q", len(lines), lines)
+	}
+	line := lines[0]
+	for _, forbidden := range []string{"svc-attacker", "injected_token", "deadbeef"} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("untrusted request content %q leaked: %q", forbidden, line)
+		}
+	}
+	// Der Pfad steht weiterhin im Log: er ist das einzige
+	// requestbestimmte Feld und wird begrenzt ausgegeben.
+	if !strings.Contains(line, "/session/validate") {
+		t.Fatalf("path must remain: %q", line)
+	}
+	// Die Status-POSITION bleibt belegt (dreistellige Zahl). Der konkrete
+	// Wert wird hier bewusst NICHT auf 401 geprueft: statusRecorder
+	// faengt WriteHeader nicht ab, rec.code bleibt daher 0 und der
+	// Fallback traegt immer 200 ein. Das ist ein vorbestehender Defekt
+	// des Statusfeldes, von B1 unberuehrt und getrennt gefuehrt.
+	if got := len(strings.Fields(line)); got != 4 {
+		t.Fatalf("want 4 fields (method path status dur), got %d: %q", got, line)
+	}
+	if !regexp.MustCompile(`^\S+ \S+ [0-9]{3} \S+$`).MatchString(line) {
+		t.Fatalf("status position must stay a three-digit code: %q", line)
+	}
+}
+
+// B1, Nachweis 2: lange Werte und Steuerzeichen im Pfad werden escaped,
+// einzeilig und begrenzt ausgegeben. Der Pfad ist percent-dekodiert, also
+// koennen CR/LF und Steuerzeichen echt in ihm stehen.
+func TestAccessLogEscapesAndBoundsPath(t *testing.T) {
+	srv := testServer(t)
+
+	cases := []struct {
+		name      string
+		target    string
+		wantIn    string
+		wantNotIn []string
+		wantBound bool
+	}{
+		{
+			name: "cr_lf_injection",
+			// httptest parst das als Pfad; \r\n landet percent-dekodiert
+			// im Request-URI und damit im geloggten r.URL.Path.
+			target:    "/a%0d%0aINJECTED",
+			wantIn:    `\x0d\x0a`,
+			wantNotIn: []string{"\nINJECTED"},
+		},
+		{
+			name:      "space_becomes_escape",
+			target:    "/two%20words",
+			wantIn:    `\x20`,
+			wantNotIn: []string{"two words"},
+		},
+		{
+			name:      "long_path_is_bounded",
+			target:    "/" + strings.Repeat("A", 500),
+			wantBound: true,
+		},
+		{
+			name:   "backslash_is_escaped",
+			target: `/a\b`,
+			wantIn: `\\b`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := http.Header{}
+			lines := serveLogged(t, srv, "GET", tc.target, hdr)
+			if len(lines) != 1 {
+				t.Fatalf("want exactly one line, got %d: %q", len(lines), lines)
+			}
+			line := lines[0]
+			// Grundinvariante: genau eine Zeile, keine echten
+			// Zeilenumbrueche und keine echten Steuerzeichen.
+			for _, bad := range []string{"\r", "\n", "\x00", "\x07", "\x1b"} {
+				if strings.Contains(line, bad) {
+					t.Fatalf("raw control char %q in log: %q", bad, line)
+				}
+			}
+			if tc.wantIn != "" && !strings.Contains(line, tc.wantIn) {
+				t.Fatalf("want %q in line: %q", tc.wantIn, line)
+			}
+			for _, bad := range tc.wantNotIn {
+				if strings.Contains(line, bad) {
+					t.Fatalf("must not contain %q: %q", bad, line)
+				}
+			}
+			if tc.wantBound {
+				fields := strings.Fields(line)
+				if len(fields) != 4 {
+					t.Fatalf("want 4 fields (method path status dur), got %d: %q", len(fields), line)
+				}
+				// Der Kuerzungsmarker steht am Ende des PFADFELDES
+				// (nicht am Zeilenende: danach folgen Status und Dauer).
+				pathField := fields[1]
+				if !strings.HasSuffix(pathField, "~") {
+					t.Fatalf("long path must be visibly truncated: %q", line)
+				}
+				if n := len([]rune(pathField)); n != accessLogPathMax+1 {
+					t.Fatalf("path field has %d runes, want %d (64 + marker)", n, accessLogPathMax+1)
+				}
+			}
+		})
+	}
+}
+
+// B1, Nachweis 3: der Header wird auch bei einer GUELTIGEN, autorisierten
+// Anfrage nicht ausgegeben, und die Zeile bleibt normal lesbar. Damit ist
+// belegt, dass die Entfernung nicht nur den Ablehnungsfall betrifft.
+func TestAccessLogOmitsServiceHeaderOnAuthorizedRequest(t *testing.T) {
+	srv := testServer(t)
+	cred := srv.cfg.Services["svc-all"]
+	token := strings.Repeat("a", 64)
+	payload := `{"account_id":1,"session_token":"` + token + `"}`
+	ts := time.Now().Unix()
+
+	buf := captureP35Logs(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/session/validate", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Andora-Service", cred.ID)
+	req.Header.Set("X-Andora-Timestamp", fmt.Sprint(ts))
+	req.Header.Set("X-Andora-Signature",
+		signPayload(cred.Secret, "POST", "/session/validate", "", ts, []byte(payload)))
+	srv.handler().ServeHTTP(rec, req)
+
+	lines := accessLogLines(t, buf)
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one line, got %d: %q", len(lines), lines)
+	}
+	line := lines[0]
+	for _, forbidden := range []string{cred.ID, cred.Secret, token} {
+		if strings.Contains(line, forbidden) {
+			t.Fatalf("request content %q must not be logged: %q", forbidden, line)
+		}
+	}
+	// Normale Zeile: Method, Pfad, Status, Dauer.
+	if !strings.HasPrefix(line, "POST /session/validate 200 ") {
+		t.Fatalf("unexpected line shape: %q", line)
+	}
+	// Die Zeile besteht aus genau vier Feldern.
+	if got := len(strings.Fields(line)); got != 4 {
+		t.Fatalf("want 4 fields, got %d: %q", got, line)
+	}
+}
+
+// B1, Regressionsgrenze des Formatierers selbst: kurze, druckbare Werte
+// bleiben UNVERAENDERT. Die Grenze ist eine Darstellungsgrenze und darf
+// normale Werte nicht umschreiben.
+func TestAccessLogFieldLeavesNormalValuesUnchanged(t *testing.T) {
+	for _, in := range []string{
+		"/status",
+		"/parental/notifications/deliver",
+		"/a-b_c.d~e",
+		"",
+		"/players",
+		"/parental/pin/verify",
+	} {
+		if got := accessLogField(in); got != in {
+			t.Fatalf("normal value altered: %q -> %q", in, got)
+		}
+	}
+	// Grenze genau an der Kante: 64 Zeichen unveraendert, 65 gekuerzt.
+	exact := strings.Repeat("a", accessLogPathMax)
+	if got := accessLogField(exact); got != exact {
+		t.Fatalf("exactly-bound value must stay unchanged, got %q", got)
+	}
+	over := strings.Repeat("a", accessLogPathMax+1)
+	if got := accessLogField(over); got != exact+"~" {
+		t.Fatalf("one over bound must be truncated with marker: %q", got)
+	}
+	// Steuerzeichen werden escaped, nicht entfernt: die Information bleibt
+	// eindeutig rekonstruierbar.
+	if got := accessLogField("\r\n\x00"); got != `\x0d\x0a\x00` {
+		t.Fatalf("control chars must be escaped: %q", got)
+	}
+	// Kappung erfolgt ueber Zeichen, nicht ueber Bytes: ein Mehrbytezeichen
+	// am Rand darf nicht mittig abgeschnitten werden.
+	multi := strings.Repeat("ä", accessLogPathMax+5)
+	got := accessLogField(multi)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncation produced invalid UTF-8: %q", got)
+	}
+	if n := len([]rune(got)); n != accessLogPathMax+1 {
+		t.Fatalf("want %d runes (64 + marker), got %d", accessLogPathMax+1, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Audit 4.5 — Statusfeld des Access-Logs (statusRecorder)
+//
+// Vorher gab es kein WriteHeader-Override: `code` blieb 0 und der Fallback
+// trug immer 200 ein. Jede Ablehnung war im Log ein Erfolg.
+//
+// Geprüft wird die Übereinstimmung von ANTWORTstatus und PROTOKOLLIERTEM
+// Status über den echten Middleware-Pfad (`srv.handler()`), mit dem
+// vorhandenen Log-Capture (`captureP35Logs`) und restauriertem Loggerzustand.
+// ---------------------------------------------------------------------------
+
+// loggedStatus returns the status field (third field) of the single captured
+// access-log line. It fails when there is not exactly one line.
+func loggedStatus(t *testing.T, buf *bytes.Buffer) int {
+	t.Helper()
+	lines := accessLogLines(t, buf)
+	if len(lines) != 1 {
+		t.Fatalf("want exactly one access-log line, got %d: %q", len(lines), lines)
+	}
+	fields := strings.Fields(lines[0])
+	if len(fields) != 4 {
+		t.Fatalf("want 4 fields (method path status dur), got %d: %q", len(fields), lines[0])
+	}
+	code, err := strconv.Atoi(fields[2])
+	if err != nil {
+		t.Fatalf("status field is not numeric: %q", lines[0])
+	}
+	return code
+}
+
+// B1-Status, Nachweis 1: eine ECHTE abgewiesene Anfrage. Antwortstatus und
+// protokollierter Status müssen übereinstimmen — hier 401.
+func TestAccessLogStatusMatchesRejectedRequest(t *testing.T) {
+	srv := testServer(t)
+
+	// Kein Service-Header, keine Signatur: authorize() lehnt mit 401 ab.
+	buf := captureP35Logs(t)
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/session/validate", nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("want rejected request (401), got %d", rec.Code)
+	}
+	if got := loggedStatus(t, buf); got != rec.Code {
+		t.Fatalf("logged status %d must match real response status %d", got, rec.Code)
+	}
+}
+
+// B1-Status, Nachweis 2: eine erfolgreiche Anfrage liefert 200 in Antwort
+// und Log.
+func TestAccessLogStatusMatchesSuccessfulRequest(t *testing.T) {
+	srv := testServer(t)
+
+	buf := captureP35Logs(t)
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rec.Code)
+	}
+	if got := loggedStatus(t, buf); got != http.StatusOK {
+		t.Fatalf("logged status %d must match response status %d", got, rec.Code)
+	}
+}
+
+// B1-Status, Nachweis 3: ein EXPLIZITER Nicht-200-Erfolgsstatus muss im Log
+// erscheinen. 201 liefert der echte Register-Handler.
+func TestAccessLogStatusMatchesExplicitNon200Success(t *testing.T) {
+	srv := testServer(t)
+	cred := srv.cfg.Services["svc-all"]
+	body := []byte(`{"username":"newuser1","password":"longenough1","email":"new@example.com"}`)
+	ts := time.Now().Unix()
+
+	buf := captureP35Logs(t)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/account/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Andora-Service", cred.ID)
+	req.Header.Set("X-Andora-Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("X-Andora-Signature", signPayload(cred.Secret, "POST", "/account/register", "", ts, body))
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("want 201 from the register handler, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := loggedStatus(t, buf); got != http.StatusCreated {
+		t.Fatalf("logged status %d must be 201, not a flattened 200", got)
+	}
+}
+
+// B1-Status, Nachweis 4: die net/http-Semantik direkt am Recorder, ohne
+// Handler drumherum — implizites 200, expliziter Status, wiederholtes
+// WriteHeader und informative 1xx-Antworten.
+func TestStatusRecorderFollowsNetHTTPSemantics(t *testing.T) {
+	// (a) Rückkehr ohne jeden Schreibvorgang => 200.
+	rec := httptest.NewRecorder()
+	sr := &statusRecorder{ResponseWriter: rec}
+	if got := sr.statusOrOK(); got != http.StatusOK {
+		t.Fatalf("no write at all must report 200, got %d", got)
+	}
+
+	// (b) Implizites 200 durch den ersten Write.
+	rec = httptest.NewRecorder()
+	sr = &statusRecorder{ResponseWriter: rec}
+	if _, err := sr.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if got := sr.statusOrOK(); got != http.StatusOK {
+		t.Fatalf("first Write must finalize 200, got %d", got)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("underlying writer code %d", rec.Code)
+	}
+
+	// (c) Expliziter Status wird gemerkt.
+	rec = httptest.NewRecorder()
+	sr = &statusRecorder{ResponseWriter: rec}
+	sr.WriteHeader(http.StatusTeapot)
+	if got := sr.statusOrOK(); got != http.StatusTeapot {
+		t.Fatalf("explicit WriteHeader must be recorded, got %d", got)
+	}
+
+	// (d) Wiederholtes WriteHeader überschreibt den wirksamen finalen Status
+	// NICHT — net/http verwirft solche Aufrufe als "superfluous".
+	sr.WriteHeader(http.StatusInternalServerError)
+	if got := sr.statusOrOK(); got != http.StatusTeapot {
+		t.Fatalf("later WriteHeader must not override the final status, got %d", got)
+	}
+	// Auch ein Write danach ändert den finalen Status nicht.
+	if _, err := sr.Write([]byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if got := sr.statusOrOK(); got != http.StatusTeapot {
+		t.Fatalf("Write must not override the final status, got %d", got)
+	}
+
+	// (e) Informative 1xx-Antworten sind KEIN finaler Status. net/http
+	// setzt wroteHeader für 100..199 (ohne 101) ausdrücklich nicht.
+	rec = httptest.NewRecorder()
+	sr = &statusRecorder{ResponseWriter: rec}
+	sr.WriteHeader(http.StatusContinue) // 100
+	sr.WriteHeader(103)                 // Early Hints
+	if got := sr.statusOrOK(); got != http.StatusOK {
+		t.Fatalf("1xx must not become the final status, got %d", got)
+	}
+	// Der nachfolgende finale Status gewinnt.
+	sr.WriteHeader(http.StatusNoContent)
+	if got := sr.statusOrOK(); got != http.StatusNoContent {
+		t.Fatalf("final status after 1xx must win, got %d", got)
+	}
+
+	// (f) 101 (Switching Protocols) nimmt in net/http den nicht-informativen
+	// Pfad und IST damit final.
+	rec = httptest.NewRecorder()
+	sr = &statusRecorder{ResponseWriter: rec}
+	sr.WriteHeader(http.StatusSwitchingProtocols)
+	if got := sr.statusOrOK(); got != http.StatusSwitchingProtocols {
+		t.Fatalf("101 is final, got %d", got)
+	}
+}
+
+// B1-Status, Regressionsgrenze: die Antwort selbst bleibt unverändert. Der
+// Recorder darf weder Body noch Header noch Status der Antwort verändern —
+// nur der Logwert wird korrigiert.
+func TestAccessLogStatusFixDoesNotChangeResponse(t *testing.T) {
+	srv := testServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/session/validate", nil))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("response status changed: %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("Content-Type changed: %q", ct)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "X-Andora-Service") {
+		t.Fatalf("error body changed: %q", body)
+	}
+	// Erfolgreiche Antwort unverändert.
+	rec = httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/health", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok"`) {
+		t.Fatalf("health response changed: %d %q", rec.Code, rec.Body.String())
 	}
 }
 

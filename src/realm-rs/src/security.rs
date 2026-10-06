@@ -122,6 +122,52 @@ pub struct RejectInfo {
     pub detail: String,
 }
 
+/// Maximale Länge eines dynamischen Textfelds in einer Ablehnungszeile, in
+/// Unicode-Zeichen des **ursprünglichen** Werts. Danach wird kenntlich auf
+/// genau diese Grenze gekürzt (Abschneiden und `~`).
+///
+/// Das ist ausschließlich eine Grenze der Logdarstellung. Sie ist **keine**
+/// Payloadregel: es wird nichts an Annahme, Ablehnung, Gate, Rate-Limit,
+/// Zähler, Trennung oder Payloadverarbeitung geändert.
+pub(crate) const REJECT_FIELD_MAX_CHARS: usize = 64;
+
+/// Rendert einen dynamischen Textwert als **einzeiliges** Feld für die
+/// Ablehnungszeile.
+///
+/// Der Grund ist konkret: `info.detail` stammt aus dem C2S-Payload des
+/// Clients (`target_id`, `ability_id`, `attribute`) und war bisher ungefiltert
+/// in der Warnzeile. Ein Client konnte damit CR/LF und Leerzeichen in die
+/// Zeile schreiben und damit die Zeile zerlegen oder ein weiteres Feld
+/// vortäuschen. Dieselbe Behandlung gilt für alle übrigen dynamischen
+/// Textfelder dieses Formatierers.
+///
+/// Die Regel ist: **kein** Leerzeichen und **kein** Steuerzeichen im
+/// Ergebnis; sie werden als `\xNN` (bzw. `\\` für den Backslash) escaped.
+/// Steuerzeichen werden also **nicht entfernt**, die Information bleibt
+/// eindeutig rekonstruierbar. Weil das Leerzeichen selbst escaped wird,
+/// kann kein Wert ein zusätzliches Feld erzeugen.
+///
+/// Das Kappen erfolgt über `chars()` und damit **nie** mitten in einem
+/// UTF-8-Zeichen.
+pub(crate) fn reject_field(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(REJECT_FIELD_MAX_CHARS * 2) + 1);
+    for (chars, c) in raw.chars().enumerate() {
+        if chars == REJECT_FIELD_MAX_CHARS {
+            out.push('~');
+            break;
+        }
+        match c {
+            '\\' => out.push_str("\\\\"),
+            ' ' => out.push_str("\\x20"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Einfaches Ablehnungs-Logging (docs-Vorgabe: Zeitpunkt, Charakter,
 /// Request-Typ, Ablehnungsgrund, Wiederholungsanzahl, relevanter
 /// Serverzustand). Keine großen Datenmengen; Basis für eine spätere
@@ -131,6 +177,12 @@ pub struct RejectInfo {
 /// wird nicht protokolliert (AUTH-05; docs/Security.md §4.5), ebenso keine
 /// Handoff-Tokens oder Passwörter. Für den Test wird nur die Zeile gebaut,
 /// nicht geschrieben.
+///
+/// **Feldliste unverändert:** `conn`, `char`, `type`, `reason`,
+/// `violations`, `state`, `detail` — dieselben Felder wie zuvor, mit
+/// unveränderten serverseitigen Kennungen. Es wurde **keine** Session-ID
+/// hinzugefügt. Alle dynamischen Textfelder laufen durch `reject_field`,
+/// damit die Zeile einzeilig bleibt (Audit 4.5, B2).
 pub fn reject_log_line(
     player: Option<&Player>,
     conn_id: u64,
@@ -139,19 +191,19 @@ pub fn reject_log_line(
 ) -> String {
     let (char_id, server_state) = match player {
         Some(p) => (
-            p.id.as_str(),
+            reject_field(p.id.as_str()),
             format!(
                 "hp={} level={} exp={} idia={} free_attr={}",
                 p.hp, p.level, p.exp, p.idia, p.free_attr_points
             ),
         ),
-        None => ("-", "-".to_string()),
+        None => ("-".to_string(), "-".to_string()),
     };
     format!(
         "sec-reject conn={conn_id} char={char_id} type={} reason={} violations={violations} state=[{server_state}] {}",
         info.msg_type,
-        info.reason,
-        info.detail,
+        reject_field(info.reason.as_ref()),
+        reject_field(info.detail.as_str()),
     )
 }
 
@@ -1061,6 +1113,196 @@ mod tests {
         let line = reject_log_line(None, 8, &info, 1);
         assert!(line.contains("char=-"), "{line}");
         assert!(!line.to_lowercase().contains("session"), "{line}");
+    }
+
+    // ── Audit 4.5 / B2: clientbestimmte `detail`-Werte im Ablehnungslog ──
+    //
+    // Der Nachweis läuft über `reject_log_line`, also über DEN Formatierer,
+    // den `log_reject` tatsächlich schreibt. Es wird die **fertige Zeile**
+    // geprüft, nicht die Hilfsfunktion allein.
+
+    /// Baut eine Ablehnungszeile mit clientbestimmtem `detail`.
+    fn reject_line_with_detail(detail: &str) -> String {
+        let info = RejectInfo {
+            reason: "attacker_dead".into(),
+            msg_type: crate::protocol::c2s::ATTACK,
+            detail: detail.to_string(),
+        };
+        reject_log_line(Some(&test_player()), 7, &info, 2)
+    }
+
+    /// Die Zeile muss aus genau einem logbaren Abschnitt bestehen: kein
+    /// Zeilenumbruch, kein Steuerzeichen, kein Feldtrenner im Wert.
+    fn assert_single_clean_line(line: &str) {
+        for bad in ['\n', '\r'] {
+            assert!(
+                !line.contains(bad),
+                "Zeilenumbruch in der Logzeile: {line:?}"
+            );
+        }
+        for bad in ['\u{0}', '\u{7}', '\u{1b}', '\u{7f}'] {
+            assert!(
+                !line.contains(bad),
+                "Steuerzeichen in der Logzeile: {line:?}"
+            );
+        }
+        // Zwei Abschnitte: das Prefix bis `state=[…]` und der
+        // Detailabschnitt. Der Detailwert selbst darf kein Leerzeichen tragen.
+        let (_, detail) = line
+            .rsplit_once("] ")
+            .expect("state=[…] und Detailabschnitt");
+        assert!(
+            !detail.contains(' '),
+            "Feldtrenner im Detail: {detail:?} in {line:?}"
+        );
+    }
+
+    // B2, Nachweis 1: CR/LF im clientbestimmten Wert erzeugen KEINE zweite
+    // Logzeile. Vor der Korrektur konnte ein manipulierter Client hier die
+    // Warnzeile zerlegen und beliebige Folgezeilen vortäuschen.
+    #[test]
+    fn reject_line_escapes_crlf_and_stays_one_line() {
+        let line = reject_line_with_detail("npc_1\r\nsec-disconnect conn=1 type=2 violations=9");
+        assert_single_clean_line(&line);
+        assert!(line.contains("\\x0d\\x0a"), "CR/LF nicht escaped: {line:?}");
+        // Der vorgetaeuschte Inhalt ist noch da, aber harmlos als Text.
+        assert!(line.contains("sec-disconnect"), "{line:?}");
+        assert!(line.contains("npc_1"), "{line:?}");
+    }
+
+    // B2, Nachweis 2: weitere Steuerzeichen werden escaped, nicht entfernt.
+    #[test]
+    fn reject_line_escapes_other_control_chars() {
+        for (raw, want) in [
+            ("a\u{0}b", "\\x00"),
+            ("a\u{7}b", "\\x07"),
+            ("a\u{1b}b", "\\x1b"),
+            ("a\u{7f}b", "\\x7f"),
+            ("tab\there", "\\x09"),
+            ("back\\slash", "\\\\"),
+        ] {
+            let line = reject_line_with_detail(raw);
+            assert_single_clean_line(&line);
+            assert!(line.contains(want), "{raw:?} -> {want} fehlt: {line:?}");
+        }
+    }
+
+    // B2, Nachweis 3: der Feldtrenner (Leerzeichen) wird escaped, sodass der
+    // Wert kein zusaetzliches Feld erzeugen kann.
+    #[test]
+    fn reject_line_escapes_field_separator() {
+        let line = reject_line_with_detail("target=a b c");
+        assert_single_clean_line(&line);
+        assert!(line.contains("target=a\\x20b\\x20c"), "{line:?}");
+    }
+
+    // B2, Nachweis 4: lange Werte werden kenntlich auf genau 64 Zeichen des
+    // urspruenglichen Werts gekuerzt. Geprueft wird die Grenze an der Kante.
+    #[test]
+    fn reject_line_bounds_long_values_at_exactly_64_chars() {
+        // Genau an der Grenze: unveraendert.
+        let exact = "a".repeat(REJECT_FIELD_MAX_CHARS);
+        let rendered = reject_field(&exact);
+        assert_eq!(rendered, exact, "Wert an der Grenze wurde veraendert");
+
+        // Ein Zeichen darueber: 64 Zeichen plus Marker.
+        let over = "a".repeat(REJECT_FIELD_MAX_CHARS + 1);
+        let rendered = reject_field(&over);
+        assert_eq!(rendered.len(), REJECT_FIELD_MAX_CHARS + 1);
+        assert_eq!(rendered, format!("{}~", "a".repeat(REJECT_FIELD_MAX_CHARS)));
+
+        // In der Zeile sichtbar und weiterhin einzeilig.
+        let line = reject_line_with_detail(&"x".repeat(5000));
+        assert_single_clean_line(&line);
+        let detail = line.rsplit_once("] ").unwrap().1;
+        assert_eq!(detail.chars().count(), REJECT_FIELD_MAX_CHARS + 1);
+        assert!(detail.ends_with('~'), "{detail:?}");
+    }
+
+    // B2, Nachweis 5: Kappung erfolgt ueber Zeichen, nicht ueber Bytes. Ein
+    // Mehrbytezeichen am Rand darf nicht mittig abgeschnitten werden — der
+    // Wert bleibt gueltiges UTF-8.
+    #[test]
+    fn reject_line_truncation_never_splits_a_char() {
+        let raw = "ä".repeat(REJECT_FIELD_MAX_CHARS + 10);
+        let rendered = reject_field(&raw);
+        assert_eq!(rendered.chars().count(), REJECT_FIELD_MAX_CHARS + 1);
+        assert_eq!(rendered, format!("{}~", "ä".repeat(REJECT_FIELD_MAX_CHARS)));
+        // Als String ist das Ergebnis per Konstruktion gueltiges UTF-8; die
+        // Zeile muss ebenfalls unbeschaedigt bleiben.
+        let line = reject_line_with_detail(&raw);
+        assert_single_clean_line(&line);
+        assert!(line.contains("ä"), "Unicodeinhalt ging verloren: {line:?}");
+    }
+
+    // B2, Regressionsgrenze: die NORMALE Ausgabe ist unverändert. Feldliste,
+    // Reihenfolge und serverseitige Kennungen bleiben, wie sie waren.
+    #[test]
+    fn reject_line_normal_output_is_unchanged() {
+        let line = reject_line_with_detail("target=npc_7");
+        assert_eq!(
+            line,
+            "sec-reject conn=7 char=hero type=3 reason=attacker_dead violations=2 \
+             state=[hp=100 level=5 exp=0 idia=243 free_attr=3] target=npc_7"
+        );
+    }
+
+    // B2, Nachweis 6: der Schutz gilt fuer ALLE dynamischen Textfelder des
+    // Formatierers, nicht nur fuer `detail`. Geprueft werden `detail`,
+    // `reason` und `char_id`.
+    #[test]
+    fn reject_line_applies_to_every_dynamic_text_field() {
+        let info = RejectInfo {
+            reason: "bad\r\nreason".into(),
+            msg_type: crate::protocol::c2s::ATTACK,
+            detail: "a b".into(),
+        };
+        let mut p = test_player();
+        p.id = "he\nro".to_string();
+        let line = reject_log_line(Some(&p), 1, &info, 0);
+        assert_single_clean_line(&line);
+        assert!(
+            line.contains("\\x0d\\x0a"),
+            "reason nicht escaped: {line:?}"
+        );
+        assert!(
+            line.contains("char=he\\x0aro"),
+            "char_id nicht escaped: {line:?}"
+        );
+        assert!(line.contains("a\\x20b"), "detail nicht escaped: {line:?}");
+
+        // Auch der unauthentifizierte Fall (char="-") bleibt sauber.
+        let line = reject_log_line(None, 1, &info, 0);
+        assert_single_clean_line(&line);
+        assert!(line.contains("char=-"), "{line:?}");
+    }
+
+    // B2, Nachweis 7: die Feldliste ist unverändert und enthält weiterhin
+    // KEINE Session-ID. Der bestehende AUTH-05-Nachweis wird dadurch nicht
+    // aufgehoben, sondern um die Feldanzahl ergänzt.
+    #[test]
+    fn reject_line_field_list_unchanged_and_no_session_added() {
+        let line = reject_line_with_detail("target=npc_7");
+        for field in [
+            "sec-reject conn=",
+            "char=",
+            "type=",
+            "reason=",
+            "violations=",
+            "state=[",
+        ] {
+            assert!(line.contains(field), "Feld {field} fehlt: {line}");
+        }
+        assert!(!line.contains("sess-1"), "Session-ID im Log: {line}");
+        assert!(!line.contains("session"), "Session-Feld im Log: {line}");
+        assert!(!line.contains("token"), "Token-Feld im Log: {line}");
+        // Leerzeichen-getrennte Felder: 7 im Prefix + state-Inhalt.
+        let prefix = line.split("state=[").next().unwrap();
+        assert_eq!(
+            prefix.split_whitespace().count(),
+            6,
+            "Prefix-Feldzahl geändert: {line}"
+        );
     }
 
     // 10) AUTH-03: Die Takeover-Zeile führt genau die zulässigen Felder und
