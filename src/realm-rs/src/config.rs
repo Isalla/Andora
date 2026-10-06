@@ -354,16 +354,14 @@ pub fn persist_config(env: &HashMap<String, String>) -> PersistCfg {
 
 pub fn inventory_config(env: &HashMap<String, String>) -> InventoryCfg {
     let base = num1(env, "INVENTORY_BASE_SLOTS", 8) as u16;
-    let max_bags = env
-        .get("INVENTORY_MAX_EQUIPPED_BAGS")
-        .and_then(|v| {
-            let t = v.trim().to_lowercase();
-            if t.is_empty() || t == "none" || t == "unlimited" {
-                None
-            } else {
-                t.parse::<u16>().ok()
-            }
-        });
+    let max_bags = env.get("INVENTORY_MAX_EQUIPPED_BAGS").and_then(|v| {
+        let t = v.trim().to_lowercase();
+        if t.is_empty() || t == "none" || t == "unlimited" {
+            None
+        } else {
+            t.parse::<u16>().ok()
+        }
+    });
     InventoryCfg {
         base_slots: base,
         max_equipped_bags: max_bags,
@@ -413,21 +411,74 @@ impl From<&SecurityCfg> for crate::security::SecurityCfg {
     }
 }
 
-pub fn security_config(env: &HashMap<String, String>) -> SecurityCfg {
+/// Liest ein **explizit gesetztes** SEC-Feld und lehnt ungültige Werte ab.
+///
+/// Audit 4.4, R-6 (entschieden): Kein stilles Ersetzen durch Defaults, kein
+/// Clamping und keine stille Trunkierung. Der Aufrufer reicht den Fehler bis
+/// zum bestehenden Startup-Fehlerpfad weiter; ein Start mit teilweise gültiger
+/// Sicherheitskonfiguration findet damit nicht statt.
+///
+/// - **Fehlender Schlüssel** ⇒ unveränderter bisheriger Default.
+/// - **Vorhandener Schlüssel** ⇒ geprüfte Konvertierung nach `u64` und danach
+///   `try_into` auf den Zieltyp. Abgelehnt werden `0`, negative Werte, ein
+///   explizit leerer Wert, ein Nicht-Zahlenformat (`5.5`, `abc`) sowie ein
+///   Parseüberlauf oberhalb `u64::MAX`. Für `u32`-Felder wird zusätzlich der
+///   Bereich oberhalb `u32::MAX` abgelehnt, statt still abzuschneiden.
+///
+/// Der Fehlertext nennt **Schlüssel und zulässigen Bereich**, nie den
+/// Konfigurationsinhalt: `env` kann beliebige Einträge enthalten, und die
+/// Meldung landet im Startlog.
+fn sec_u64(env: &HashMap<String, String>, key: &str, def: u64, max: u64) -> Result<u64, String> {
+    let Some(raw) = env.get(key) else {
+        return Ok(def);
+    };
+    // `parse::<u64>` lehnt negative Werte, `5.5` und `abc` ab; ein explizit
+    // leerer oder reiner Leerraumwert scheitert daran ebenfalls. Der Wert wird
+    // bewusst **nicht** vorher getrimmt: ein aufgefüllter Wert wie `" 5"` ist
+    // keine gültige Ganzzahl und wird ebenso abgelehnt (vorher fiel er still
+    // auf den Default zurück). `load_env` trimmt Dateiwerte bereits, sodass
+    // dies die Praxis nicht einschränkt.
+    let value: u64 = raw
+        .parse()
+        .map_err(|_| format!("{key}: ungültiger Wert (erwartet ganze Zahl 1..={max})"))?;
+    if value == 0 || value > max {
+        return Err(format!("{key}: Wert außerhalb 1..={max}"));
+    }
+    Ok(value)
+}
+
+/// `u32`-Ziel: der oben geprüfte `u64`-Wert wird **geprüft** konvertiert.
+/// Eine stille `as u32`-Trunkierung findet nicht statt (R-6).
+fn sec_u32(env: &HashMap<String, String>, key: &str, def: u32) -> Result<u32, String> {
+    let wide = sec_u64(env, key, def as u64, u32::MAX as u64)?;
+    u32::try_from(wide).map_err(|_| format!("{key}: Wert außerhalb 1..={}", u32::MAX))
+}
+
+/// `usize`-Ziel (Frame-Limit, 64 Bit): positiv und im Zieltyp darstellbar.
+/// Die Grenze ist der Zieltyp, nicht eine willkürlich gesetzte Obergrenze.
+fn sec_usize(env: &HashMap<String, String>, key: &str, def: usize) -> Result<usize, String> {
+    let max = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+    let wide = sec_u64(env, key, def as u64, max)?;
+    usize::try_from(wide).map_err(|_| format!("{key}: Wert außerhalb 1..={max}"))
+}
+
+/// Audit 4.4, R-6: Die SEC_*-Felder werden geprüft gelesen. Ein ungültiger
+/// expliziter Wert bricht die Konfigurationsladung ab; nur **fehlende** Schlüssel
+/// verwenden die bisherigen Defaults.
+pub fn security_config(env: &HashMap<String, String>) -> Result<SecurityCfg, String> {
     let d = SecurityCfg::default();
-    SecurityCfg {
-        max_frame_bytes: num1(env, "SEC_MAX_FRAME_BYTES", d.max_frame_bytes as u64) as usize,
-        movement_per_sec: num1(env, "SEC_MOVE_PER_SEC", d.movement_per_sec as u64) as u32,
-        interactive_per_sec: num1(env, "SEC_INTERACTIVE_PER_SEC", d.interactive_per_sec as u64)
-            as u32,
-        combat_per_sec: num1(env, "SEC_COMBAT_PER_SEC", d.combat_per_sec as u32 as u64) as u32,
-        rare_per_sec: num1(env, "SEC_RARE_PER_SEC", d.rare_per_sec as u64) as u32,
-        disconnect_after_violations: num1(
+    Ok(SecurityCfg {
+        max_frame_bytes: sec_usize(env, "SEC_MAX_FRAME_BYTES", d.max_frame_bytes)?,
+        movement_per_sec: sec_u32(env, "SEC_MOVE_PER_SEC", d.movement_per_sec)?,
+        interactive_per_sec: sec_u32(env, "SEC_INTERACTIVE_PER_SEC", d.interactive_per_sec)?,
+        combat_per_sec: sec_u32(env, "SEC_COMBAT_PER_SEC", d.combat_per_sec)?,
+        rare_per_sec: sec_u32(env, "SEC_RARE_PER_SEC", d.rare_per_sec)?,
+        disconnect_after_violations: sec_u32(
             env,
             "SEC_DISCONNECT_AFTER_VIOLATIONS",
-            d.disconnect_after_violations as u64,
-        ) as u32,
-    }
+            d.disconnect_after_violations,
+        )?,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -597,7 +648,12 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         loot: loot_config(&env),
         progression: progression_config(&env),
         persist: persist_config(&env),
-        security: security_config(&env),
+        // Audit 4.4, R-6: Ein ungültiger expliziter SEC_-Wert ist ein
+        // Startfehler und kein Default. Der Fehler nutzt denselben
+        // `Result`-Kanal wie die fehlende Realm-Konfiguration darüber und
+        // endet in `main` (`?`), also ohne teilweise gültige
+        // Sicherheitskonfiguration zu starten.
+        security: security_config(&env)?,
     })
 }
 
@@ -770,17 +826,28 @@ mod tests {
         assert_eq!(v6lit, v6litb);
     }
 
-    // ── Audit 4.4 / L-4: `security_config` gegen den echten Parser ───────
+    // ── Audit 4.4, R-6: geprüfte SEC_*-Felder gegen den echten Parser ────
     //
-    // Diese Tests halten **Bestandsverhalten** fest. Sie sind ausdrücklich
-    // **keine** Empfehlung und **keine** Freigabe einer Fehlkonfiguration.
-    // `num1` klemmt nicht (trotz des Namens) und konvertiert per `as u32`
-    // für alle `*_per_sec`- sowie die Verletzungsschwelle.
+    // **VORZUSTAND (überholt, nicht mehr geltend):** `security_config` las
+    // über `num1` und convertierte mit `as u32`. Ein ungültiger, leerer oder
+    // negativer Wert fiel still auf den Default zurück, `0` wurde
+    // **akzeptiert**, und Werte oberhalb `u32::MAX` wurden **still
+    // trunkiert** (2³² → 0). Die damaligen Tests
+    // `security_config_accepts_zero_without_clamping` und
+    // `security_config_truncates_above_u32_max` hielten genau dieses
+    // Verhalten fest und sind **keine** Empfehlung und **keine** Freigabe
+    // einer Fehlkonfiguration.
+    //
+    // **HEUTE:** Fehlende Schlüssel verwenden unverändert die Defaults;
+    // explizit gesetzte, ungültige Werte werden mit Schlüssel und zulässigem
+    // Bereich abgelehnt (kein Clamping, keine Trunkation, kein stiller
+    // Ersatz). `security_config` liefert deshalb `Result`; `load_config`
+    // reicht den Fehler über den bestehenden Startup-Kanal weiter.
 
-    /// Ohne `SEC_*`-Variablen gelten die Defaults unverändert.
+    /// **Fehlende** Schlüssel ⇒ Defaults unverändert (kein Verhalten geändert).
     #[test]
     fn security_config_uses_defaults_when_unset() {
-        let c = security_config(&env_of(&[]));
+        let c = security_config(&env_of(&[])).expect("fehlende Werte sind erlaubt");
         let d = SecurityCfg::default();
         assert_eq!(c.max_frame_bytes, d.max_frame_bytes);
         assert_eq!(c.movement_per_sec, d.movement_per_sec);
@@ -790,80 +857,164 @@ mod tests {
         assert_eq!(c.disconnect_after_violations, d.disconnect_after_violations);
     }
 
-    /// Ungültiger String, negativer Wert und Leerwert fallen je **einzeln**
-    /// auf den Default zurück — der Parser ist fail-safe, kein `0`.
+    /// Gültige Grenzwerte werden **ohne Trunkierung** übernommen: `u32::MAX`
+    /// für alle `u32`-Felder und für das `usize`-Frame-Limit.
     #[test]
-    fn security_config_falls_back_to_default_on_unparsable_values() {
-        let d = SecurityCfg::default();
-        for bad in ["abc", "-5", "", " 5", "5.5", "1e3"] {
-            let c = security_config(&env_of(&[("SEC_RARE_PER_SEC", bad)]));
-            assert_eq!(
-                c.rare_per_sec, d.rare_per_sec,
-                "Wert {bad:?} muss auf den Default fallen"
-            );
-        }
-    }
-
-    /// `0` wird **akzeptiert** (kein Clamping trotz Helfername `num1`).
-    /// Wirkt im Sicherheitsmodul als vollständige Sperre der Klasse
-    /// (`zero_rate_limit_locks_the_whole_class` in `security.rs`), hier nur
-    /// als Parserbefund.
-    #[test]
-    fn security_config_accepts_zero_without_clamping() {
-        let c = security_config(&env_of(&[
-            ("SEC_RARE_PER_SEC", "0"),
-            ("SEC_MOVE_PER_SEC", "0"),
-            ("SEC_DISCONNECT_AFTER_VIOLATIONS", "0"),
-            ("SEC_MAX_FRAME_BYTES", "0"),
-        ]));
-        assert_eq!(c.rare_per_sec, 0);
-        assert_eq!(c.movement_per_sec, 0);
-        assert_eq!(c.disconnect_after_violations, 0);
-        assert_eq!(c.max_frame_bytes, 0);
-    }
-
-    /// `as u32` **trunkiert** still: `u32::MAX` bleibt erhalten, `2^32` wird zu
-    /// 0. Betroffen sind alle `*_per_sec` und die Verletzungsschwelle.
-    #[test]
-    fn security_config_truncates_above_u32_max() {
+    fn security_config_accepts_boundary_values_without_truncation() {
         let c = security_config(&env_of(&[
             ("SEC_RARE_PER_SEC", "4294967295"),
-            ("SEC_MOVE_PER_SEC", "4294967296"),
-            ("SEC_INTERACTIVE_PER_SEC", "4294967301"),
-            ("SEC_DISCONNECT_AFTER_VIOLATIONS", "4294967297"),
-        ]));
-        assert_eq!(c.rare_per_sec, u32::MAX, "u32::MAX bleibt unverändert");
-        assert_eq!(c.movement_per_sec, 0, "2^32 trunkiert auf 0");
-        assert_eq!(
-            c.interactive_per_sec, 5,
-            "2^32 + 5 trunkiert auf die unteren Bits"
-        );
-        assert_eq!(c.disconnect_after_violations, 1, "2^32 + 1 trunkiert auf 1");
+            ("SEC_MOVE_PER_SEC", "4294967295"),
+            ("SEC_INTERACTIVE_PER_SEC", "4294967295"),
+            ("SEC_COMBAT_PER_SEC", "4294967295"),
+            ("SEC_DISCONNECT_AFTER_VIOLATIONS", "4294967295"),
+            // Zieltyp ist `usize` (64 Bit): dieselbe Zahl bleibt erhalten,
+            // ohne dass eine künstliche Obergrenze eingezogen wird.
+            ("SEC_MAX_FRAME_BYTES", "4294967296"),
+        ]))
+        .expect("u32::MAX bzw. 2^32 für usize sind gültige Grenzwerte");
+        assert_eq!(c.rare_per_sec, u32::MAX);
+        assert_eq!(c.movement_per_sec, u32::MAX);
+        assert_eq!(c.interactive_per_sec, u32::MAX);
+        assert_eq!(c.combat_per_sec, u32::MAX);
+        assert_eq!(c.disconnect_after_violations, u32::MAX);
+        assert_eq!(c.max_frame_bytes, 4294967296);
     }
 
-    /// Werte oberhalb von `u64::MAX` scheitern bereits am `u64`-Parse und
-    /// fallen damit auf den Default zurück — nicht auf einen trunkierten Wert.
+    /// `0`, negativ, leer, Nicht-Zahlen und Parseüberlauf werden für **jedes**
+    /// SEC-Feld abgelehnt — je einzeln geprüft, damit kein Feld unbemerkt
+    /// auf einen Default zurückfällt.
     #[test]
-    fn security_config_falls_back_on_u64_parse_overflow() {
-        let d = SecurityCfg::default();
-        for big in ["18446744073709551616", "99999999999999999999999"] {
-            let c = security_config(&env_of(&[("SEC_RARE_PER_SEC", big)]));
-            assert_eq!(
-                c.rare_per_sec, d.rare_per_sec,
-                "u64-Überlauf bei {big:?} muss Default ergeben"
-            );
+    fn security_config_rejects_invalid_explicit_values() {
+        for key in [
+            "SEC_MAX_FRAME_BYTES",
+            "SEC_MOVE_PER_SEC",
+            "SEC_INTERACTIVE_PER_SEC",
+            "SEC_COMBAT_PER_SEC",
+            "SEC_RARE_PER_SEC",
+            "SEC_DISCONNECT_AFTER_VIOLATIONS",
+        ] {
+            for bad in [
+                "0",                    // im Vorzustand akzeptiert und wie eine Abschaltung
+                "-1",                   // negativ
+                "",                     // explizit leer
+                "   ",                  // nur Leerraum
+                "abc",                  // kein Zahlenformat
+                "5.5",                  // Dezimalpunkt
+                "1e3",                  // Exponent
+                " 5",                   // führender Leerraum: nicht still akzeptiert
+                "18446744073709551616", // u64-Parseüberlauf
+                "99999999999999999999999",
+            ] {
+                let env = env_of(&[(key, bad)]);
+                assert!(
+                    security_config(&env).is_err(),
+                    "{key}={bad:?} muss abgelehnt werden"
+                );
+            }
         }
     }
 
-    /// Das Frame-Limit hat den Zieltyp `usize` (64 Bit) und wird **nicht**
-    /// trunkiert — derselbe Wert, der `*_per_sec` auf 0 bringt, bleibt hier
-    /// erhalten. Das ist eine Eigenschaft des Zieltyps, keine Empfehlung.
+    /// Für die `u32`-Felder ist bereits `2^32` außerhalb des Bereichs: genau
+    /// der Wert, der im Vorzustand still auf `0` trunkierte.
     #[test]
-    fn security_config_frame_limit_is_not_truncated() {
-        let c = security_config(&env_of(&[("SEC_MAX_FRAME_BYTES", "4294967296")]));
+    fn security_config_rejects_values_above_u32_max_for_u32_fields() {
+        for key in [
+            "SEC_MOVE_PER_SEC",
+            "SEC_INTERACTIVE_PER_SEC",
+            "SEC_COMBAT_PER_SEC",
+            "SEC_RARE_PER_SEC",
+            "SEC_DISCONNECT_AFTER_VIOLATIONS",
+        ] {
+            for over in ["4294967296", "4294967301", "4294967297"] {
+                let env = env_of(&[(key, over)]);
+                assert!(
+                    security_config(&env).is_err(),
+                    "{key}={over} liegt über u32::MAX und muss abgelehnt werden"
+                );
+            }
+        }
+    }
+
+    /// Das Frame-Limit wird am **tatsächlichen Zieltyp** geprüft: `usize`
+    /// ist hier 64 Bit, deshalb ist `2^32` gültig, während ein Wert oberhalb
+    /// `usize::MAX` abgelehnt wird. Der Test leitet die Grenze aus dem Zieltyp
+    /// ab und erfindet keine feste Obergrenze.
+    #[test]
+    fn security_config_frame_limit_is_checked_against_its_target_type() {
         assert_eq!(
-            c.max_frame_bytes, 4294967296,
-            "usize ist 64 Bit — hier entsteht keine u32-Trunkation"
+            std::mem::size_of::<usize>(),
+            8,
+            "Test setzt 64-Bit-usize voraus"
         );
+        // 2^32 ist im Zieltyp darstellbar ⇒ gültig, keine Trunkation.
+        let c = security_config(&env_of(&[("SEC_MAX_FRAME_BYTES", "4294967296")]))
+            .expect("2^32 ist in usize darstellbar");
+        assert_eq!(c.max_frame_bytes, 4294967296);
+        // Oberhalb `u64::MAX` ist kein Parse und keine Konvertierung möglich.
+        assert!(
+            security_config(&env_of(&[("SEC_MAX_FRAME_BYTES", "18446744073709551616")])).is_err()
+        );
+    }
+
+    /// Die Fehlermeldung nennt **Schlüssel und zulässigen Bereich** und
+    /// leakt dabei keinen anderen Konfigurationsinhalt: Der Schlüssel eines
+    /// Nachbareintrags darf nicht im Text auftauchen.
+    #[test]
+    fn security_config_error_names_key_and_range_without_leaking_env() {
+        let env = env_of(&[
+            ("SEC_RARE_PER_SEC", "0"),
+            ("REALM_STATE_DB_PASSWORD", "super-geheim"),
+        ]);
+        let err = security_config(&env).expect_err("0 muss abgelehnt werden");
+        assert!(
+            err.contains("SEC_RARE_PER_SEC"),
+            "Fehler nennt den Schlüssel: {err}"
+        );
+        assert!(
+            err.contains(&u32::MAX.to_string()),
+            "Fehler nennt den zulässigen Bereich: {err}"
+        );
+        assert!(
+            !err.contains("super-geheim") && !err.contains("REALM_STATE_DB_PASSWORD"),
+            "Fehler leakt keinen anderen Konfigurationsinhalt: {err}"
+        );
+    }
+
+    /// End-to-End am **echten** `load_config`: ein ungültiger SEC_-Wert in der
+    /// Datei verhindert die erfolgreiche Konfigurationsladung (R-6-Weitergabe
+    /// bis in den vorhandenen Startup-Fehlerpfad).
+    #[test]
+    fn load_config_rejects_invalid_security_value_from_file() {
+        let dir = std::env::temp_dir().join(format!("realmrs-sec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.env");
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\n\
+             REALM_STATE_DB_NAME=realm_state_de2\nSEC_RARE_PER_SEC=0\n",
+        )
+        .unwrap();
+        let err = load_config(&p).expect_err("SEC_RARE_PER_SEC=0 muss den Start verhindern");
+        assert!(err.contains("SEC_RARE_PER_SEC"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Und die Umkehrung: dieselbe Datei **ohne** SEC_-Eintrag lädt weiterhin
+    /// vollständig (es gibt keine Regression für die gültige Konfiguration).
+    #[test]
+    fn load_config_accepts_valid_security_values_from_file() {
+        let dir = std::env::temp_dir().join(format!("realmrs-secok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.env");
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\n\
+             REALM_STATE_DB_NAME=realm_state_de2\nSEC_RARE_PER_SEC=7\nSEC_MAX_FRAME_BYTES=8192\n",
+        )
+        .unwrap();
+        let cfg = load_config(&p).expect("gültige Konfiguration muss laden");
+        assert_eq!(cfg.security.rare_per_sec, 7);
+        assert_eq!(cfg.security.max_frame_bytes, 8192);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

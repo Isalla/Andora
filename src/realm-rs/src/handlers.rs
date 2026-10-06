@@ -1598,7 +1598,8 @@ mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
-            security: crate::config::security_config(&env),
+            security: crate::config::security_config(&env)
+                .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
         let db = sqlx::mysql::MySqlPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(300))
@@ -2362,7 +2363,8 @@ mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
-            security: crate::config::security_config(&env),
+            security: crate::config::security_config(&env)
+                .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
         let db = sqlx::mysql::MySqlPoolOptions::new()
             .acquire_timeout(std::time::Duration::from_millis(300))

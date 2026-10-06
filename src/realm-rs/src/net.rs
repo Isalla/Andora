@@ -1244,7 +1244,8 @@ mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
-            security: crate::config::security_config(&env),
+            security: crate::config::security_config(&env)
+                .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
         let db = sqlx::mysql::MySqlPoolOptions::new()
             .connect_lazy("mysql://u:p@127.0.0.1:3306/realm_state_test")
@@ -4407,17 +4408,23 @@ mod tests {
         );
     }
 
-    /// L-5: Nicht angemeldete, bekannte Spielnachrichten erhöhen den
-    /// Verletzungszähler, verbrauchen **kein** Klassenbudget und lösen im
-    /// Session-Zweig derzeit **auch beim Erreichen der Schwelle keinen
-    /// Disconnect** aus. Hier am echten `read_loop` bestätigt: mit
-    /// `disconnect_after_violations = 1` ist die Schwelle ab dem ersten
-    /// Verstoß erreicht, die Schleife liest dennoch alle drei Frames.
+    /// **VORZUSTAND (überholt, nicht mehr geltend):** Nicht angemeldete,
+    /// bekannte Spielnachrichten erhöhten den Verletzungszähler, verbrauchten
+    /// **kein** Klassenbudget und lösten im Session-Zweig **auch beim
+    /// Erreichen der Schwelle keinen Disconnect** aus;
+    /// `read_loop_session_violations_count_but_never_disconnect` hielt am
+    /// echten `read_loop` fest, dass mit `disconnect_after_violations = 1` alle
+    /// drei Frames weiterverarbeitet werden. Das war eine Beschreibung eines
+    /// **offenen** Schutzes (Audit 4.4, R-5), keine Empfehlung und keine
+    /// Freigabe.
     ///
-    /// Das ist eine **offene Schutzentscheidung**, keine Aussage, dass das
-    /// Verhalten ausreichend oder unbedenklich ist (Audit 4.4, R-5).
+    /// **HEUTE (R-5, entschieden):** Bekannte Spielnachrichten ohne gültige
+    /// Verbindungszuordnung zählen zur bestehenden Schwelle und trennen bei
+    /// Erreichen kontrolliert. Der Test weist das am **echten `read_loop`** nach:
+    /// mit Schwelle 1 endet die Verarbeitung nach dem ersten Frame, der
+    /// Folgeframe wird **nicht** verarbeitet.
     #[tokio::test]
-    async fn read_loop_session_violations_count_but_never_disconnect() {
+    async fn read_loop_session_violation_at_threshold_ends_processing() {
         let ctx = test_ctx().await;
         // Player vorhanden, aber bewusst KEINE by_conn-Zuordnung.
         insert_players(&ctx.shared, &["a"]).await;
@@ -4440,14 +4447,119 @@ mod tests {
         .await;
 
         assert_eq!(
-            guard.violations, 3,
-            "alle drei Frames wurden verarbeitet und gezählt (kein break)"
+            guard.violations, 1,
+            "die Schwelle ist am ersten Verstoß erreicht; die Verarbeitung endet dort"
         );
         let world = ctx.shared.lock().await;
         assert_eq!(
             (world.players["a"].x, world.players["a"].y),
             (0.0, 0.0),
             "ohne Session darf keine Spielabsicht wirken"
+        );
+    }
+
+    /// **HEUTE (R-5):** Unter der Schwelle wird weiterhin **verworfen und
+    /// gezählt**; erst am Erreichen der Schwelle endet die Verarbeitung. Der
+    /// Folgeframe wird nicht verarbeitet — am Zähler ablesbar, weil er sonst
+    /// vier beträge.
+    #[tokio::test]
+    async fn read_loop_session_violations_below_threshold_are_dropped() {
+        let ctx = test_ctx().await;
+        // Bewusst nur `insert_players`: **ohne** `by_conn`-Zuordnung, damit die
+        // Frames den Session-Zweig nehmen. `insert_cadence_players` würde
+        // `by_conn` setzen und die Verbindung damit anmelden.
+        insert_players(&ctx.shared, &["a"]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.disconnect_after_violations = 3;
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop_frozen(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![
+                // Drei Session-Verstöße: die ersten zwei liegen unter der
+                // Schwelle ⇒ Drop und Zählung, der dritte erreicht sie.
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+                // Folgeframe: darf **nicht** mehr verarbeitet werden.
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                ),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            guard.violations, 3,
+            "zwei Verstöße unter der Schwelle, der dritte erreicht sie und beendet die Schleife"
+        );
+        let world = ctx.shared.lock().await;
+        assert_eq!(
+            (world.players["a"].x, world.players["a"].y),
+            (0.0, 0.0),
+            "ohne Session darf keine Spielabsicht wirken"
+        );
+    }
+
+    /// **HEUTE (R-5, unveränderte Nebeneigenschaft):** Session-Verstöße
+    /// verbrauchen weiterhin **kein** Klassenbudget. Am echten `read_loop`
+    /// bleibt das Budget der betroffenen Klasse danach vollständig verfügbar,
+    /// nachgemessen über `gate_frame` mit angemeldeter Verbindung.
+    #[tokio::test]
+    async fn read_loop_session_violation_does_not_consume_class_budget() {
+        let ctx = test_ctx().await;
+        // Player vorhanden, aber KEINE by_conn-Zuordnung ⇒ Session-Verstöße.
+        insert_players(&ctx.shared, &["a"]).await;
+        let mut sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        sec_cfg.disconnect_after_violations = 100;
+        let mut guard = crate::security::ConnGuard::default();
+
+        drive_read_loop_frozen(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            vec![c2s_text(crate::protocol::c2s::ATTACK, serde_json::json!({})); 3],
+        )
+        .await;
+
+        assert_eq!(
+            guard.violations, 3,
+            "alle drei Frames wurden gezählt (kein break)"
+        );
+
+        // Ohne Session-Zuordnung misst `check_rate` die reine
+        // Budgetverfügbarkeit der Combat-Klasse. Wären die Verstöße ins
+        // Budget eingeflossen, wäre die Queue bereits erschöpft und es
+        // gäbe keinen einzigen `Allow`.
+        let now = std::time::Instant::now();
+        let mut allowed = 0;
+        for _ in 0..1000 {
+            if crate::security::gate_frame(
+                &sec_cfg,
+                &mut guard,
+                crate::protocol::c2s::ATTACK,
+                true,
+                now,
+            ) == crate::security::GateDecision::Allow
+            {
+                allowed += 1;
+            }
+        }
+        assert_eq!(
+            allowed, sec_cfg.combat_per_sec as usize,
+            "Session-Verstöße dürfen kein Klassenbudget verbrauchen"
         );
     }
 

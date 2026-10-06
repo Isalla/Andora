@@ -136,7 +136,13 @@ Funktion allein belegt also **keine** vollständige Abdeckung.
   (`net.rs:616`, `:622`, `:631`). Jede dieser drei Stufen zählt über
   `ConnGuard::violations` genau eine Auffälligkeit; das ist der vorhandene
   Diagnosewert, über den sich die Ablehnungsstufe eindeutig zuordnen lässt.
-- Ohne Session (außer HELLO): verwerfen (`no_session`).
+- Ohne Session (außer HELLO): verwerfen (`no_session`) und zählen; bei
+  Erreichen von `SEC_DISCONNECT_AFTER_VIOLATIONS` die Verbindung trennen —
+  **kein permanenter Bann** (Audit 4.4, R-5, entschieden). Es gilt dieselbe
+  Schwelle wie für die übrigen Fehlerklassen; es gibt **keine** neue Schwelle
+  und **keine** neue Zeitregel. HELLO bleibt die Ausnahme vor Login,
+  HEARTBEAT bleibt sessionpflichtig, und Session-Verstöße verbrauchen **kein**
+  Klassenbudget.
 - Rate Limit überschritten: verwerfen (`rate_limited`); bei massiver/
   wiederholter Überschreitung (`SEC_DISCONNECT_AFTER_VIOLATIONS`):
   Verbindung trennen — **kein permanenter Bann**.
@@ -266,13 +272,16 @@ Code:
 wird erhöht bei Größe, Parse, unbekanntem Typ, fehlender Session und
 Rate-Verstoß; **fachlich unzulässige Spielabsichten erhöhen ihn nicht**
 (`handlers.rs`, nur `sec-reject`-Log mit Zählerstand 0). Erlaubte Nachrichten
-verändern ihn nicht. **Größe, Parse, unbekannter Typ und Rate-Verstoß können
-an der Schwelle die Verbindung trennen**; der **Session-Zweig zählt, trennt
-aber derzeit nicht** — der Rückgabewert von `add_violation` wird dort
-verworfen (`security.rs:264-267`). Ob das angemessen begrenzt ist, ist eine
-**offene Schutzentscheidung** (docs/Security.md Abschnitt 4.4.1, R-5); V1
-führt sie ausdrücklich **nicht** als gelöst und leitet **keine** neue Straf-,
-Bann- oder Disconnect-Regel daraus ab.
+verändern ihn nicht. **Alle fünf Fehlerklassen — Größe, Parse, unbekannter
+Typ, fehlende Session und Rate-Verstoß — können an der Schwelle die Verbindung
+trennen.** Der Session-Zweig wertet den Rückgabewert von `add_violation` aus
+(`security.rs`, Session-Zweig in `gate_frame`) und trennt damit an der
+**bestehenden** Schwelle; vorher wurde er dort verworfen, sodass dieser Zweig
+nie trennte. **VORZUSTAND (überholt):** „der Session-Zweig zählt, trennt aber
+nicht". **HEUTE (Audit 4.4, R-5, entschieden):** Er zählt **und** trennt an der
+Schwelle. Der Vorgang bleibt ein normaler Verbindungsabbruch: **kein Bann**,
+**keine** Bestrafung, **keine** neue Schwelle und **keine** neue Zeitregel.
+Geteilte Klassenbudgets und die HELLO-Klassifizierung bleiben unverändert.
 
 **Verbindungsgrenze:** Budgets **und** Zähler sind **verbindungslokal**. Ein
 Reconnect oder Takeover erzeugt einen neuen `ConnGuard` (`net.rs:509`) und
@@ -350,21 +359,39 @@ Basis für eine spätere GM-/Anti-Cheat-Auswertung (nicht Teil von V1).
 `SEC_INTERACTIVE_PER_SEC` (10), `SEC_COMBAT_PER_SEC` (10),
 `SEC_RARE_PER_SEC` (5), `SEC_DISCONNECT_AFTER_VIOLATIONS` (50).
 
-**Parsergrenzen** (`config::security_config`, `config.rs:416-431`; Helfer
-`num1`, `:254-258`): ungültige Strings und negative Werte fallen je einzeln auf
-den **Default** zurück. Ein explizites **`0` wird jedoch akzeptiert** — der
-Helfer klemmt **nicht** trotz seines Namens. Werte zwischen `u32::MAX` und
-`u64::MAX` werden per `as u32` **still trunkiert** (z. B. 2³² → 0);
-`SEC_MAX_FRAME_BYTES` hat den Zieltyp `usize` und ist auf 64 Bit **nicht**
-betroffen. `SEC_DISCONNECT_AFTER_VIOLATIONS=0` wirkt über `.max(1)` als 1.
-Diese Punkte sind **Bestandsverhalten** (dokumentiert in
-`config.rs`-Tests), **keine** Empfehlung und **keine** Freigabe einer
-Fehlkonfiguration; ob ein Clamping eingeführt wird, ist offen
-(docs/Security.md Abschnitt 4.4.1, R-6). Insbesondere sperrt
-`SEC_RARE_PER_SEC=0` die gesamte Selten-Klasse **einschließlich HELLO** und
-damit den Einstieg.
+**Konfigurationsvertrag (Audit 4.4, R-6, entschieden):** Jeder explizit
+gesetzte `SEC_*`-Wert wird **geprüft** gelesen. Es gibt **kein** Clamping,
+**keine** stille Trunkierung und **keinen** stillen Ersatz durch Defaults.
 
-## 5. Tests (`security.rs`, 25 Tests — alle 8 Pflichtfälle, dazu
+- **Fehlender Schlüssel** ⇒ der bisherige Default (unverändert).
+- **Gültiger Wert** ⇒ unverändert übernommen, einschließlich der Grenzwerte
+  `u32::MAX` für alle `u32`-Felder und für `SEC_MAX_FRAME_BYTES`, dessen
+  Zieltyp `usize` ist (auf 64 Bit daher bis `usize::MAX`).
+- **Abgelehnt** werden `0`, negative Werte, ein explizit leerer Wert, ein
+  Nicht-Zahlenformat (`abc`, `5.5`, `1e3`), aufgefüllte Werte (`" 5"`), ein
+  `u64`-Parseüberlauf und — für die `u32`-Felder — jeder Wert oberhalb
+  `u32::MAX`. `SEC_MAX_FRAME_BYTES` wird gegen **seinen Zieltyp `usize`**
+  geprüft, nicht gegen eine willkürliche Obergrenze.
+- Der **Fehlertext nennt Schlüssel und zulässigen Bereich** und gibt keine
+  weiteren Konfigurationsinhalte aus.
+- Der Fehler läuft über den bestehenden Startup-Kanal (`load_config` →
+  `Result` → `main`): Ein Start mit teilweise gültiger Sicherheitskonfiguration
+  findet **nicht** statt.
+
+**VORZUSTAND (überholt, nicht mehr geltend):** `security_config` las über den
+Helfer `num1` und konvertierte per `as u32`. Ungültige, leere und negative
+Werte fielen still auf den Default zurück, `0` wurde **akzeptiert**, und Werte
+oberhalb `u32::MAX` wurden **still trunkiert** (2³² → 0). Das war
+**Bestandsverhalten**, **keine** Empfehlung und **keine** Freigabe einer
+Fehlkonfiguration. Der gemeinsam genutzte Helfer `num1` bleibt für alle
+Konfigurationsfelder **außerhalb** dieses Vertrags unverändert.
+
+**Grenzen:** Die Angemessenheit der Schwellwerte ist damit **nicht** empirisch
+belegt; es liegen weiterhin **keine** Client- oder Lastmessungen vor. Budgets
+und Zähler bleiben rein verbindungslokal, und Reconnect/Takeover setzen sie
+vollständig zurück (docs/Security.md Abschnitt 4.4.1, R-7 bis R-9).
+
+## 5. Tests (`security.rs`, 29 Tests — alle 8 Pflichtfälle, dazu
 Rate-Fenster, geteilte Budgets und Konfigurationsgrenzen)
 
 Die Rate-Nachweise (Audit 4.4) liegen in `security.rs`
@@ -372,15 +399,33 @@ Die Rate-Nachweise (Audit 4.4) liegen in `security.rs`
 `rejected_rate_attempts_do_not_extend_the_window`,
 `two_types_of_same_class_share_one_budget`,
 `exhausted_class_does_not_affect_other_classes`,
-`session_gate_violations_never_return_disconnect`,
 `zero_rate_limit_locks_the_whole_class`,
-`zero_disconnect_threshold_acts_as_one`), zusätzlich **am echten
+`zero_disconnect_threshold_acts_as_one`) sowie für **R-5**
+(`session_gate_violation_disconnects_at_existing_threshold`,
+`session_violations_do_not_consume_class_budget`,
+`hello_stays_exempt_from_the_session_branch`,
+`heartbeat_remains_subject_to_the_session_gate`,
+`rate_branch_and_allow_path_are_unchanged`), zusätzlich **am echten
 `read_loop`** in `net.rs` (`read_loop_rate_gate_drops_excess_frames_and_
 keeps_other_classes`, `read_loop_rate_violation_at_threshold_ends_
-processing`, `read_loop_session_violations_count_but_never_disconnect`)
-sowie **gegen den echten Parser** in `config.rs` (sechs
-`security_config_*`-Tests) sowie der Regressionsnachweis zur Abfrageposition der Uhr (`clock_is_queried_only_after_the_world_lock_is_released`). Vollständige Suite: **664** Tests.
+processing`, `read_loop_session_violation_at_threshold_ends_processing`,
+`read_loop_session_violations_below_threshold_are_dropped`,
+`read_loop_session_violation_does_not_consume_class_budget`)
+sowie **gegen den echten Parser** in `config.rs` (`security_config_*` und die
+beiden `load_config_*`-Weitergabetests) sowie der Regressionsnachweis zur
+Abfrageposition der Uhr (`clock_is_queried_only_after_the_world_lock_is_released`).
+Vollständige Suite: **672** Tests.
 Einzelheiten: `docs/Security.md` Abschnitt 4.4.1.
+
+Der Auditpunkt 4.4 ist mit `docs/Security.md` Abschnitt 4.4 **`ERLEDIGT`**:
+Rate-Verhalten geprüft, Nachweise am echten Produktionspfad ergänzt, R-5 und
+R-6 entschieden, umgesetzt und final geprüft. Der Abschluss trägt **keine**
+umfassende Flood- oder Lastschutzgarantie, die Schwellwerte sind nicht
+empirisch auf einen Clientbetrieb abgestimmt, Budgets und Verletzungszähler
+bleiben verbindungslokal und werden durch Reconnect/Takeover vollständig
+zurückgesetzt, und geteilte Budgets sowie die HELLO-Klassifizierung bleiben
+unverändert. Audit 4.2 und 4.3 bleiben geschlossen; Audit 4.7 und `P-33`
+bleiben offen.
 
 1. Manipulierter Attributwert (`strength=999`) → nur +1 ab Serverwert;
    unbekannte Attribute (`gold`, `strength999`) → Ablehnung ohne Mutation.
@@ -393,9 +438,10 @@ Einzelheiten: `docs/Security.md` Abschnitt 4.4.1.
 7. 500 Rare-Requests/s → nur 5 passieren; Bewegungslimit > Selten-Limit;
    wiederholte Überschreitung → Disconnect (kein Bann).
 8. Übergröße/unbekannt/ohne Session → Drop vor jeder teuren
-   Verarbeitung (Zähler für DB/Kampf/Inventar/Welt/KI bleibt 0).
+   Verarbeitung (Zähler für DB/Kampf/Inventar/Welt/KI bleibt 0). Fehlende
+   Session zählt **und** trennt an der bestehenden Schwelle (R-5).
 
-Gesamt: `cargo test` im Realm — 415 Tests, 0 Fehler.
+Gesamt: `cargo test --offline` im Realm — **672** Tests, 0 Fehler.
 
 ## 6. Grenzen von V1 (V2-Kandidaten bei Live-Bedarf)
 

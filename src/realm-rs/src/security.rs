@@ -261,8 +261,28 @@ pub fn gate_frame(
 ) -> GateDecision {
     // 1) Session: HELLO darf ohne Session einsteigen (Einstieg), alles
     //    andere erfordert eine zugeordnete, eingeloggte Verbindung.
+    //
+    //    Audit 4.4, R-5 (entschieden): Bekannte Spielnachrichten ohne gültige
+    //    Verbindungszuordnung zählen zur **bestehenden** Verletzungsschwelle
+    //    und trennen bei Erreichen dieser Schwelle kontrolliert. Der
+    //    Rückgabewert von `add_violation` wird hier ausgewertet — vorher
+    //    wurde er verworfen, sodass dieser Zweig nie trennte.
+    //
+    //    Bewusst **unverändert**: Es gibt keine neue Schwelle und keine neue
+    //    Zeitregel (kein Abklingen, keine Frist); die Schwelle bleibt der
+    //    konfigurierte `disconnect_after_violations` und ist wie bei allen
+    //    anderen Fehlerklassen kumulativ. Der Zähler ist weiterhin rein
+    //    verbindungslokal (Reconnect/Takeover setzen ihn zurück). HELLO bleibt
+    //    die Ausnahme vor Login, HEARTBEAT bleibt sessionpflichtig, und
+    //    Session-Verstöße verbrauchen weiterhin **kein** Klassenbudget, weil
+    //    `check_rate` erst hiernach läuft. Es ist **kein Bann** und **keine**
+    //    Bestrafung, sondern dieselbe Trennwirkung wie beim Rate-Verstoß.
+    //    Fachlich unzulässige Spielabsichten bleiben davon getrennt: sie
+    //    erhöhen den Zähler nicht (siehe `log_reject(..., 0)`).
     if msg_type != crate::protocol::c2s::HELLO && !authenticated {
-        guard.add_violation(cfg);
+        if guard.add_violation(cfg) {
+            return GateDecision::Disconnect;
+        }
         return GateDecision::Drop;
     }
     // 2) Rate Limit (billig, vor jeder Spiellogik/DB).
@@ -817,30 +837,68 @@ mod tests {
         assert!(!g.check_rate(&cfg, crate::protocol::c2s::SPEND_ATTRIBUTE, now));
     }
 
-    /// L-5: Der Session-Zweig **zählt, trennt aber nicht**. Der Rückgabewert
-    /// von `add_violation` wird dort bewusst verworfen (`security.rs`), daher
-    /// bleibt der `GateDecision` auch oberhalb der Schwelle `Drop`. Zusätzlich
-    /// belegt: Session-Verstöße verbrauchen **kein** Klassenbudget, weil
-    /// `check_rate` erst nach der Session-Prüfung läuft.
+    /// **VORZUSTAND (überholt, nicht mehr geltend):** Der Session-Zweig
+    /// zählte, trennte aber nie — `session_gate_violations_never_return_disconnect`
+    /// und `read_loop_session_violations_count_but_never_disconnect` hielten
+    /// das fest. Das war **keine** Empfehlung für eine Straf-, Bann- oder
+    /// Disconnect-Regel, sondern die Beschreibung eines offenen Schutzes.
     ///
-    /// **Offene Schutzentscheidung** (Audit 4.4, R-5): Der Test hält das
-    /// Bestandsverhalten fest. Er ist **keine** Aussage, dass ein nicht
-    /// angemeldeter Flood dadurch ausreichend begrenzt wird, und **keine**
-    /// Empfehlung, eine Straf-, Bann- oder Disconnect-Regel zu ergänzen.
+    /// **HEUTE (Audit 4.4, R-5, entschieden):** Bekannte Spielnachrichten ohne
+    /// gültige Verbindungszuordnung zählen zur **bestehenden** Verletzungs-
+    /// schwelle und trennen bei Erreichen dieser Schwelle kontrolliert. Es gibt
+    /// weiterhin **keine** neue Schwelle, **keine** neue Zeitregel und **kein**
+    /// Clamping. Kein Bann.
     #[test]
-    fn session_gate_violations_never_return_disconnect() {
+    fn session_gate_violation_disconnects_at_existing_threshold() {
         let mut cfg = SecurityCfg::default();
-        cfg.disconnect_after_violations = 1;
+        // Schwelle 3: die ersten zwei Verstöße bleiben `Drop`, der dritte
+        // erreicht die Schwelle und trennt.
+        cfg.disconnect_after_violations = 3;
         let mut g = ConnGuard::default();
         let now = Instant::now();
-        for i in 1..=5u32 {
+        for i in 1..=2u32 {
             assert_eq!(
                 gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, false, now),
                 GateDecision::Drop,
-                "Session-Verstoß {i} muss Drop bleiben, auch über der Schwelle"
+                "unter der Schwelle muss der Session-Verstoß {i} Drop bleiben"
             );
         }
-        assert_eq!(g.violations, 5, "jeder Session-Verstoß wird gezählt");
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, false, now),
+            GateDecision::Disconnect,
+            "an der Schwelle muss kontrolliert getrennt werden"
+        );
+        assert_eq!(g.violations, 3, "jeder Session-Verstoß wird gezählt");
+
+        // Schwelle 1: der **erste** Verstoß trennt sofort.
+        let mut cfg1 = SecurityCfg::default();
+        cfg1.disconnect_after_violations = 1;
+        let mut g1 = ConnGuard::default();
+        assert_eq!(
+            gate_frame(&cfg1, &mut g1, crate::protocol::c2s::MOVE, false, now),
+            GateDecision::Disconnect,
+            "bei Schwelle 1 trennt der erste Session-Verstoß"
+        );
+    }
+
+    /// Unverändert erhalten: Session-Verstöße verbrauchen **kein**
+    /// Klassenbudget, weil `check_rate` erst nach der Session-Prüfung läuft.
+    /// Der Zähler steigt, das Budget der betroffenen Klasse bleibt unberührt.
+    #[test]
+    fn session_violations_do_not_consume_class_budget() {
+        let mut cfg = SecurityCfg::default();
+        // Schwelle bewusst hoch, damit die folgenden Verstöße Drop bleiben
+        // und der reine Budgetnachweis isoliert betrachtbar ist.
+        cfg.disconnect_after_violations = 100;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        for _ in 0..5 {
+            assert_eq!(
+                gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, false, now),
+                GateDecision::Drop
+            );
+        }
+        assert_eq!(g.violations, 5);
         // Budget der betroffenen Klasse ist unberührt: genau `combat_per_sec`
         // nachgelagerte, nun angemeldete Versuche passieren.
         let mut allowed = 0;
@@ -854,6 +912,68 @@ mod tests {
         assert_eq!(
             allowed, cfg.combat_per_sec as usize,
             "Session-Verstöße dürfen kein Klassenbudget verbrauchen"
+        );
+    }
+
+    /// HELLO bleibt die vorhandene Ausnahme vor Login: kein Session-Verstoß,
+    /// daher weder Zählerinkrement noch Trennung — auch wenn die Schwelle 1 ist.
+    #[test]
+    fn hello_stays_exempt_from_the_session_branch() {
+        let mut cfg = SecurityCfg::default();
+        cfg.disconnect_after_violations = 1;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::HELLO, false, now),
+            GateDecision::Allow,
+            "HELLO ist die Ausnahme vor Login"
+        );
+        assert_eq!(g.violations, 0, "HELLO ist kein Session-Verstoß");
+    }
+
+    /// HEARTBEAT bleibt **sessionpflichtig** — es ist keine Ausnahme und wird
+    /// wie jede andere bekannte Spielnachricht gezählt und getrennt.
+    #[test]
+    fn heartbeat_remains_subject_to_the_session_gate() {
+        let mut cfg = SecurityCfg::default();
+        cfg.disconnect_after_violations = 2;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::HEARTBEAT, false, now),
+            GateDecision::Drop
+        );
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::HEARTBEAT, false, now),
+            GateDecision::Disconnect,
+            "HEARTBEAT ist sessionpflichtig und erreicht die Schwelle"
+        );
+        assert_eq!(g.violations, 2);
+    }
+
+    /// Die übrigen Gate-Pfade bleiben unverändert: erlaubte Frames passieren,
+    /// ein Rate-Verstoß wird weiterhin verworfen und genau einmal gezählt.
+    #[test]
+    fn rate_branch_and_allow_path_are_unchanged() {
+        let mut cfg = SecurityCfg::default();
+        cfg.combat_per_sec = 2;
+        cfg.disconnect_after_violations = 10;
+        let mut g = ConnGuard::default();
+        let now = Instant::now();
+        for _ in 0..cfg.combat_per_sec {
+            assert_eq!(
+                gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, true, now),
+                GateDecision::Allow
+            );
+        }
+        assert_eq!(
+            gate_frame(&cfg, &mut g, crate::protocol::c2s::ATTACK, true, now),
+            GateDecision::Drop,
+            "überschrittenes Budget wird verworfen"
+        );
+        assert_eq!(
+            g.violations, 1,
+            "Rate-Verstoß wird weiterhin genau einmal gezählt"
         );
     }
 
