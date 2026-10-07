@@ -793,14 +793,6 @@ pub async fn handle_ability(
     conn_id: u64,
     data: &serde_json::Value,
 ) {
-    let pid = {
-        let world = ctx.shared.lock().await;
-        match world.by_conn.get(&conn_id) {
-            Some(pid) => pid.clone(),
-            None => return,
-        }
-    };
-
     let ability_id = get_str(data, "ability_id");
     if ability_id.is_empty() {
         return;
@@ -816,7 +808,17 @@ pub async fn handle_ability(
     let ground_x = data.get("x").and_then(|v| v.as_f64());
     let ground_y = data.get("y").and_then(|v| v.as_f64());
 
+    // Eigentümer-Auflösung **unter derselben World-Sperre**, die die
+    // Fähigkeitenausführung schützt (B-1): zwischen Auflösung und Mutation
+    // darf kein anderer Pfad `by_conn` ändern (Takeover, Entmachtung). Ein
+    // früherer eigener Lock-Lookup veraltete genau in diesem Fenster; der
+    // veraltete Zwischenwert entfällt dadurch vollständig. Fehlt die
+    // Zuordnung, wird ohne Wirkung zurückgekehrt — kein Violation-Zähler,
+    // kein Disconnect, kein Ban.
     let mut world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
     let now = std::time::Instant::now();
     let wall_now = std::time::SystemTime::now();
 

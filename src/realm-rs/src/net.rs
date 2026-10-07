@@ -4122,6 +4122,779 @@ mod tests {
         );
     }
 
+    // ── Audit 4.7: Nachweise der Dispatch-Pfade zustandsändernder Ops ────────
+    //
+    // Diese Tests fahren den **echten** `net::dispatch` mit dem **echten**
+    // Nachrichtentyp (`c2s::PICKUP`, `c2s::SPEND_ATTRIBUTE`, `c2s::ABILITY`,
+    // `c2s::AUCTION_BUY`) und damit die echten Produktionshandler. Es wird
+    // **keine** zweite Dispatch-Pipeline nachgebaut und **keine** Handler-
+    // funktion direkt aufgerufen — anders als die Modelltests in `security.rs`
+    // (`spend_attribute_point`, `validate_auction_buy`) und in `loot.rs`
+    // (`attempt_pickup`), die dieselbe Produktionsfunktion ohne Empfangs-
+    // pfad fahren. Kein Test wartet (`sleep`); der Pool ist `connect_lazy`,
+    // es wird **keine** Datenbank gebraucht.
+    //
+    // **Was daraus nicht folgt:** kein allgemeiner Anti-Duping-, Bewegungs-
+    // oder Timing-Nachweis. Geprüft werden ausschließlich die hier genannten,
+    // konkret benannten Fälle am Empfangspfad.
+
+    /// Ein C2S-Frame eines beliebigen Typs über den echten `dispatch`.
+    async fn c2s_frame(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        seq: i64,
+        msg_type: i64,
+        data: serde_json::Value,
+    ) {
+        let frame = crate::protocol::Frame::new(seq, msg_type, data);
+        assert!(
+            !dispatch(ctx, tx, 7, guard, sec_cfg, frame, &Instant::now).await,
+            "Frame {msg_type} darf in diesem Nachweis keine Verbindung trennen"
+        );
+    }
+
+    /// Testfähigkeit: Sofortfähigkeit, feindlich, Einzelziel. Das Ziel ist
+    /// bewusst ein **Spieler**, damit der Nachweis ohne NPC-Fixture auskommt
+    /// (`validate_single_hostile` prüft Spielerziele zuerst). Der Schaden ist
+    /// deterministisch, weil der Intelligenzmultiplikator bei 0 genau 1.0
+    /// ergibt (`attributes::magic_damage_multiplier`).
+    fn dispatch_ability_def() -> crate::combat::ability::AbilityDef {
+        crate::combat::ability::AbilityDef {
+            id: "fire_bolt".into(),
+            name: "Feuerblitz".into(),
+            exec_type: "instant".into(),
+            semantic_category: "single_target_damage".into(),
+            mana_cost: 8,
+            cooldown_ms: 2_000,
+            cooldown_persistent: false,
+            cast_time_ms: 0,
+            range: 12.0,
+            aoe_type: "single".into(),
+            aoe_radius: 0.0,
+            host_effect: true,
+            effect_kind: "damage".into(),
+            effect_value: 35.0,
+            duration_ms: 0,
+            tick_ms: 0,
+            effect_group: None,
+        }
+    }
+
+    /// Registriert eine Fähigkeit im **echten** `Ctx` der Testumgebung.
+    /// `test_ctx()` liefert eine leere Registry; `Arc::get_mut` ist möglich,
+    /// weil die Fixture den einzigen Verweis hält.
+    fn register_ability(tctx: &mut TestCtx, def: crate::combat::ability::AbilityDef) {
+        let c = Arc::get_mut(&mut tctx.ctx).expect("TestCtx hält den alleinigen Arc");
+        c.registry.register(def);
+    }
+
+    /// Legt einen serverseitig erzeugten Drop an und gibt seine ID zurück.
+    async fn spawn_test_drop(
+        ctx: &Arc<Ctx>,
+        kind: crate::loot::LootKind,
+        item_id: Option<&str>,
+        count: i64,
+        x: f64,
+        y: f64,
+        claimed_by: &str,
+    ) -> String {
+        let mut w = ctx.shared.lock().await;
+        crate::loot::spawn_drop(
+            &mut w,
+            kind,
+            x,
+            y,
+            item_id.map(|s| s.to_string()),
+            count,
+            Vec::new(),
+            Some(claimed_by.to_string()),
+            &ctx.cfg.loot,
+            Instant::now(),
+        )
+    }
+
+    /// 1a) PICKUP außerhalb der Reichweite: **keine** Gutschrift und **keine**
+    /// Entfernung des Drops — für Gold und für ein Item.
+    #[tokio::test]
+    async fn pickup_out_of_radius_neither_credits_nor_removes_the_drop() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        {
+            let mut w = ctx.shared.lock().await;
+            let mut def = crate::item::ItemDefinition::new(
+                "wolf_hide",
+                "Wolfsfell",
+                crate::item::ItemCategory::RawMaterial,
+            );
+            def.max_stack = 100;
+            w.item_definitions.insert(def.item_id.clone(), def);
+            w.players.get_mut("a").unwrap().inventory = crate::inventory::InventoryState::new(8);
+        }
+        // Weit außerhalb der konfigurierten Reichweite (Default 5.0).
+        let gold = spawn_test_drop(
+            &ctx,
+            crate::loot::LootKind::Gold,
+            None,
+            50,
+            100.0,
+            100.0,
+            "a",
+        )
+        .await;
+        let item = spawn_test_drop(
+            &ctx,
+            crate::loot::LootKind::Item,
+            Some("wolf_hide"),
+            3,
+            100.0,
+            100.0,
+            "a",
+        )
+        .await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            40,
+            crate::protocol::c2s::PICKUP,
+            serde_json::json!({"loot_id": gold}),
+        )
+        .await;
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            41,
+            crate::protocol::c2s::PICKUP,
+            serde_json::json!({"loot_id": item}),
+        )
+        .await;
+
+        let w = ctx.shared.lock().await;
+        assert_eq!(
+            w.players["a"].idia, 0,
+            "außerhalb der Reichweite darf kein Gold gutsgeschrieben werden"
+        );
+        assert_eq!(
+            w.players["a"].inventory.count_of("wolf_hide"),
+            0,
+            "außerhalb der Reichweite darf kein Item gutsgeschrieben werden"
+        );
+        assert!(
+            w.loot_drops.contains_key(&gold),
+            "der Gold-Drop darf außerhalb der Reichweite nicht entfernt werden"
+        );
+        assert!(
+            w.loot_drops.contains_key(&item),
+            "der Item-Drop darf außerhalb der Reichweite nicht entfernt werden"
+        );
+        assert_eq!(w.loot_drops[&item].count, 3, "die Menge bleibt unverändert");
+    }
+
+    /// 1b) PICKUP von Gold: die gültige Aufnahme schreibt genau einmal. Das
+    /// **identische** Frame (gleiche `seq`) und derselbe Inhalt mit **neuer**
+    /// `seq` gutschreiben nicht erneut — `seq` ist Korrelation.
+    #[tokio::test]
+    async fn repeated_pickup_credits_gold_exactly_once_whatever_the_seq() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let gold =
+            spawn_test_drop(&ctx, crate::loot::LootKind::Gold, None, 50, 1.0, 1.0, "a").await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let frame = serde_json::json!({"loot_id": gold});
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            41,
+            crate::protocol::c2s::PICKUP,
+            frame.clone(),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].idia, 50,
+                "die gültige Aufnahme muss genau den Dropbetrag gutschreiben"
+            );
+            assert!(
+                !w.loot_drops.contains_key(&gold),
+                "ein vollständig aufgenommener Gold-Drop wird entfernt"
+            );
+        }
+
+        // Identisches Frame erneut (gleiche `seq`).
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            41,
+            crate::protocol::c2s::PICKUP,
+            frame.clone(),
+        )
+        .await;
+        assert_eq!(
+            ctx.shared.lock().await.players["a"].idia,
+            50,
+            "das identische Frame darf keine zweite Gutschrift erzeugen"
+        );
+
+        // Gleicher Inhalt mit neuer `seq`.
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            99,
+            crate::protocol::c2s::PICKUP,
+            frame.clone(),
+        )
+        .await;
+        assert_eq!(
+            ctx.shared.lock().await.players["a"].idia,
+            50,
+            "eine neue `seq` ist keine Berechtigung für eine zweite Gutschrift"
+        );
+        assert!(
+            ctx.shared.lock().await.loot_drops.is_empty(),
+            "der entfernte Drop darf nicht wieder auftauchen"
+        );
+    }
+
+    /// 1c) PICKUP von Items mit begrenzter Kapazität: der Rest bleibt als
+    /// Drop liegen und wird auch durch Wiederholung **nicht** erneut gutgeschrieben.
+    #[tokio::test]
+    async fn repeated_pickup_credits_items_once_and_keeps_the_remainder() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        {
+            let mut w = ctx.shared.lock().await;
+            let mut def = crate::item::ItemDefinition::new(
+                "wolf_hide",
+                "Wolfsfell",
+                crate::item::ItemCategory::RawMaterial,
+            );
+            // kleiner als die Menge ⇒ Restmenge muss liegen bleiben
+            def.max_stack = 2;
+            w.item_definitions.insert(def.item_id.clone(), def);
+            // Genau **ein** Basis-Slot: `try_add` legt einen neuen Stack mit
+            // höchstens `max_stack` an und kann danach keinen weiteren Slot
+            // belegen ⇒ von 5 Stück passen 2 ins Inventar, 3 bleiben liegen.
+            w.players.get_mut("a").unwrap().inventory = crate::inventory::InventoryState::new(1);
+        }
+        let item = spawn_test_drop(
+            &ctx,
+            crate::loot::LootKind::Item,
+            Some("wolf_hide"),
+            5,
+            1.0,
+            1.0,
+            "a",
+        )
+        .await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let frame = serde_json::json!({"loot_id": item});
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            42,
+            crate::protocol::c2s::PICKUP,
+            frame.clone(),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].inventory.count_of("wolf_hide"),
+                2,
+                "die aufnehmbare Menge muss gutgeschrieben werden"
+            );
+            assert!(
+                w.loot_drops.contains_key(&item),
+                "die Restmenge bleibt als Drop liegen"
+            );
+            assert_eq!(
+                w.loot_drops[&item].count, 3,
+                "der Drop muss auf die Restmenge zurückgesetzt werden"
+            );
+        }
+
+        for seq in [42, 100] {
+            c2s_frame(
+                &ctx,
+                &mut guard,
+                &sec_cfg,
+                &tx,
+                seq,
+                crate::protocol::c2s::PICKUP,
+                frame.clone(),
+            )
+            .await;
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].inventory.count_of("wolf_hide"),
+                2,
+                "Wiederholung (seq {seq}) darf keine zweite Gutschrift erzeugen"
+            );
+            assert_eq!(
+                w.loot_drops[&item].count, 3,
+                "die Restmenge darf durch Wiederholung nicht schrumpfen"
+            );
+        }
+    }
+
+    /// 2) SPEND_ATTRIBUTE: clientgelieferte Endwerte werden ignoriert; ein
+    /// freier Punkt erlaubt genau +1; eine erneute Absicht ohne verbleibenden
+    /// Punkt verändert den Zustand nicht.
+    #[tokio::test]
+    async fn spend_attribute_ignores_client_values_and_spends_exactly_one_point() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .free_attr_points = 1;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            50,
+            crate::protocol::c2s::SPEND_ATTRIBUTE,
+            serde_json::json!({
+                "attribute": "strength",
+                // manipulierte Endwerte: dürfen keine Bedeutung haben
+                "strength": 999,
+                "value": 5000,
+                "delta": 250,
+                "free_attr_points": 99,
+                "level": 99,
+                "exp": 1_000_000,
+                "idia": 1_000_000
+            }),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            let p = &w.players["a"];
+            assert_eq!(
+                p.attributes.strength, 1,
+                "der Server erhöht um genau +1, nicht um einen gelieferten Wert"
+            );
+            assert_eq!(
+                p.free_attr_points, 0,
+                "genau ein freier Punkt wird verbraucht"
+            );
+            assert_eq!(p.level, 1, "Level bleibt serverseitig bestimmt");
+            assert_eq!(p.exp, 0, "EXP bleibt serverseitig bestimmt");
+            assert_eq!(p.idia, 0, "Gold bleibt serverseitig bestimmt");
+        }
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            51,
+            crate::protocol::c2s::SPEND_ATTRIBUTE,
+            serde_json::json!({"attribute": "strength", "strength": 999}),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            let p = &w.players["a"];
+            assert_eq!(
+                p.attributes.strength, 1,
+                "ohne freien Punkt darf keine weitere Erhöhung erfolgen"
+            );
+            assert_eq!(
+                p.free_attr_points, 0,
+                "der Punktezähler darf nicht negativ oder verfälscht werden"
+            );
+        }
+    }
+
+    /// 3a) ABILITY: die gültige Absicht verbraucht serverseitig Mana und setzt
+    /// den vorgesehenen Cooldown; eine Wiederholung innerhalb des Cooldowns
+    /// erzeugt keinen zweiten Verbrauch und keinen zweiten Effekt.
+    #[tokio::test]
+    async fn ability_costs_mana_once_and_its_cooldown_blocks_the_repeat() {
+        let mut tctx = test_ctx().await;
+        register_ability(&mut tctx, dispatch_ability_def());
+        let ctx = &tctx;
+        insert_cadence_players(ctx, &[("a", 0.0, 0.0, 100), ("b", 1.0, 0.0, 1000)]).await;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .learned_abilities
+            .insert("fire_bolt".into());
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            60,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            let p = &w.players["a"];
+            assert_eq!(p.mana, 50 - 8, "Mana wird serverseitig abgezogen");
+            assert_eq!(
+                w.players["b"].hp,
+                1000 - 35,
+                "der Schaden wird serverseitig bestimmt und angewendet"
+            );
+            assert!(
+                p.cooldowns.contains_key("fire_bolt"),
+                "der vorgesehene Cooldown wird gesetzt"
+            );
+        }
+
+        for seq in [60, 61] {
+            c2s_frame(
+                ctx,
+                &mut guard,
+                &sec_cfg,
+                &tx,
+                seq,
+                crate::protocol::c2s::ABILITY,
+                serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+            )
+            .await;
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].mana,
+                50 - 8,
+                "im Cooldown darf kein zweites Mana verbraucht werden (seq {seq})"
+            );
+            assert_eq!(
+                w.players["b"].hp,
+                1000 - 35,
+                "im Cooldown darf kein zweiter Effekt entstehen (seq {seq})"
+            );
+        }
+    }
+
+    /// 3b) ABILITY: eine fachlich abgelehnte Absicht (Ziel außerhalb der
+    /// Reichweite) verändert **keinen** Zustand — kein Mana, kein Cooldown,
+    /// kein Schaden.
+    #[tokio::test]
+    async fn rejected_ability_leaves_mana_cooldown_and_target_untouched() {
+        let mut tctx = test_ctx().await;
+        register_ability(&mut tctx, dispatch_ability_def());
+        let ctx = &tctx;
+        insert_cadence_players(ctx, &[("a", 0.0, 0.0, 100), ("b", 50.0, 50.0, 1000)]).await;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .learned_abilities
+            .insert("fire_bolt".into());
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // Reichweite der Testfähigkeit ist 12.0; das Ziel liegt weiter weg.
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            62,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+        )
+        .await;
+        // Zusätzlich ein eigenes Ziel bei erlerntem Fähigkeit
+        // (`validate_single_hostile` → `cannot_target_self`).
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            63,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "a"}),
+        )
+        .await;
+        let w = ctx.shared.lock().await;
+        let p = &w.players["a"];
+        assert_eq!(p.mana, 50, "eine abgelehnte Absicht verbraucht kein Mana");
+        assert_eq!(
+            w.players["b"].hp, 1000,
+            "eine abgelehnte Absicht verursacht keinen Schaden"
+        );
+        assert!(
+            !p.cooldowns.contains_key("fire_bolt"),
+            "eine abgelehnte Absicht setzt keinen Cooldown"
+        );
+    }
+
+    /// 4) AUCTION_BUY: der fail-closed-Stub bleibt auch bei manipulierten
+    /// Clientwerten ohne Gold- und ohne Eigentumsmutation und antwortet dem
+    /// Client mit einer Ablehnung.
+    #[tokio::test]
+    async fn auction_buy_stub_never_moves_gold_even_with_manipulated_values() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        ctx.shared.lock().await.players.get_mut("a").unwrap().idia = 243;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            70,
+            crate::protocol::c2s::AUCTION_BUY,
+            serde_json::json!({
+                "auction_id": 1,
+                // manipulierte Serverfelder: dürfen keine Bedeutung haben
+                "price": 1,
+                "gold": 999_999,
+                "seller_id": "other",
+                "seller": "other",
+                "active": true
+            }),
+        )
+        .await;
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(
+                w.players["a"].idia, 243,
+                "der Stub darf keinen Goldwert verändern"
+            );
+            assert_eq!(
+                w.players["a"].inventory.count_of("wolf_hide"),
+                0,
+                "der Stub darf kein Eigentum übertragen"
+            );
+        }
+        assert!(
+            rx.try_recv().is_ok(),
+            "der Stub muss dem Client eine Ablehnung antworten"
+        );
+    }
+
+    /// B-1 (Audit 4.7): Der Eigentümerwechsel darf nicht zwischen der
+    /// Auflösung der Verbindung und der Fähigkeitsausführung liegen.
+    ///
+    /// **Ereignisfolge am echten Dispatch-Pfad, ohne Sleep, ohne Timing und
+    /// ohne Test-Seam im Produktionscode:** Der Test hält die World-Sperre,
+    /// bis der `authenticated`-Lookup des Dispatchs **und** ein Halter-Task
+    /// nacheinander darauf warten. Nach dem Freigeben löst der Handler die
+    /// Eigentümer-ID **noch vor** dem Wechsel auf, der echte Wechsel
+    /// (`commit_login` → `Takeover { old_conn_id: 7 }`) läuft in der Lücke
+    /// zwischen Auflösung und Ausführung, und erst danach wird die Absicht
+    /// ausgeführt. Maßgeblich ist der unter **derselben** Sperre beim Wechsel
+    /// beobachtete Zustand: Danach darf die alte Verbindung weder Mana
+    /// verbrauchen noch Cooldown setzen noch Effekte auslösen. Die
+    /// abschließende Nicht-Leer-Prüfung belegt, dass die Absicht selbst
+    /// gültig ausgeführt wurde.
+    #[tokio::test]
+    async fn takeover_between_owner_lookup_and_execution_has_no_effect() {
+        let mut tctx = test_ctx().await;
+        register_ability(&mut tctx, dispatch_ability_def());
+        let ctx = &tctx;
+        insert_cadence_players(ctx, &[("a", 0.0, 0.0, 100), ("b", 1.0, 0.0, 1000)]).await;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .learned_abilities
+            .insert("fire_bolt".into());
+
+        // X: die World-Sperre halten, damit die Warteschlange der folgenden
+        // Tasks in bekannter Reihenfolge entsteht (Fairness des Mutex).
+        let xguard = ctx.shared.lock().await;
+
+        // H: echter Dispatch-Pfad für conn 7 — zum Zeitpunkt der Auflösung
+        // noch Eigentümer von "a".
+        let h_ctx = Arc::clone(ctx);
+        let h = tokio::spawn(async move {
+            let sec_cfg = crate::security::SecurityCfg::from(&h_ctx.cfg.security);
+            let mut guard = crate::security::ConnGuard::default();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            c2s_frame(
+                &h_ctx,
+                &mut guard,
+                &sec_cfg,
+                &tx,
+                80,
+                crate::protocol::c2s::ABILITY,
+                serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        // Y: hält die Sperre zwischen dem `authenticated`-Lookup des
+        // Dispatchs und der Eigentümer-Auflösung des Handlers.
+        let y_ctx = Arc::clone(ctx);
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let (go_tx, go_rx) = tokio::sync::oneshot::channel::<()>();
+        let y = tokio::spawn(async move {
+            let world = y_ctx.shared.lock().await;
+            let _ = held_tx.send(());
+            let _ = go_rx.await;
+            drop(world);
+        });
+        tokio::task::yield_now().await;
+
+        drop(xguard);
+        held_rx.await.expect("Halter hält die World-Sperre");
+
+        // T: echter Eigentümerwechsel in der Lücke zwischen Auflösung und
+        // Ausführung; der Zustand wird unter derselben Sperre beobachtet.
+        let t_ctx = Arc::clone(ctx);
+        let t = tokio::spawn(async move {
+            let mut world = t_ctx.shared.lock().await;
+            let outcome = crate::world::commit_login(
+                &mut world,
+                8,
+                crate::world::Player {
+                    id: "a".into(),
+                    name: "a".into(),
+                    x: 0.0,
+                    y: 0.0,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 1,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: std::time::Instant::now(),
+                    tx: mpsc::unbounded_channel().0,
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    idia: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    last_strike: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: Default::default(),
+                    cooldowns: Default::default(),
+                    active_cast: None,
+                    learned_abilities: Default::default(),
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    sitting: false,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                    persist_revision: 0,
+                },
+                crate::world::ConnectionFields {
+                    tx: mpsc::unbounded_channel().0,
+                    session_id: "sess-2".into(),
+                    lang: "de".into(),
+                },
+            )
+            .expect("zweite Verbindung desselben Accounts darf übernehmen");
+            assert_eq!(
+                outcome,
+                crate::world::CommitOutcome::Takeover { old_conn_id: 7 },
+                "conn 7 wird entmachtet, conn 8 übernimmt"
+            );
+            let observed = (
+                world.players["a"].mana,
+                world.players["a"].cooldowns.contains_key("fire_bolt"),
+                world.players["b"].hp,
+            );
+            drop(world);
+            observed
+        });
+        tokio::task::yield_now().await;
+        let _ = go_tx.send(());
+
+        let (h_done, observed, y_done) = tokio::join!(h, t, y);
+        h_done.expect("Dispatch-Task endet ohne Panik");
+        y_done.expect("Halter-Task endet ohne Panik");
+        let observed = observed.expect("Takeover-Task endet ohne Panik");
+
+        let w = ctx.shared.lock().await;
+        let after = (
+            w.players["a"].mana,
+            w.players["a"].cooldowns.contains_key("fire_bolt"),
+            w.players["b"].hp,
+        );
+        assert_eq!(
+            observed, after,
+            "nach dem Eigentümerwechsel darf die alte Verbindung weder Mana \
+             verbrauchen noch Cooldown setzen noch Effekte auslösen \
+             (beobachtet beim Wechsel {observed:?}, am Ende {after:?})"
+        );
+        assert_eq!(
+            w.players["a"].mana, 42,
+            "Nicht-Leer-Prüfung: die Absicht wurde gültig ausgeführt"
+        );
+        assert!(
+            crate::world::is_owner(&w, 8, "a"),
+            "die neue Verbindung ist Eigentümer"
+        );
+        assert!(
+            !w.by_conn.contains_key(&7),
+            "die alte Verbindung ist entmachtet"
+        );
+    }
+
     // ── Audit 4.3 / T-1: Nachweis der Gate-Kette am echten `read_loop` ────
     //
     // Alle Tests in diesem Abschnitt rufen die **Produktionsfunktion**
