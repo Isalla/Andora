@@ -23,6 +23,14 @@ Dokumentation wurde kein Produktionscode geändert.
 
 Die bestehende Item-System-V1-Architektur (`item_properties.md`, Abschnitt „Item System V1 – Implementierungsstand") ist verbindlich und wird hier nicht verändert.
 
+**Instanzgenaue Kernoperationen eingebaut:** `try_take_instance` und
+`try_insert_instance` in `src/realm-rs/src/inventory.rs`; API-/UUID-Vertrag
+in Abschnitt 17. Verifikation: 12 neue Produktionstests, vollständige
+Realm-Suite offline 710/710 bestanden (698 als berichteter Vorlaufstand).
+Clippy `--offline --all-targets --message-format=json` auf Basis und neuem
+Stand: jeweils 102 Diagnosen, keine neuen/entfallenen (Vergleich nach
+Code, Meldung, Quelldatei und primärem Quelltext, unabhängig von Zeilennummern).
+
 ---
 
 ## 1. Grundprinzip
@@ -532,3 +540,63 @@ Safety-Mechanismus entworfen.
 * Dieser Abschnitt legt keine neuen Regeln für Inventarkapazität, Loot,
   Questbelohnungen, Itemhandel, Haltbarkeit, Puffer-Größe oder die Wiederher-
   stellung verlorener Puffer-Items fest.
+
+---
+
+## 17. Instanzgenaue Kernoperationen
+
+Diese reine RAM-API ist die Inventargrundlage für spätere NPC-Verkäufe und
+Buyback. Sie vergibt **keine** Handels-, Bindungs- oder Questfreigabe und
+führt weder Währungsänderungen noch History-/DB-Operationen aus. Der Aufrufer
+muss seine Fachprüfungen und die Dirty-Markierung selbst vornehmen.
+Bestehende Loot-, `try_add`-/`try_remove`-, Equip- und Pufferpfade verwenden
+weiter ihre bisherigen Operationen.
+
+### Entnehmen
+
+`try_take_instance(uuid, qty) -> Result<ItemInstance, InventoryError>`:
+
+* Nur ein eindeutig identifizierter Stack im Grundinventar oder in den
+  Inhalts-Slots ausgerüsteter Taschen ist zugänglich. Equipment, die
+  Taschencontainer selbst und der Sicherheits-Puffer sind keine Entnahmeorte.
+* Vollentnahme liefert die Originalinstanz einschließlich ihrer UUID.
+* Teilentnahme: Rest behält die Original-UUID; der entnommene Teil erhält
+  eine neue UUID aus der vorhandenen Erzeugung. Nur Mengen/Teil-UUID ändern
+  sich; Bindung, Haltbarkeit, Hersteller und sämtliche Modifier bleiben erhalten.
+* Unbekannte/leere UUID, Menge <= 0, Menge über dem gewählten Stack oder
+  eine mehrdeutige UUID werden ohne Mutation abgelehnt. Es wird nicht aus
+  anderen Stacks derselben Definition ergänzt.
+
+### Vollständiges Wiedereinsetzen
+
+`try_insert_instance(def, incoming) -> Result<InstanceInsertOutcome, InventoryError>`:
+
+* Definition und vollständige Instanz werden validiert; insbesondere muss
+  `count` innerhalb `1..=max_stack` liegen. Die geliehene Eingabe bleibt erhalten.
+* Zuerst passende normale Stacks auffüllen: Basis-Slots, dann Tascheninhalte.
+  Es gilt die bestehende Plain-Stack-Regel (gleiche Itemdefinition, keine
+  individuellen Modifier und keine Haltbarkeit), zusätzlich müssen Bindung
+  **und Hersteller** übereinstimmen. Inkompatible Eigenschaften verschwinden
+  niemals durch Verschmelzung.
+* Ein verbleibender Teil belegt einen freien normalen Slot mit der
+  eingehenden UUID und allen Eigenschaften. 1 Item/Stack = 1 Slot;
+  Equipment und Puffer liefern keine zusätzliche Aufnahmekapazität.
+* Die gesamte Änderung wird auf einem Arbeitsklon vorbereitet. Fehlt Platz
+  für den Rest, bleibt auch jeder zuvor probeweise aufgefüllte Stack unverändert.
+* Das Ergebnis meldet `merged_count`. Nur wenn die **gesamte** Eingabe in
+  bestehende Stacks verschmolzen ist, liefert `retired_uuid` die aufgegebene
+  eingehende UUID. Andernfalls ist `retired_uuid = None` und diese UUID bleibt
+  am neuen Reststack erhalten. Bestehende Ziel-UUIDs bleiben erhalten.
+* UUID-Kollisionen werden im gesamten eigenen Inventar einschließlich
+  Equipment und Puffer geprüft. Die Gesamtmenge derselben Definition im
+  normalen Inventar und die Additionen beim Stacken müssen in i64 darstellbar
+  sein; Überlauf wird ohne Mutation abgelehnt.
+
+### Lifecycle-Anschluss
+
+`retired_uuid` ist ein ausdrücklicher Hinweis für die spätere
+revisionsgebundene Instanzfinalisierung, **kein** sofortiger DB-Löschauftrag.
+Diese API prüft nur inventarlokale UUID-Eindeutigkeit. Globale Eigentumsprüfung,
+History-/Spool-Anschluss und der endgültige persistente Instanz-Lifecycle
+bleiben beim späteren Spiellayer. Die Operationen selbst markieren keinen
+Player-Dirty-State.

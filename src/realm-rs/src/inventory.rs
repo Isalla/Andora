@@ -198,6 +198,17 @@ pub struct AddOutcome {
     pub remainder: i64,
 }
 
+/// Ergebnis einer vollständigen Aufnahme einer vorhandenen Instanz.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceInsertOutcome {
+    /// Menge, die vorhandene kompatible Stacks aufgefüllt hat.
+    pub merged_count: i64,
+    /// Nur bei vollständiger Verschmelzung: aufgegebene eingehende UUID.
+    /// Der Aufrufer muss ihren späteren persistenten Lifecycle behandeln.
+    /// Sonst bleibt die eingehende UUID am Reststack im Inventar erhalten.
+    pub retired_uuid: Option<String>,
+}
+
 /// Zustand eines Spieler-Inventars (docs/inventory_system.md):
 /// Grundinventar, Rucksäcke, Equipment und temporärer Sicherheits-Puffer.
 /// Serialize/Deserialize: vollständiger Player-Snapshot der Stufe B
@@ -245,6 +256,12 @@ pub enum InventoryError {
     NoSuchBag,
     /// Bag ist nicht leer (Entfernen würde Items verlieren).
     BagNotEmpty,
+    /// Ungültige Definition oder Instanzdaten (einschließlich leerer UUID).
+    InvalidInstance,
+    /// UUID ist bereits belegt bzw. im Inventar nicht eindeutig.
+    UuidCollision,
+    /// Eine Mengenrechnung würde den i64-Wertebereich überschreiten.
+    QuantityOverflow,
 }
 
 fn sample(def: &ItemDefinition) -> ItemInstance {
@@ -334,6 +351,181 @@ impl InventoryState {
                 .iter()
                 .map(|b| b.slots.iter().filter(|s| s.is_none()).count())
                 .sum::<usize>()
+    }
+
+    /// Alle gehaltenen Instanzen, auch Equipment/Puffer, nur für UUID-Prüfungen.
+    fn instances(&self) -> impl Iterator<Item = &ItemInstance> {
+        self.base_slots
+            .iter()
+            .chain(self.bags.iter().flat_map(|b| &b.slots))
+            .filter_map(|s| s.as_ref())
+            .chain(self.equipped.values())
+            .chain(self.buffer.iter().filter_map(|s| s.as_ref()))
+    }
+
+    /// Entnimmt exakt `qty` aus genau einer UUID im Grundinventar oder in
+    /// Tascheninhalten. Kein Equipment, kein Taschencontainer, kein Puffer.
+    /// Vollentnahme erhält die UUID; beim Split behält der Rest seine UUID,
+    /// der entnommene Teil bekommt eine neue aus der bestehenden Erzeugung.
+    /// Alle übrigen Eigenschaften bleiben erhalten. Fehler verändern nichts.
+    /// Bindungs-/Quest-/Handelsfreigaben sind Aufgabe des Aufrufers.
+    pub fn try_take_instance(
+        &mut self,
+        uuid: &str,
+        qty: i64,
+    ) -> Result<ItemInstance, InventoryError> {
+        if qty <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        if uuid.trim().is_empty() {
+            return Err(InventoryError::NotInInventory);
+        }
+        let loc = self.slot_of(uuid).ok_or(InventoryError::NotInInventory)?;
+        if !matches!(loc, ItemLoc::Base(_) | ItemLoc::Bag(_, _)) {
+            return Err(InventoryError::NotInInventory);
+        }
+        if self.instances().filter(|it| it.item_uuid == uuid).count() != 1 {
+            return Err(InventoryError::UuidCollision);
+        }
+        let mut taken = self
+            .instance_of(uuid)
+            .ok_or(InventoryError::NotInInventory)?;
+        if taken.count <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        if qty > taken.count {
+            return Err(InventoryError::NotEnoughItems);
+        }
+        let remaining = taken.count - qty;
+        if remaining > 0 {
+            taken.item_uuid = new_uuid();
+            if self.instances().any(|it| it.item_uuid == taken.item_uuid) {
+                return Err(InventoryError::UuidCollision);
+            }
+        }
+        taken.count = qty;
+        let slot = match loc {
+            ItemLoc::Base(i) => &mut self.base_slots[i],
+            ItemLoc::Bag(id, i) => {
+                &mut self
+                    .bags
+                    .iter_mut()
+                    .find(|b| b.bag_id == id)
+                    .ok_or(InventoryError::NoSuchBag)?
+                    .slots[i]
+            }
+            _ => return Err(InventoryError::NotInInventory),
+        };
+        if remaining == 0 {
+            *slot = None;
+        } else if let Some(rest) = slot.as_mut() {
+            rest.count = remaining;
+        }
+        Ok(taken)
+    }
+
+    /// Setzt eine vorhandene Instanz vollständig ein, sonst keine Mutation.
+    /// Normale Stacks werden zuerst aufgefüllt (Basis, dann Taschen); nur
+    /// plain Instanzen gleicher Definition, Bindung UND Hersteller passen.
+    /// Individuelle Modifier/Haltbarkeit werden niemals wegverschmolzen.
+    /// Ein Rest belegt einen normalen freien Slot mit der eingehenden UUID.
+    /// Vollverschmelzung meldet diese UUID ausdrücklich im Ergebnis zurück.
+    /// Keine Rekonstruktion aus Definitionen, keine Teilaufnahme, kein Puffer.
+    /// UUID-Prüfung ist inventarlokal; globale Eigentums-/Lifecycle-Prüfung
+    /// sowie Dirty-Markierung bleiben Aufgaben des späteren Aufrufers.
+    pub fn try_insert_instance(
+        &mut self,
+        def: &ItemDefinition,
+        incoming: &ItemInstance,
+    ) -> Result<InstanceInsertOutcome, InventoryError> {
+        if incoming.count <= 0 || incoming.count > def.max_stack {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        def.validate()
+            .map_err(|_| InventoryError::InvalidInstance)?;
+        incoming
+            .validate(def)
+            .map_err(|_| InventoryError::InvalidInstance)?;
+        if self
+            .instances()
+            .any(|it| it.item_uuid == incoming.item_uuid)
+        {
+            return Err(InventoryError::UuidCollision);
+        }
+        // Auch die Gesamtmenge im normalen Inventar muss für count_of in
+        // i64 darstellbar bleiben, unabhängig von der Stack-Kompatibilität.
+        self.base_slots
+            .iter()
+            .chain(self.bags.iter().flat_map(|b| &b.slots))
+            .filter_map(|s| s.as_ref())
+            .filter(|it| it.item_id == incoming.item_id)
+            .try_fold(incoming.count, |sum, it| {
+                if it.count <= 0 {
+                    return Err(InventoryError::InvalidInstance);
+                }
+                sum.checked_add(it.count)
+                    .ok_or(InventoryError::QuantityOverflow)
+            })?;
+
+        // Vorbereitung auf einem Klon: auch nach teilweisem Auffüllen kann
+        // fehlender Restplatz keinen teilmutierten Originalzustand hinterlassen.
+        let mut draft = self.clone();
+        let mut remaining = incoming.count;
+        if def.max_stack > 1 && plain_copy(incoming) {
+            for existing in draft
+                .base_slots
+                .iter_mut()
+                .chain(draft.bags.iter_mut().flat_map(|b| &mut b.slots))
+                .filter_map(|s| s.as_mut())
+            {
+                if !mergeable_into(existing, incoming)
+                    || existing.binding != incoming.binding
+                    || existing.creator_id != incoming.creator_id
+                {
+                    continue;
+                }
+                existing
+                    .validate(def)
+                    .map_err(|_| InventoryError::InvalidInstance)?;
+                let space = def
+                    .max_stack
+                    .checked_sub(existing.count)
+                    .ok_or(InventoryError::QuantityOverflow)?;
+                let take = space.min(remaining);
+                existing.count = existing
+                    .count
+                    .checked_add(take)
+                    .ok_or(InventoryError::QuantityOverflow)?;
+                remaining -= take;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        let merged_count = incoming.count - remaining;
+        if remaining > 0 {
+            let mut rest = incoming.clone();
+            rest.count = remaining;
+            let (loc, _) = draft.next_free_slot().ok_or(InventoryError::NoSpace)?;
+            match loc {
+                ItemLoc::Base(i) => draft.base_slots[i] = Some(rest),
+                ItemLoc::Bag(id, i) => {
+                    draft
+                        .bags
+                        .iter_mut()
+                        .find(|b| b.bag_id == id)
+                        .ok_or(InventoryError::NoSuchBag)?
+                        .slots[i] = Some(rest);
+                }
+                _ => return Err(InventoryError::NotInInventory),
+            }
+        }
+        let outcome = InstanceInsertOutcome {
+            merged_count,
+            retired_uuid: (remaining == 0).then(|| incoming.item_uuid.clone()),
+        };
+        *self = draft;
+        Ok(outcome)
     }
 
     /// Machbarkeitsprobe (Quest-/Loot-API, docs §6): passt `qty` vollständig?
@@ -1310,6 +1502,309 @@ mod tests {
         );
         // Kein Teilentfernen auch über mehrere nicht-stapelbare Slots.
         assert_eq!(inv.count_of("eisenschwert"), 1);
+    }
+
+    // Instance-exact operations: fixtures only, no trade/content permissions.
+    fn exact_item(uuid: &str) -> ItemInstance {
+        let mut item = ItemInstance::new(
+            uuid,
+            "hp_potion",
+            ItemModifiers {
+                quality_modifier: 7.5,
+                damage_modifier: 2.0,
+                armor_modifier: 3.0,
+                weight_modifier: 1.25,
+                attribute_modifiers: [("kraft".into(), 4.0)].into_iter().collect(),
+                resistance_modifiers: [("fire".into(), 6.0)].into_iter().collect(),
+            },
+        );
+        item.count = 10;
+        item.binding = crate::item::BindingState::Bound;
+        item.durability_current = Some(5);
+        item.durability_max = Some(20);
+        item.creator_id = Some(42);
+        item
+    }
+
+    fn plain_item(uuid: &str, count: i64) -> ItemInstance {
+        let mut item = ItemInstance::new(uuid, "hp_potion", ItemModifiers::default());
+        item.count = count;
+        item
+    }
+
+    #[test]
+    fn exact_take_whole_preserves_uuid_and_every_property() {
+        for in_bag in [false, true] {
+            let mut inv = InventoryState::new(1);
+            let item = exact_item("exact");
+            if in_bag {
+                inv.create_bag(&cfg(1), "Fixture", 1).unwrap();
+                inv.bags[0].slots[0] = Some(item.clone());
+            } else {
+                inv.base_slots[0] = Some(item.clone());
+            }
+            inv.equipped
+                .insert(EquipSlot::Food, plain_item("equipped", 1));
+            inv.buffer.push(Some(plain_item("buffer", 1)));
+            let before = inv.clone();
+            assert_eq!(inv.try_take_instance("exact", 10), Ok(item));
+            assert_eq!(inv.count_of("hp_potion"), 0);
+            assert_eq!(inv.equipped, before.equipped);
+            assert_eq!(inv.buffer, before.buffer);
+            assert_eq!(inv.bags.len(), before.bags.len());
+        }
+    }
+
+    #[test]
+    fn exact_take_split_changes_only_counts_and_taken_uuid() {
+        let mut inv = InventoryState::new(2);
+        let item = exact_item("original");
+        inv.base_slots[0] = Some(plain_item("same-definition", 20));
+        inv.base_slots[1] = Some(item.clone());
+        let taken = inv.try_take_instance("original", 4).unwrap();
+        assert_ne!(taken.item_uuid, item.item_uuid);
+        assert!(!taken.item_uuid.is_empty());
+        let mut expected_taken = item.clone();
+        expected_taken.item_uuid = taken.item_uuid.clone();
+        expected_taken.count = 4;
+        assert_eq!(taken, expected_taken);
+        let mut expected_rest = item;
+        expected_rest.count = 6;
+        assert_eq!(inv.base_slots[1], Some(expected_rest));
+        assert_eq!(inv.base_slots[0], Some(plain_item("same-definition", 20)));
+    }
+
+    #[test]
+    fn exact_take_rejections_leave_all_inventory_state_unchanged() {
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(exact_item("normal"));
+        inv.equipped
+            .insert(EquipSlot::Food, plain_item("equipped", 2));
+        inv.buffer.push(Some(plain_item("buffer", 2)));
+        inv.create_bag(&cfg(1), "Container", 1).unwrap();
+        let before = inv.clone();
+        for (uuid, count, error) in [
+            ("normal", 0, InventoryError::InvalidQuantity),
+            ("normal", -1, InventoryError::InvalidQuantity),
+            ("normal", 11, InventoryError::NotEnoughItems),
+            ("normal", i64::MAX, InventoryError::NotEnoughItems),
+            ("unknown", 1, InventoryError::NotInInventory),
+            ("", 1, InventoryError::NotInInventory),
+            ("equipped", 1, InventoryError::NotInInventory),
+            ("buffer", 1, InventoryError::NotInInventory),
+            ("1", 1, InventoryError::NotInInventory), // bag_id is not an item UUID
+        ] {
+            assert_eq!(inv.try_take_instance(uuid, count), Err(error));
+            assert_eq!(inv, before);
+        }
+    }
+
+    #[test]
+    fn exact_take_rejects_ambiguous_uuid_without_mutation() {
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(exact_item("duplicate"));
+        inv.buffer.push(Some(plain_item("duplicate", 1)));
+        let before = inv.clone();
+        assert_eq!(
+            inv.try_take_instance("duplicate", 1),
+            Err(InventoryError::UuidCollision)
+        );
+        assert_eq!(inv, before);
+    }
+
+    #[test]
+    fn exact_insert_keeps_individual_instance_and_uses_bag_space() {
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(plain_item("plain", 1));
+        inv.create_bag(&cfg(1), "Fixture", 1).unwrap();
+        let incoming = exact_item("individual");
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &incoming),
+            Ok(InstanceInsertOutcome {
+                merged_count: 0,
+                retired_uuid: None,
+            })
+        );
+        assert_eq!(inv.bags[0].slots[0], Some(incoming));
+        assert_eq!(inv.base_slots[0], Some(plain_item("plain", 1)));
+        assert!(inv.buffer.is_empty());
+    }
+
+    #[test]
+    fn exact_insert_fills_compatible_stacks_then_keeps_remainder_uuid() {
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(plain_item("base", 15));
+        inv.create_bag(&cfg(1), "Fixture", 2).unwrap();
+        inv.bags[0].slots[0] = Some(plain_item("bag", 17));
+        let incoming = plain_item("incoming", 10);
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &incoming),
+            Ok(InstanceInsertOutcome {
+                merged_count: 8,
+                retired_uuid: None,
+            })
+        );
+        assert_eq!(inv.base_slots[0], Some(plain_item("base", 20)));
+        assert_eq!(inv.bags[0].slots[0], Some(plain_item("bag", 20)));
+        assert_eq!(inv.bags[0].slots[1], Some(plain_item("incoming", 2)));
+        assert_eq!(incoming.count, 10); // borrowed input remains reusable on errors
+    }
+
+    #[test]
+    fn exact_insert_full_merge_reports_retired_uuid() {
+        let mut inv = InventoryState::new(1);
+        let mut existing = plain_item("existing", 15);
+        existing.binding = crate::item::BindingState::Bound;
+        existing.creator_id = Some(42);
+        inv.base_slots[0] = Some(existing.clone());
+        let mut incoming = existing.clone();
+        incoming.item_uuid = "incoming".into();
+        incoming.count = 5;
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &incoming),
+            Ok(InstanceInsertOutcome {
+                merged_count: 5,
+                retired_uuid: Some("incoming".into()),
+            })
+        );
+        existing.count = 20;
+        assert_eq!(inv.base_slots[0], Some(existing));
+        assert_eq!(inv.free_slots(), 0);
+    }
+
+    #[test]
+    fn exact_insert_incompatible_properties_do_not_merge() {
+        for variant in 0..5 {
+            let mut inv = InventoryState::new(2);
+            inv.base_slots[0] = Some(plain_item("existing", 5));
+            let mut incoming = plain_item("incoming", 5);
+            match variant {
+                0 => incoming.binding = crate::item::BindingState::Bound,
+                1 => incoming.creator_id = Some(42),
+                2 => {
+                    incoming.durability_current = Some(1);
+                    incoming.durability_max = Some(2);
+                }
+                3 => incoming.modifiers.quality_modifier = 1.0,
+                _ => {
+                    incoming
+                        .modifiers
+                        .attribute_modifiers
+                        .insert("kraft".into(), 1.0);
+                }
+            }
+            let outcome = inv.try_insert_instance(&potion(), &incoming).unwrap();
+            assert_eq!(outcome.merged_count, 0);
+            assert_eq!(outcome.retired_uuid, None);
+            assert_eq!(inv.base_slots[0], Some(plain_item("existing", 5)));
+            assert_eq!(inv.base_slots[1], Some(incoming));
+        }
+    }
+
+    #[test]
+    fn exact_insert_full_inventory_rolls_back_partial_stack_filling() {
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(plain_item("existing", 19));
+        inv.buffer.push(None); // even an empty buffer slot is not capacity
+        let before = inv.clone();
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &plain_item("incoming", 2)),
+            Err(InventoryError::NoSpace)
+        );
+        assert_eq!(inv, before);
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &exact_item("individual")),
+            Err(InventoryError::NoSpace)
+        );
+        assert_eq!(inv, before);
+    }
+
+    #[test]
+    fn exact_insert_rejects_uuid_collisions_in_every_location() {
+        for location in 0..4 {
+            let mut inv = InventoryState::new(2);
+            let item = plain_item("duplicate", 2);
+            match location {
+                0 => inv.base_slots[0] = Some(item.clone()),
+                1 => {
+                    inv.create_bag(&cfg(2), "Fixture", 1).unwrap();
+                    inv.bags[0].slots[0] = Some(item.clone());
+                }
+                2 => {
+                    inv.equipped.insert(EquipSlot::Food, item.clone());
+                }
+                _ => inv.buffer.push(Some(item.clone())),
+            }
+            let before = inv.clone();
+            assert_eq!(
+                inv.try_insert_instance(&potion(), &item),
+                Err(InventoryError::UuidCollision)
+            );
+            assert_eq!(inv, before);
+        }
+    }
+
+    #[test]
+    fn exact_insert_rejects_invalid_instances_and_amount_overflow() {
+        let mut inv = InventoryState::new(2);
+        let before = inv.clone();
+        for count in [0, -1, 21, i64::MAX] {
+            assert_eq!(
+                inv.try_insert_instance(&potion(), &plain_item("incoming", count)),
+                Err(InventoryError::InvalidQuantity)
+            );
+            assert_eq!(inv, before);
+        }
+        let mut wrong = plain_item("", 1);
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &wrong),
+            Err(InventoryError::InvalidInstance)
+        );
+        wrong.item_uuid = "incoming".into();
+        wrong.item_id = "wrong-definition".into();
+        assert_eq!(
+            inv.try_insert_instance(&potion(), &wrong),
+            Err(InventoryError::InvalidInstance)
+        );
+        assert_eq!(inv, before);
+        let mut def = potion();
+        def.max_stack = i64::MAX;
+        inv.base_slots[0] = Some(plain_item("large", i64::MAX - 1));
+        let before = inv.clone();
+        assert_eq!(
+            inv.try_insert_instance(&def, &plain_item("incoming", 2)),
+            Err(InventoryError::QuantityOverflow)
+        );
+        assert_eq!(inv, before);
+        // Boundary succeeds without an overflowing addition.
+        assert_eq!(
+            inv.try_insert_instance(&def, &plain_item("incoming", 1))
+                .unwrap()
+                .merged_count,
+            1
+        );
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().count, i64::MAX);
+    }
+
+    #[test]
+    fn exact_take_insert_roundtrip_preserves_stock_and_properties() {
+        for count in [4, 10] {
+            let mut inv = InventoryState::new(2);
+            inv.base_slots[0] = Some(exact_item("individual"));
+            let taken = inv.try_take_instance("individual", count).unwrap();
+            let result = inv.try_insert_instance(&potion(), &taken).unwrap();
+            assert_eq!(result.retired_uuid, None);
+            assert_eq!(inv.count_of("hp_potion"), 10);
+            assert_eq!(inv.instance_of(&taken.item_uuid), Some(taken));
+        }
+        // A plain split can merge back, but its abandoned UUID is explicit.
+        let mut inv = InventoryState::new(1);
+        inv.base_slots[0] = Some(plain_item("original", 10));
+        let before = inv.clone();
+        let taken = inv.try_take_instance("original", 4).unwrap();
+        let result = inv.try_insert_instance(&potion(), &taken).unwrap();
+        assert_eq!(result.retired_uuid, Some(taken.item_uuid));
+        assert_eq!(inv, before);
     }
 
     #[test]
