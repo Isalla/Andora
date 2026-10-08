@@ -26,6 +26,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+use crate::item::ItemInstance;
+
 /// Maximale Einträge der Sell-/Buyback-History (docs/Handelssystem.md §3).
 pub const SELL_HISTORY_LIMIT: usize = 20;
 
@@ -55,23 +57,41 @@ pub fn now_ms() -> i64 {
 }
 
 /// Ein Verkaufseintrag der nicht-persistenten Runtime-History
-/// (docs/Handelssystem.md §3): verkaufte Item-/Stack-Identität, tatsächlich
-/// verkaufte Menge und erhaltener Verkaufswert (Rückkaufpreis-Anschluss für
-/// den späteren Händler-Spiellayer; Preise/Angebote sind nicht Teil dieses
-/// Auftrags).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// (docs/Handelssystem.md §3/§6): das verkaufte Exemplar mit ALLEN
+/// Eigenschaften (exakter vollständiger Buyback, kein Teilrückkauf) und der
+/// erhaltene Gesamtbetrag (Rückkaufpreis, keine Gebühr).
+///
+/// Kein `Eq`: `ItemInstance` trägt f64-Felder und implementiert nur
+/// `PartialEq` — für History-Vergleiche genügt das.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SellHistoryEntry {
-    pub item_id: String,
-    pub item_uuid: String,
-    pub count: i64,
+    pub instance: ItemInstance,
     pub sell_gold_value: i64,
+}
+
+impl SellHistoryEntry {
+    /// Eindeutige History-Kennung: die verkaufte Instanz-UUID. Sie ist je
+    /// Spieler-Session eindeutig, weil eine UUID das Inventar erst nach
+    /// Verbrauch des Eintrags (Buyback) wieder betreten und damit erneut
+    /// verkauft werden kann.
+    pub fn item_id(&self) -> &str {
+        self.instance.item_id.as_str()
+    }
+
+    pub fn item_uuid(&self) -> &str {
+        self.instance.item_uuid.as_str()
+    }
+
+    pub fn count(&self) -> i64 {
+        self.instance.count
+    }
 }
 
 /// Sell-/Buyback-History einer laufenden Player-Session: spielergebunden,
 /// maximal 20 Einträge, FIFO. Bewusst NICHT serialisierbar (kein Snapshot-,
 /// kein DB-Pfad führt hierher); am Session-Ende wird sie verworfen, indem
 /// der Spieler samt World-Einträgen entfernt wird.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SellHistory {
     entries: VecDeque<SellHistoryEntry>,
 }
@@ -93,7 +113,7 @@ impl SellHistory {
     /// Verbraucht den Eintrag einer UUID für den Rückkauf (atomar: kein
     /// Teilrückkauf, docs/Handelssystem.md §7/§8). `None` = nicht enthalten.
     pub fn take_for_buyback(&mut self, item_uuid: &str) -> Option<SellHistoryEntry> {
-        let pos = self.entries.iter().position(|e| e.item_uuid == item_uuid)?;
+        let pos = self.entries.iter().position(|e| e.item_uuid() == item_uuid)?;
         self.entries.remove(pos)
     }
 
@@ -444,10 +464,10 @@ mod tests {
     const NOW: i64 = 1_700_000_000_000;
 
     fn entry(uuid: &str) -> SellHistoryEntry {
+        let mut inst = ItemInstance::new(uuid, "hp_potion", crate::item::ItemModifiers::default());
+        inst.count = 3;
         SellHistoryEntry {
-            item_id: "hp_potion".into(),
-            item_uuid: uuid.into(),
-            count: 3,
+            instance: inst,
             sell_gold_value: 30,
         }
     }
@@ -473,7 +493,7 @@ mod tests {
             h.record(entry(&format!("u{i}")));
         }
         assert_eq!(h.len(), 20);
-        let uuids: Vec<&str> = h.iter().map(|e| e.item_uuid.as_str()).collect();
+        let uuids: Vec<&str> = h.iter().map(|e| e.item_uuid()).collect();
         assert!(!uuids.contains(&"u0"), "ältester Eintrag verdrängt");
         assert!(!uuids.contains(&"u4"), "u0..u4 verdrängt");
         assert!(uuids.contains(&"u5"), "u5 bleibt als ältester");
@@ -486,8 +506,8 @@ mod tests {
         h.record(entry("u1"));
         h.record(entry("u2"));
         let taken = h.take_for_buyback("u1").expect("Eintrag vorhanden");
-        assert_eq!(taken.item_uuid, "u1");
-        assert_eq!(taken.count, 3);
+        assert_eq!(taken.item_uuid(), "u1");
+        assert_eq!(taken.count(), 3);
         assert_eq!(taken.sell_gold_value, 30);
         assert_eq!(h.len(), 1);
         assert!(h.take_for_buyback("u1").is_none(), "kein Duplikat");

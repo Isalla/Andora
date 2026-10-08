@@ -1,11 +1,13 @@
-# Andora – Sell-/Buyback-History (NPC-Händlerverkauf)
+# Andora – NPC-Händlerverkauf (Sell-/Buyback-History und Spiellayer)
 
 ## Status
 
-**Dokumentation (verbindliche Regel, noch nicht implementiert).**
+**Implementiert (Händler-Spiellayer eingebaut; Content-Preise ausgenommen).**
 
 Dieser Abschnitt definiert die Sell-/Buyback-History für an NPC-Händler
-verkaufte Items. Er ergänzt die bestehenden autoritativen Regeln:
+verkaufte Items sowie den serverseitigen Händler-Spiellayer
+(`src/realm-rs/src/trade.rs`, Handler `handle_npc_talk`, Protokoll §13,
+Umsetzung §14). Er ergänzt die bestehenden autoritativen Regeln:
 
 * `inventory_system.md` – Inventar, Persistenz, Sicherheits-Puffer (§10/§11),
   Item-Lifecycle (§16)
@@ -135,8 +137,9 @@ Snapshot-Inventar steht noch in der DB referenziert ist. Die Abkopplung
 erfolgt über die Inventar-Anschlussstellen (`try_take_instance`,
 `retired_uuid` aus `try_insert_instance`); die Sell-/Buyback-History selbst
 bleibt dabei reiner Runtime-State (Abschnitt 10) und ist kein
-Finalisierungsnachweis. Details regelt `inventory_system.md` §18; Händlerhandler,
-Preise und Angebote folgen mit dem späteren Händler-Spiellayer.
+Finalisierungsnachweis. Details regelt `inventory_system.md` §18; der
+Händler-Spiellayer (Abschnitt 14) verdrahtet Verkauf, Buyback und
+Lifecycle-Abkopplung.
 
 ---
 
@@ -288,3 +291,28 @@ Bestehende Regeln hierzu bleiben unverändert autoritativ.
 | `Quest-System.md` §27.19 | Questitems nach Abbruch: an geeignete NPC-Händler verkäuflich, ohne konkrete Preisvorgaben |
 | `Player_Persistenz.md` | Sell-/Buyback-History ausdrücklich nicht Teil der Dirty-/Persistenzkomponenten |
 | `Datenbank_Architektur.md` | Händler-Grunddaten als statische Realm-Definitionen (Realm-DB); Verkäufe als realmgebundene Operation |
+
+---
+
+## 13. Händlerprotokoll (NPC_TALK/NPC_TEXT, eingebaut)
+
+`NPC_TALK` (C2S 6) trägt `{npc_id, action, item_id?, item_uuid?, history_id?, count?}` mit `action` = `open`/`buy`/`sell`/`buyback`. IDs unverändert (`protocol.rs`, `shared/protocol.gd` numerisch identisch).
+
+* `open` `{npc_id}`: Antwort mit Sortiment (`offers`: je `{item_id, name, buy_price, sell_price}`, `null` = nicht angeboten/nicht angenommen) und aktueller History.
+* `buy` `{npc_id, item_id, count}`: Kauf aus unbegrenztem Angebot zu `buy_price × count` (geprüfte Arithmetik).
+* `sell` `{npc_id, item_uuid, count}`: Verkauf einer konkreten Inventar-Instanz (Voll- oder Teilmenge) zu `sell_price × count`.
+* `buyback` `{npc_id, history_id}`: Rückkauf des vollständigen History-Eintrags zum erhaltenen Gesamtbetrag. `history_id` ist die verkaufte Instanz-UUID (je Session eindeutig); kein Teilrückkauf, keine Mengenangabe.
+
+Erfolg antwortet `NPC_TEXT` mit `{ok: true, action, npc_id, merchant_name, idia, history[]}` plus je Aktion `offers`/`item_id`/`item_uuid`/`count`/`total_price`. Ablehnung antwortet `{ok: false, action?, reason}` mit stabilem `reason` (`unknown_action`, `unknown_npc`, `not_a_merchant`, `merchant_unavailable`, `out_of_range`, `offer_unavailable`, `no_sell_price`, `invalid_quantity`, `not_in_inventory`, `not_enough_items`, `bound_item`, `quest_item_protected`, `quest_data_unavailable`, `price_overflow`, `insufficient_idia`, `inventory_full`, `history_expired`). `quest_data_unavailable` bedeutet: Eine ACTIVE Quest ist ohne registrierte Definition nicht auf Itemschutz prüfbar — der Verkauf wird kontrolliert abgelehnt (fail-closed), statt Schutzlosigkeit anzunehmen. Clientpreise und behauptete Endwerte sind nicht maßgeblich; `seq` ist Korrelation und wird zurückgespiegelt (wiederholte gültige Absichten sind weitere Operationen).
+
+## 14. Händler-Spiellayer (Umsetzung, eingebaut)
+
+Kern ist `trade::attempt_trade` (reine World-Mutation, unter der ausführenden World-Sperre; Ownership löst der Handler davor auf):
+
+* Je Aktion: NPC-Existenz, Händlerrolle (Katalog je Spawn, Migration 022), lebendiger Zustand, Reichweite zur bestehenden Interaktionsreichweite (`LOOT_PICKUP_RADIUS`, dokumentierte Wiederverwendung: Interaktionsradius für Weltobjekte).
+* Kauf: Angebot + `buy_price` vorhanden, Menge > 0, geprüfter Gesamtpreis, ausreichendes Idia, volle Kapazität (`fits`).
+* Verkauf: UUID eindeutig im Basis-/Tascheninventar (Equipment/Puffer/leer/mehrdeutig → `not_in_inventory`), ausreichende Menge, NPC-Verkäuflichkeit (Instanzenstatus UND Definitionsregel `tradeable`, nicht ungeprüft mit Spielerhandel-`can_trade` gleichgesetzt), Questschutz mit fail-closed-Dreiwegeunterscheidung: keine ACTIVE Quest → normale Prüfung; alle ACTIVEen Quests auflösbar → Sammel-/Bringziele geschützt (`Quest-System.md` §27.19; nach Abbruch/Abschluss frei, §27.20); mindestens eine ACTIVE Quest ohne Definition → kontrollierte Ablehnung `quest_data_unavailable` (fehlende Definition ist nicht „kein geschütztes Item"). Loader-Voraussetzung: Questzuordnungen werden beim Einstieg zuverlässig geladen (einsteigungsverweigernd bei Fehler); ein produktiver Questdefinitions-Loader existiert nicht — das wird hier nicht behauptet. Hinterlegter `sell_price`, geprüfter Gesamtpreis und Idia-Raum.
+* Buyback: Eintrag per `history_id` vorhanden (verbraucht → `history_expired`), Definition bekannt, ausreichendes Idia, volle Kapazität — händlerübergreifend ohne Angebotszwang.
+* Mutation gemeinsam oder gar nicht: Entnahme per `try_take_instance` (Teilentnahme erhält Eigenschaften, neue UUID), Idia-Buchung mit geprüfter Arithmetik, History-Eintrag mit vollständigem Exemplar (FIFO 20), Lifecycle-Verrechnung (`reconcile_after_take`/`reconcile_after_insert`, `retired_uuid`), `Inventory`+`Idia` dirty. Ablehnung verändert nichts (kein Dirty, keine History-/Lifecycle-Mutation). Keine separate unrevisionierte DB-Löschung: Instanzzeilen fallen ausschließlich über den revisionsgebundenen Drain (`inventory_system.md` §18).
+
+Nicht Teil dieses Auftrags: Händler-Content-Erstellung (Preise/Sortimente pflegt der Content-Betrieb je RealmDB, keine Seed-Preise in Migration 022), Godot-Client-UI, Spielerhandel (Player-to-Player).

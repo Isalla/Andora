@@ -1002,9 +1002,15 @@ mod tests {
                 .entry("p".into())
                 .or_default()
                 .record(crate::item_lifecycle::SellHistoryEntry {
-                    item_id: "hp_potion".into(),
-                    item_uuid: "verkauft-1".into(),
-                    count: 1,
+                    instance: {
+                        let mut inst = crate::item::ItemInstance::new(
+                            "verkauft-1",
+                            "hp_potion",
+                            crate::item::ItemModifiers::default(),
+                        );
+                        inst.count = 1;
+                        inst
+                    },
                     sell_gold_value: 5,
                 });
         }

@@ -967,7 +967,10 @@ async fn dispatch(
                 parental::handle_message(&ctx.parental, tx, &pid, frame.seq, action, pin).await;
             }
         }
-        // NPC_TALK / AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
+        c2s::NPC_TALK => {
+            handlers::handle_npc_talk(ctx, tx, conn_id, frame.seq, &data).await
+        }
+        // AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
         // Unbekannte Typen werden bereits vor dem Gate verworfen.
         other => log::info!("unknown type {other}"),
     }
@@ -5691,5 +5694,340 @@ mod tests {
                 "diese Formen sind kein Gate-Verstoß, sondern Handler-Entscheidung: {text}"
             );
         }
+    }
+
+    // ---- NPC-Handel: Dispatch-Tests (echter Dispatcher) ----
+    //
+    // Diese Tests rufen den echten `dispatch` auf (Routing Typ 6 → Handler
+    // inklusive Gate) und prüfen Zustand plus Antwort. Die Fachlogik ist in
+    // trade.rs direkt getestet, die Antwortformen am Handler; hier geht es
+    // ausschließlich um den Produktions-Dispatchpfad. Wenige Frames je Test
+    // (Rate-Budget der Selten-Klasse, keine Sleeps).
+
+    /// Händlerwelt für Dispatch: Spieler "a" (0,0, 500 Idia, 5 Tränke),
+    /// Händler npc_5 (1,0), Eigentümer-Verbindung 7.
+    async fn insert_trade_dispatch_world(ctx: &Arc<Ctx>) {
+        {
+            let mut w = ctx.shared.lock().await;
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            let mut p = crate::world::Player {
+                id: "a".into(),
+                name: "a".into(),
+                x: 0.0,
+                y: 0.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 100,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 1,
+                session_id: String::new(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 500,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                last_strike: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Default::default(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: crate::inventory::InventoryState::new(8),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            };
+            let mut def = crate::item::ItemDefinition::new(
+                "hp_potion",
+                "Heiltrank",
+                crate::item::ItemCategory::Potion,
+            );
+            def.max_stack = 20;
+            assert_eq!(p.inventory.try_add(&def, 5).remainder, 0);
+            w.players.insert("a".into(), p);
+            w.by_conn.insert(7, "a".into());
+            w.npcs.insert(
+                "npc_5".into(),
+                crate::npc::Npc {
+                    id: "npc_5".into(),
+                    spawn_id: 5,
+                    name: "Borin".into(),
+                    kind: "named".into(),
+                    attackable: false,
+                    aggressive: false,
+                    aggro_range: 0.0,
+                    attack_range: 0.0,
+                    attack_duration_ms: 0,
+                    weapon_damage: 0,
+                    weapon_skill: 0,
+                    armor: 0,
+                    max_hp: 100,
+                    move_speed: 0.0,
+                    respawn_ms: 0,
+                    faction: None,
+                    exp_reward: 0,
+                    level: 1,
+                    loot_table_id: None,
+                    pack_id: None,
+                    home_x: 1.0,
+                    home_y: 0.0,
+                    home_radius: 1.0,
+                    leash_radius: 1.0,
+                    status: crate::npc::NpcStatus::Alive,
+                    hp: 100,
+                    x: 1.0,
+                    y: 0.0,
+                    target_id: None,
+                    last_attack: std::time::Instant::now(),
+                    no_link_since: None,
+                    return_started_at: None,
+                    respawn_after: None,
+                    claimed_by: None,
+                    override_ctx: None,
+                    effects: Default::default(),
+                    cooldowns: Default::default(),
+                    active_cast: None,
+                },
+            );
+            w.item_definitions.insert("hp_potion".into(), def);
+            let mut catalog = crate::trade::MerchantCatalog::default();
+            catalog.merchants.insert(5);
+            catalog.offers.insert(
+                (5, "hp_potion".into()),
+                crate::trade::MerchantOffer {
+                    buy_price: Some(10),
+                    sell_price: Some(4),
+                },
+            );
+            w.merchant_catalog = catalog;
+        }
+    }
+
+    /// Ein NPC_TALK-Frame durch den echten Dispatcher (kein Verbindungsabbruch).
+    async fn dispatch_npc_talk(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        seq: i64,
+        data: serde_json::Value,
+    ) {
+        let frame = crate::protocol::Frame::new(seq, crate::protocol::c2s::NPC_TALK, data);
+        assert!(
+            !dispatch(ctx, tx, 7, guard, sec_cfg, frame, &Instant::now).await,
+            "NPC-Handel trennt die Verbindung nicht"
+        );
+    }
+
+    fn npc_text_answers(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            let f: crate::protocol::Frame = serde_json::from_str(&m).expect("Frame lesbar");
+            if f.msg_type == crate::protocol::s2c::NPC_TEXT {
+                out.push(f.data);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn dispatch_npc_talk_routes_buy_to_handler() {
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            11,
+            serde_json::json!({
+                "npc_id": "npc_5", "action": "buy", "item_id": "hp_potion", "count": 2
+            }),
+        )
+        .await;
+        let answers = npc_text_answers(&mut rx);
+        assert_eq!(answers.len(), 1, "genau eine Händlerantwort");
+        assert_eq!(answers[0]["ok"], true);
+        assert_eq!(answers[0]["total_price"], 20);
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].idia, 480);
+        assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 7);
+    }
+
+    #[tokio::test]
+    async fn dispatch_repeated_same_seq_buys_twice() {
+        // Wiederholte gültige Absicht (gleiche seq!) = weitere Operation;
+        // seq bleibt Korrelation und wird nur zurückgespiegelt.
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for _ in 0..2 {
+            dispatch_npc_talk(
+                &ctx,
+                &mut guard,
+                &sec_cfg,
+                &tx,
+                5,
+                serde_json::json!({
+                    "npc_id": "npc_5",
+                    "action": "buy",
+                    "item_id": "hp_potion",
+                    "count": 1
+                }),
+            )
+            .await;
+        }
+        let answers = npc_text_answers(&mut rx);
+        assert_eq!(answers.len(), 2);
+        assert!(answers.iter().all(|v| v["ok"] == true));
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].idia, 480, "zweimal abgebucht");
+        assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 7);
+    }
+
+    #[tokio::test]
+    async fn dispatch_sell_then_buyback_roundtrip() {
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let uuid = ctx.shared.lock().await.players["a"].inventory.base_slots[0]
+            .as_ref()
+            .unwrap()
+            .item_uuid
+            .clone();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            1,
+            serde_json::json!({"npc_id": "npc_5", "action": "sell", "item_uuid": uuid, "count": 5}),
+        )
+        .await;
+        // Verkaufte UUID aus der History lesen (Buyback-Kennung).
+        let hid = ctx.shared.lock().await.sell_history["a"]
+            .iter()
+            .next()
+            .unwrap()
+            .item_uuid()
+            .to_string();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            2,
+            serde_json::json!({"npc_id": "npc_5", "action": "buyback", "history_id": hid}),
+        )
+        .await;
+        let answers = npc_text_answers(&mut rx);
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[1]["ok"], true);
+        assert_eq!(answers[1]["item_uuid"], hid);
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 5);
+        assert_eq!(w.players["a"].idia, 500, "20 erhalten, 20 zurück");
+        assert!(w.sell_history["a"].is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_merchant_leaves_state() {
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            1,
+            serde_json::json!({"npc_id": "npc_99", "action": "open"}),
+        )
+        .await;
+        let answers = npc_text_answers(&mut rx);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0]["ok"], false);
+        assert_eq!(answers[0]["reason"], "unknown_npc");
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].idia, 500);
+        assert!(!w.players["a"].dirty.any());
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_sale_with_unresolvable_quest() {
+        // Echter Dispatcher: ACTIVE Quest ohne Definition → kontrollierte
+        // Ablehnung ohne Mutation (kein fail-open im Produktionspfad).
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        {
+            let mut w = ctx.shared.lock().await;
+            w.players.get_mut("a").unwrap().quests.insert(
+                "q_fremd".into(),
+                crate::quest::CharacterQuestState {
+                    quest_id: "q_fremd".into(),
+                    state: crate::quest::QuestState::Active,
+                    progress: vec![],
+                    started_at_ms: None,
+                    completed_at_ms: None,
+                },
+            );
+        }
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let uuid = ctx.shared.lock().await.players["a"].inventory.base_slots[0]
+            .as_ref()
+            .unwrap()
+            .item_uuid
+            .clone();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            1,
+            serde_json::json!({
+                "npc_id": "npc_5", "action": "sell", "item_uuid": uuid, "count": 1
+            }),
+        )
+        .await;
+        let answers = npc_text_answers(&mut rx);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0]["ok"], false);
+        assert_eq!(answers[0]["reason"], "quest_data_unavailable");
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 5);
+        assert_eq!(w.players["a"].idia, 500);
+        assert!(!w.players["a"].dirty.any());
     }
 }

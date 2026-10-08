@@ -212,6 +212,10 @@ pub struct World {
     /// Erst der maßgebliche Snapshot trägt sie — `disconnect_conn` entfernt
     /// sie deshalb erst nach dem finalen Flush.
     pub item_lifecycle: HashMap<String, crate::item_lifecycle::ItemLifecycle>,
+    /// Händlerkatalog des Realms (Content-Schicht, Migration 022):
+    /// Händlerrolle je NPC-Spawn plus Sortiment mit Kauf-/Verkaufspreisen.
+    /// Wird beim Start aus der RealmDB geladen (docs/Handelssystem.md).
+    pub merchant_catalog: crate::trade::MerchantCatalog,
     /// NPC-/Monster-Registry (Combat V2): key = npc_id().
     pub npcs: HashMap<String, crate::npc::Npc>,
     /// Statische Item-Definitionen (Item System V1, Content-Schicht).
@@ -265,6 +269,7 @@ impl World {
             loot_next_id: 1,
             sell_history: HashMap::new(),
             item_lifecycle: HashMap::new(),
+            merchant_catalog: crate::trade::MerchantCatalog::default(),
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             peer_addrs: HashMap::new(),
@@ -1186,9 +1191,15 @@ mod tests {
             .entry(id.to_string())
             .or_default()
             .record(crate::item_lifecycle::SellHistoryEntry {
-                item_id: "hp_potion".into(),
-                item_uuid: "verkauft-1".into(),
-                count: 3,
+                instance: {
+                    let mut inst = crate::item::ItemInstance::new(
+                        "verkauft-1",
+                        "hp_potion",
+                        crate::item::ItemModifiers::default(),
+                    );
+                    inst.count = 3;
+                    inst
+                },
                 sell_gold_value: 30,
             });
         crate::item_lifecycle::reconcile_after_take(

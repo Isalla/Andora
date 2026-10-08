@@ -2027,6 +2027,55 @@ pub async fn finalize_detached_item_instances(
     Ok(report)
 }
 
+// ===== NPC-Händlerkatalog (Migration 022, docs/Handelssystem.md) =====
+// Content-Schicht je RealmDB: Händlerrolle je NPC-Spawn plus Sortiment mit
+// Kauf-/Verkaufspreisen (Idia, absolute Beträge). Unbegrenzter Bestand
+// (keine Mengen-/Quotenspalten). Ungültige Zeilen (negative Preise,
+// beidseitig NULL) werden übersprungen und protokolliert — fail-closed: kein
+// Angebot ohne expliziten Preis. Zeilen mit unbekannter Item-ID bleiben
+// stehen und gelten laufzeitseitig als nicht angeboten (Definition fehlt im
+// RAM-Katalog, `trade::attempt_trade` lehnt dann mit `offer_unavailable` ab).
+
+/// Lädt den Händlerkatalog (Händlerrolle + Sortiment mit Preisen).
+pub async fn load_merchant_catalog(
+    pool: &Pool<MySql>,
+) -> Result<crate::trade::MerchantCatalog, String> {
+    let spawns: Vec<i64> = sqlx::query_scalar("SELECT spawn_id FROM npc_merchants")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Händlerrollen laden: {e}"))?;
+    let rows: Vec<(i64, String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT spawn_id, item_id, buy_price_idia, sell_price_idia FROM merchant_offers",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Händlerangebote laden: {e}"))?;
+    let mut catalog = crate::trade::MerchantCatalog::default();
+    for spawn_id in spawns {
+        catalog.merchants.insert(spawn_id);
+    }
+    for (spawn_id, item_id, buy_price, sell_price) in rows {
+        let valid = match (buy_price, sell_price) {
+            (None, None) => false,
+            (Some(b), _) if b < 0 => false,
+            (_, Some(s)) if s < 0 => false,
+            _ => true,
+        };
+        if !valid {
+            log::warn!("Händlerangebot ohne gültigen Preis übersprungen");
+            continue;
+        }
+        catalog.offers.insert(
+            (spawn_id, item_id),
+            crate::trade::MerchantOffer {
+                buy_price,
+                sell_price,
+            },
+        );
+    }
+    Ok(catalog)
+}
+
 /// Quest-Zeile aus der Tabelle `quests` (docs/Quest-System.md §27/Quest V1,
 /// Migration 004_quests.sql). Die rohe TINYINT-Spalte `state` wird erst im
 /// QuestService auf den Questzustand abgebildet (ACTIVE=1, COMPLETED=2,

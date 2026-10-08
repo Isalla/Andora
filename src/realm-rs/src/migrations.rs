@@ -332,8 +332,9 @@ mod tests {
 
     /// Das ausgelieferte Migrationsverzeichnis folgt dem Projektmuster:
     /// lückenlos ab 1 nummeriert, einschließlich der
-    /// Lifecycle-Metadaten-Migration (021). Nur Dateiebene — es wird keine
-    /// Migration ausgeführt und keine Datenbank berührt.
+    /// Lifecycle-Metadaten-Migration (021) und der Händler-Migration (022).
+    /// Nur Dateiebene — es wird keine Migration ausgeführt und keine
+    /// Datenbank berührt.
     #[test]
     fn shipped_migrations_are_gapless_including_lifecycle() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
@@ -341,11 +342,11 @@ mod tests {
         let nums: Vec<u32> = files.iter().map(|f| f.num).collect();
         assert_eq!(
             nums,
-            (1..=21).collect::<Vec<_>>(),
-            "Migrationen 001–021 lückenlos"
+            (1..=22).collect::<Vec<_>>(),
+            "Migrationen 001–022 lückenlos"
         );
         let last = files.last().expect("mindestens eine Migration");
-        assert_eq!((last.num, last.tag.as_str()), (21, "item_lifecycle"));
-        assert_eq!(last.file, "021_item_lifecycle.sql");
+        assert_eq!((last.num, last.tag.as_str()), (22, "merchant_trading"));
+        assert_eq!(last.file, "022_merchant_trading.sql");
     }
 }

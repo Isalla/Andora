@@ -10,6 +10,9 @@ const C2S = {
 	"GROUP_SUGGEST_DECIDE": 16, "GROUP_LEAVE": 17, "GROUP_KICK": 18,
 	"GROUP_TRANSFER": 19, "SPEND_ATTRIBUTE": 20
 }
+# NPC_TALK (6) Händler-Payload (docs/Handelssystem.md §13):
+# {npc_id, action, item_id?, item_uuid?, history_id?, count?} mit
+# action = open/buy/sell/buyback. Buyback nur per history_id (volle Einträge).
 
 const S2C = {
 	"WELCOME": 1, "SPAWN": 2, "DESPAWN": 3, "STATE": 4, "DAMAGE": 5,
@@ -20,6 +23,10 @@ const S2C = {
 	"GROUP_INFO": 18, "GROUP_INVITE_S2C": 19, "GROUP_TOAST": 20,
 	"ATTRIBUTE_RESULT": 21
 }
+# NPC_TEXT (8) Händlerantwort (docs/Handelssystem.md §13):
+# Erfolg {ok: true, action, npc_id, merchant_name, idia, history[]} plus je
+# Aktion offers/item_id/item_uuid/count/total_price; Ablehnung
+# {ok: false, action?, reason} mit stabilem reason.
 
 static func encode(seq: int, msg_type: int, data) -> String:
 	return JSON.stringify({"seq": seq, "type": msg_type, "data": data})

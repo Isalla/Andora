@@ -31,6 +31,7 @@ mod protocol;
 mod security;
 mod session_watch;
 mod spool;
+mod trade;
 mod world;
 
 use std::path::PathBuf;
@@ -289,6 +290,20 @@ async fn async_main() -> Result<(), String> {
     {
         let mut w = tick_shared.lock().await;
         w.loot_tables = loot_tables;
+    }
+
+    // Händlerkatalog (NPC-Handel, Migration 022): Händlerrolle je NPC-Spawn
+    // plus Sortiment mit Kauf-/Verkaufspreisen je RealmDB. Ein Ladefehler
+    // bremst den Start (kein halber Realm).
+    let merchant_catalog = db::load_merchant_catalog(&pool).await?;
+    log::info!(
+        "{} Händler, {} Angebote geladen",
+        merchant_catalog.merchants.len(),
+        merchant_catalog.offers.len()
+    );
+    {
+        let mut w = tick_shared.lock().await;
+        w.merchant_catalog = merchant_catalog;
     }
 
     let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);

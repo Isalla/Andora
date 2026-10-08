@@ -13,7 +13,7 @@ pub mod c2s {
     pub const ATTACK: i64 = 3; // {target_id} start / {stop: true} beenden (Combat V1)
     pub const PICKUP: i64 = 4; // {loot_id} (Loot System V1)
     pub const CHAT: i64 = 5; // {channel, text}
-    pub const NPC_TALK: i64 = 6; // {npc_id, text} (künftig)
+    pub const NPC_TALK: i64 = 6; // Händler: {npc_id, action, item_id?, item_uuid?, history_id?, count?} (docs/Handelssystem.md §13)
     pub const AUCTION_LIST: i64 = 7; // (künftig)
     pub const AUCTION_BID: i64 = 8; // (künftig)
     pub const AUCTION_BUY: i64 = 9; // (künftig)
@@ -46,7 +46,7 @@ pub mod s2c {
     pub const DAMAGE: i64 = 5; // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
     pub const KILL: i64 = 6; // {id, killer_id}
     pub const LOOT: i64 = 7; // {id, kind, x, y, claimed[, item_id, count | gold]} (Loot System V1)
-    pub const NPC_TEXT: i64 = 8; // (künftig)
+    pub const NPC_TEXT: i64 = 8; // Händlerantwort: {ok, action?, reason?, offers?, history?, idia?, ...} (docs/Handelssystem.md §13)
     pub const CHAT: i64 = 9; // {from, channel, text}
     pub const LEVELUP: i64 = 10; // (künftig)
     pub const SYNC: i64 = 11; // {ack_seq}
@@ -100,6 +100,7 @@ mod tests {
         assert_eq!(c2s::HELLO, 1);
         assert_eq!(c2s::MOVE, 2);
         assert_eq!(c2s::CHAT, 5);
+        assert_eq!(c2s::NPC_TALK, 6);
         assert_eq!(c2s::HEARTBEAT, 10);
         assert_eq!(c2s::PARENTAL, 11);
         assert_eq!(c2s::ABILITY, 12);
@@ -107,6 +108,7 @@ mod tests {
         assert_eq!(s2c::SPAWN, 2);
         assert_eq!(s2c::DESPAWN, 3);
         assert_eq!(s2c::STATE, 4);
+        assert_eq!(s2c::NPC_TEXT, 8);
         assert_eq!(s2c::CHAT, 9);
         assert_eq!(s2c::SYNC, 11);
         assert_eq!(s2c::PARENTAL_STATUS, 13);

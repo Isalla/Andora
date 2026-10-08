@@ -633,11 +633,11 @@ kein geprüfter Zustand.
   `item_instance_finalizations`, Migration 021): ermöglichen nur Zuordnung und
   kontrollierte Finalisierung abgekoppelter UUIDs.
 
-**Anschlussstellen (ohne Händlerhandler, Preise oder Angebote):**
+**Anschlussstellen (Händler-Spiellayer verwendet sie, `trade.rs`):**
 `try_take_instance` (Vollentnahme) und `try_insert_instance` (`retired_uuid`
 bei Vollverschmelzung) liefern die Abkopplungen; die Verrechnung
 (`reconcile_after_take`/`reconcile_after_insert`, Buyback-Aufhebung vor dem
-Snapshot) steht für den späteren Händler-Spiellayer bereit. Die
+Snapshot) nutzt der Händler-Spiellayer für Verkauf und Buyback. Die
 Dirty-Markierung bleibt Aufgabe des aufrufenden Spiellayers (§17): Ohne
 Dirty-State entsteht kein Snapshot und keine Finalisierung. Ein Teilstack-Rest
 behält seine UUID und ist dadurch vor Finalisierung geschützt.
