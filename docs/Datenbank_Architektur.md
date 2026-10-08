@@ -715,25 +715,35 @@ NPC-Erinnerungen, persönliche Beziehungen und Shared Knowledge werden nicht in 
 
 ---
 
-## 17. Mehrere technische Realm-Prozesse
+## 17. Ein Realm-Serverprozess je Realm-Datenbank (Single-Process-Betriebsvertrag)
 
-Ein Realm kann später aus mehreren technischen Serverprozessen bestehen.
-
-Diese Prozesse gehören weiterhin zum selben Realm und dürfen denselben Realm-State verwenden.
+Für diesen Stand gilt verbindlich: Genau **ein** Realm-Serverprozess je
+Realm-Datenbank (`realm_state_<realm>`). Jede RealmDB enthält ihren
+vollständigen eigenen Content und veränderlichen Spielzustand; es gibt
+**keine** gemeinsame Content-DB.
 
 Beispiel:
 
 ```text
 Realm DE-1
 
-Realm-Prozess 1 ─┐
-Realm-Prozess 2 ─┼── realm_state_de1
-Realm-Prozess 3 ─┘
+genau ein Realm-Serverprozess ── realm_state_de1 (Content + Spielzustand)
 ```
 
 Das erzeugt keine neue Welt und keine getrennten Charakterdatenbanken.
 
 Ein neuer öffentlicher Realm benötigt dagegen eine eigene persistente Realm-Datenbank.
+
+Die frühere Planung mehrerer gleichzeitig autoritativer technischer
+Realm-Prozesse derselben RealmDB ist für diesen Stand überholt und nicht mehr
+bindend (siehe `Login_Realm_Architektur.md`, Abschnitt „Realm-Server“).
+Lua-Worker innerhalb des Realm-Prozesses bleiben unverändert.
+
+**Grenze des Vertrags:** Die Einprozess-Regel ist ein **Betriebsvertrag**, kein
+bereits implementierter technischer Doppelstartschutz. Ein vertragswidriger
+paralleler Start mehrerer Realm-Serverprozesse gegen dieselbe RealmDB wird vom
+Realm-Server derzeit **nicht** technisch verhindert; für diesen Fall wird
+**keine** Sicherheit behauptet.
 
 ---
 

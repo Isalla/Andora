@@ -147,6 +147,22 @@ pub struct PersistSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooldowns: Option<std::collections::BTreeMap<String, i64>>,
     pub inventory: InventoryState,
+    /// Item-Lifecycle-Metadaten (docs/inventory_system.md §18, Migration
+    /// 021): ausstehende UUID-Abkopplungen dieses Snapshots zur Zuordnung
+    /// und kontrollierten Finalisierung im Drain.
+    ///
+    /// - `Some(view)` = neues Format: der Drain schreibt die Metadaten
+    ///   vollständig neu und finalisiert zulässige Instanzen — in derselben
+    ///   Transaktion wie Inventar, Idia und `persist_revision`. Eine bewusst
+    ///   leere Sicht bereinigt zuvor gespeicherte Metadaten.
+    /// - `None` = **Altformat**: das Feld fehlt in der Datei. Solche Dateien
+    ///   bleiben lesbar; der Drain lässt Metadaten und Instanzen dabei
+    ///   **unberührt** (kein Ersetzen, keine Löschung).
+    ///
+    /// Die Sell-/Buyback-History ist bewusst KEIN Teil des Snapshots
+    /// (ausschließlich Runtime-State, docs/Handelssystem.md §2/§10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_lifecycle: Option<crate::item_lifecycle::ItemLifecycleSnapshot>,
     /// RAS-Steuergröße (§15), niemals serialisiert.
     #[serde(skip)]
     pub generation: u64,
@@ -164,12 +180,21 @@ fn now_ms() -> i64 {
 
 /// Erzeugt den vollständigen Persistenz-Snapshot eines Spielers.
 /// Liefert `None`, wenn der Spieler keinen Dirty-State besitzt UND keine
-/// Erzwingung (`force`) verlangt ist (kein Write nötig).
-fn build_snapshot(player: &Player, force: bool) -> Option<PersistSnapshot> {
+/// Erzwingung (`force`) verlangt ist (kein Write nötig). Die
+/// Lifecycle-Sicht stempelt die Snapshot-Revision auf alle ausstehenden
+/// Abkopplungen; unbestätigte Entfernungen bleiben dadurch in neueren
+/// Snapshots erhalten, bis der DB-Commit bestätigt ist.
+fn build_snapshot(
+    player: &Player,
+    force: bool,
+    lifecycle: &crate::item_lifecycle::ItemLifecycle,
+    runtime_id: &str,
+) -> Option<PersistSnapshot> {
     let dirty = player.dirty;
     if !force && !dirty.any() {
         return None;
     }
+    let revision = player.persist_revision.saturating_add(1);
     let mut learned: Vec<String> = player.learned_abilities.iter().cloned().collect();
     learned.sort();
     // `P-18`: Ablaufzeitpunkte in die persistierte Zeiteinheit umrechnen.
@@ -182,7 +207,7 @@ fn build_snapshot(player: &Player, force: bool) -> Option<PersistSnapshot> {
         .collect();
     Some(PersistSnapshot {
         player_id: player.id.clone(),
-        persist_revision: player.persist_revision.saturating_add(1),
+        persist_revision: revision,
         captured_at_ms: now_ms(),
         x: player.x,
         y: player.y,
@@ -200,6 +225,7 @@ fn build_snapshot(player: &Player, force: bool) -> Option<PersistSnapshot> {
         learned_abilities: learned,
         cooldowns: Some(cooldowns),
         inventory: player.inventory.clone(),
+        item_lifecycle: Some(lifecycle.snapshot_view(revision, runtime_id)),
         generation: player.persist_generation,
         dirty,
     })
@@ -235,10 +261,17 @@ where
     let snapshot = {
         let world = shared.lock().await;
         match world.players.get(player_id) {
-            Some(player) => match build_snapshot(player, force) {
-                Some(snapshot) => snapshot,
-                None => return Ok(()), // nichts dirty (und nicht erzwungen) → kein Write
-            },
+            Some(player) => {
+                let empty_lifecycle = crate::item_lifecycle::ItemLifecycle::new();
+                let lifecycle = world
+                    .item_lifecycle
+                    .get(player_id)
+                    .unwrap_or(&empty_lifecycle);
+                match build_snapshot(player, force, lifecycle, &world.runtime_id) {
+                    Some(snapshot) => snapshot,
+                    None => return Ok(()), // nichts dirty (und nicht erzwungen) → kein Write
+                }
+            }
             None => return Ok(()), // Spieler offline → nichts zu flushen
         }
     };
@@ -286,11 +319,14 @@ where
         let world = shared.lock().await;
         let mut snapshots = Vec::new();
         let mut controls: Vec<(String, i64, u64, PersistDirty)> = Vec::new();
+        let empty_lifecycle = crate::item_lifecycle::ItemLifecycle::new();
         for id in player_ids {
             let Some(player) = world.players.get(id) else {
                 continue; // Spieler offline → nichts zu flushen
             };
-            let Some(snapshot) = build_snapshot(player, false) else {
+            let lifecycle = world.item_lifecycle.get(id).unwrap_or(&empty_lifecycle);
+            let Some(snapshot) = build_snapshot(player, false, lifecycle, &world.runtime_id)
+            else {
                 continue; // nicht dirty → kein Snapshot in diesem Lauf
             };
             controls.push((
@@ -382,6 +418,13 @@ pub(crate) async fn apply_snapshot_to_db(
     crate::db::write_resources(&mut tx, char_id, snapshot.hp, snapshot.mana).await?;
     crate::db::write_attributes(&mut tx, char_id, &snapshot.attributes).await?;
     crate::db::write_inventory(&mut tx, char_id, &snapshot.inventory).await?;
+    // Item-Lifecycle (docs/inventory_system.md §18, Migration 021): NUR bei
+    // neuem Snapshot-Format. Altformat (`None`) lässt Metadaten und Instanzen
+    // unberührt. Alles läuft in derselben Transaktion wie Inventar, Idia und
+    // `persist_revision` — entweder wird alles committet oder nichts.
+    if let Some(lifecycle) = snapshot.item_lifecycle.as_ref() {
+        crate::db::apply_item_lifecycle(&mut tx, char_id, lifecycle, &snapshot.inventory).await?;
+    }
     let class = crate::class::ClassStatus::from_db_name(&snapshot.char_class);
     crate::db::write_character_class(&mut tx, char_id, class, snapshot.faction_transition).await?;
     crate::db::write_weapon_skill(&mut tx, char_id, weapon_skill_id, snapshot.weapon_skill).await?;
@@ -847,6 +890,8 @@ mod tests {
             weapon_skill: 2,
             learned_abilities: vec!["fire_bolt".into()],
             cooldowns: Some(map),
+            // Item-Lifecycle: neues Format mit explizitem Feld.
+            item_lifecycle: None,
             inventory: InventoryState::default(),
             generation: 0,
             dirty: PersistDirty::default(),
@@ -900,6 +945,8 @@ mod tests {
             weapon_skill: 1,
             learned_abilities: vec![],
             cooldowns: Some(map),
+            // Item-Lifecycle: neues Format mit explizitem Feld.
+            item_lifecycle: None,
             inventory: InventoryState::default(),
             generation: 0,
             dirty: PersistDirty::default(),
@@ -926,5 +973,141 @@ mod tests {
         fn position_value(&self) -> (f64, f64) {
             (self.x, self.y)
         }
+    }
+
+    // ── Item-Lifecycle im Snapshot (docs/inventory_system.md §18) ──────────
+
+    /// Erzwungener Snapshot trägt die Lifecycle-Sicht (ausstehende
+    /// Abkopplung mit Snapshot-Revision gestempelt); die History erscheint
+    /// nicht im Drahtformat.
+    #[tokio::test]
+    async fn force_snapshot_carries_lifecycle_but_never_history() {
+        let shared = crate::world::new_shared();
+        let (mut p, _rx) = test_player("p");
+        p.mark_dirty(PersistComponent::Inventory);
+        put_player(&shared, p).await;
+        {
+            let mut world = shared.lock().await;
+            let rt = world.runtime_id.clone();
+            crate::item_lifecycle::reconcile_after_take(
+                world.item_lifecycle.entry("p".into()).or_default(),
+                &std::collections::BTreeSet::new(),
+                "verkauft-1",
+                crate::item_lifecycle::DetachReason::Sold,
+                &rt,
+                1_700_000_000_000,
+            );
+            world
+                .sell_history
+                .entry("p".into())
+                .or_default()
+                .record(crate::item_lifecycle::SellHistoryEntry {
+                    item_id: "hp_potion".into(),
+                    item_uuid: "verkauft-1".into(),
+                    count: 1,
+                    sell_gold_value: 5,
+                });
+        }
+        let (res, captured) = run_save(&shared, true).await;
+        assert!(res.is_ok());
+        let snapshot = captured.lock().unwrap().take().unwrap();
+        let lc = snapshot
+            .item_lifecycle
+            .as_ref()
+            .expect("neuer Snapshot trägt immer eine Lifecycle-Sicht");
+        assert_eq!(lc.pending.len(), 1);
+        assert_eq!(lc.pending[0].item_uuid, "verkauft-1");
+        assert_eq!(
+            lc.pending[0].detached_at_revision, snapshot.persist_revision,
+            "Abkopplung ist der Snapshot-Revision zugeordnet"
+        );
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("item_lifecycle"));
+        assert!(
+            !json.contains("sell_history"),
+            "History bleibt nicht persistent"
+        );
+        // Roundtrip durchs Drahtformat.
+        let back: PersistSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.item_lifecycle, snapshot.item_lifecycle);
+    }
+
+    /// Fehlgeschlagener Save: Lifecycle-Pflichten bleiben im erhaltenen RAM
+    /// (keine vorzeitige Freigabe).
+    #[tokio::test]
+    async fn failed_save_keeps_lifecycle_obligations_in_ram() {
+        let shared = crate::world::new_shared();
+        let (mut p, _rx) = test_player("p");
+        p.mark_dirty(PersistComponent::Inventory);
+        put_player(&shared, p).await;
+        {
+            let mut world = shared.lock().await;
+            let rt = world.runtime_id.clone();
+            crate::item_lifecycle::reconcile_after_take(
+                world.item_lifecycle.entry("p".into()).or_default(),
+                &std::collections::BTreeSet::new(),
+                "verkauft-1",
+                crate::item_lifecycle::DetachReason::Sold,
+                &rt,
+                1_700_000_000_000,
+            );
+        }
+        let (res, _captured) = run_save(&shared, false).await;
+        assert!(res.is_err());
+        let world = shared.lock().await;
+        assert!(
+            world.item_lifecycle["p"].contains("verkauft-1"),
+            "unbestätigte Entfernung bleibt im RAM erhalten"
+        );
+        assert!(world.players["p"]
+            .dirty
+            .is_dirty(PersistComponent::Inventory));
+    }
+
+    /// Altformat: Ein Snapshot ohne Lifecycle-Feld bleibt lesbar und ergibt
+    /// `None` — der Drain lässt Metadaten und Instanzen dann unberührt.
+    #[test]
+    fn snapshot_without_lifecycle_field_deserializes_as_none() {
+        let current = PersistSnapshot {
+            player_id: "7".into(),
+            persist_revision: 3,
+            captured_at_ms: 1_700_000_000_000,
+            x: 1.0,
+            y: 2.0,
+            level: 5,
+            exp: 100,
+            free_attr_points: 1,
+            rested_pool: 0,
+            idia: 42,
+            hp: 80,
+            mana: 30,
+            attributes: Default::default(),
+            char_class: "Adventurer".into(),
+            faction_transition: false,
+            weapon_skill: 2,
+            learned_abilities: vec![],
+            cooldowns: None,
+            inventory: InventoryState::default(),
+            item_lifecycle: None,
+            generation: 0,
+            dirty: PersistDirty::default(),
+        };
+        let mut value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&current).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .expect("Snapshot ist ein Objekt")
+            .remove("item_lifecycle");
+        let altformat = serde_json::to_string(&value).unwrap();
+        assert!(
+            !altformat.contains("item_lifecycle"),
+            "Altformat-Datei enthält kein Lifecycle-Feld"
+        );
+        let snapshot: PersistSnapshot = serde_json::from_str(&altformat)
+            .expect("Altformat ohne Lifecycle-Feld muss lesbar bleiben");
+        assert_eq!(
+            snapshot.item_lifecycle, None,
+            "fehlendes Feld bedeutet Altformat, kein leeres neues Format"
+        );
     }
 }

@@ -16,7 +16,7 @@ Dieses Dokument beschreibt die grundlegende Architektur für:
 * Realm-Rulesets (konfigurierbare Regelvarianten je Realm)
 * zukünftige Zugriffe einer Webseite
 
-Die Architektur soll von Beginn an mehrere Realms ermöglichen, ohne spätere Erweiterungen unnötig zu erschweren. Ein Realm wird vom zuständigen Realm-Server ausgeführt (ggf. mehrere technische Realm-Prozesse mit gemeinsamem Realm-Zustand); einen separaten Worldserver-Dienst in der Kette gibt es nicht.
+Die Architektur soll von Beginn an mehrere Realms ermöglichen, ohne spätere Erweiterungen unnötig zu erschweren. Ein Realm wird vom zuständigen Realm-Server ausgeführt — genau **ein** Realm-Serverprozess je Realm-Datenbank (Single-Process-Betriebsvertrag, siehe Abschnitt „Realm-Server“); einen separaten Worldserver-Dienst in der Kette gibt es nicht.
 
 ---
 
@@ -42,8 +42,8 @@ Character-System
 Realm
     │
     ├── eigener Weltzustand
-    └── Realm-Server (führt den Realm aus; ggf. mehrere
-        technische Prozesse mit gemeinsamem Realm-Zustand)
+    └── Realm-Server (führt den Realm aus; genau ein
+        Realm-Serverprozess je Realm-Datenbank, Single-Process-Betriebsvertrag)
 ```
 
 Dabei gilt:
@@ -359,15 +359,29 @@ Der Realm-Server ist dagegen der Dienst, welcher einen Realm ausführt
 (Rust, `src/realm-rs`; der frühere Node.js/TypeScript-Code unter `src/realm/`
 wurde aus dem Repository entfernt).
 
-Ein Realm kann später bei Bedarf von mehreren technischen Realm-Prozessen getragen werden.
+**Single-Process-Betriebsvertrag (verbindlich für diesen Stand):** Genau **ein**
+Realm-Serverprozess je Realm-Datenbank (`realm_state_<realm>`). Jede RealmDB
+enthält ihren vollständigen eigenen Content und veränderlichen Spielzustand;
+es gibt **keine** gemeinsame Content-DB. Die frühere Planung, einen Realm bei
+Bedarf von mehreren gleichzeitig autoritativen technischen Realm-Prozessen mit
+gemeinsamem Realm-Zustand tragen zu lassen, ist für diesen Stand überholt und
+nicht mehr bindend.
 
 ```text
 Realm DE-1
     │
-    ├── Realm-Prozess A
-    ├── Realm-Prozess B
-    └── gemeinsamer Realm-Zustand (realm_state_de1)
+    ├── genau ein Realm-Serverprozess
+    └── eigene Realm-Datenbank (realm_state_de1: Content + Spielzustand)
 ```
+
+Lua-Worker innerhalb des Realm-Prozesses bleiben davon unverändert (sie sind
+keine eigenen Realm-Serverprozesse, siehe `Lua-Scripting-System.md`).
+
+**Grenze des Vertrags:** Die Einprozess-Regel ist ein **Betriebsvertrag**, kein
+bereits implementierter technischer Doppelstartschutz. Ein vertragswidriger
+paralleler Start mehrerer Realm-Serverprozesse gegen dieselbe RealmDB wird vom
+Realm-Server derzeit **nicht** technisch verhindert; für diesen Fall wird
+**keine** Sicherheit behauptet.
 
 Die technische Skalierung eines Realms muss für den Spieler nicht sichtbar sein.
 

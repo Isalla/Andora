@@ -1809,6 +1809,224 @@ pub async fn wipe_logout_buffer(
     Ok(())
 }
 
+// ===== Item-Instanz-Lifecycle (Migration 021, docs/inventory_system.md §18) =====
+// Revisionsgebundene Instanzfinalisierung im Single-Process-Realm: Der Drain
+// schreibt die Lifecycle-Metadaten eines Snapshots vollständig neu und löscht
+// zulässige Instanzzeilen — in derselben Transaktion wie Inventar, Idia und
+// `persist_revision` (docs/Player_Persistenz.md §30). Referenzierte oder
+// widersprüchlich zugeordnete Instanzen werden NIE gelöscht; vorhandene
+// Referenzorte (alle Platzierungs-/Pufferzeilen, auch fremder Charaktere)
+// bleiben erhalten.
+
+/// Interne Transaktionshilfe: Lifecycle-Metadaten eines Charakters vollständig
+/// neu schreiben (Vollschreib wie die Platzierungstabellen). Nur UUIDs, die
+/// im Snapshot NICHT mehr platziert sind, werden fortgeschrieben —
+/// widersprüchlich zugeordnete (wieder lebendige) UUIDs entfallen ersatzlos.
+async fn write_item_lifecycle_metadata(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    pending: &[crate::item_lifecycle::DetachedInstance],
+) -> Result<(), String> {
+    sqlx::query("DELETE FROM item_instance_finalizations WHERE char_id = ?")
+        .bind(char_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Lifecycle-Metadaten zurücksetzen {char_id}: {e}"))?;
+    for d in pending {
+        sqlx::query(
+            "INSERT INTO item_instance_finalizations \
+               (char_id, item_uuid, detached_at_revision, reason, runtime_id, recorded_at_ms) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(char_id)
+        .bind(&d.item_uuid)
+        .bind(d.detached_at_revision)
+        .bind(d.reason.as_db())
+        .bind(&d.runtime_id)
+        .bind(d.recorded_at_ms)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Lifecycle-Metadaten schreiben {char_id}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Interne Transaktionshilfe: Ist `uuid` noch irgendwo platziert? Geprüft
+/// werden alle Platzierungs-/Pufferzeilen (eigener und fremde Charaktere).
+/// Die Tabellennamen stammen aus einer festen internen Liste (keine
+/// Benutzereingabe). Nach dem Inventar-Vollwrite desselben Snapshots in
+/// derselben Transaktion findet diese Prüfung nur noch veraltete Pufferzeilen
+/// oder fremde (widersprüchliche) Zuordnungen — genau die Fälle, in denen
+/// nicht gelöscht werden darf.
+async fn item_uuid_is_referenced(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    uuid: &str,
+) -> Result<bool, String> {
+    for table in [
+        "character_inventory",
+        "bag_slots",
+        "character_equipment",
+        "inventory_buffer",
+    ] {
+        let sql = format!("SELECT 1 FROM {table} WHERE item_uuid = ? LIMIT 1");
+        let hit: Option<i32> = sqlx::query_scalar(&sql)
+            .bind(uuid)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| format!("Lifecycle-Referenzprüfung ({table}): {e}"))?;
+        if hit.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Interne Transaktionshilfe: Gespeicherte Lifecycle-Metadaten eines
+/// Charakters in derselben Transaktion lesen (K1-Merge; Aufruf aus
+/// `apply_item_lifecycle`). Zeilen mit unbekanntem Grund entfallen beim
+/// Laden (konsistent zur Startup-Finalisierung, die sie nicht anfasst).
+async fn load_item_lifecycle_metadata(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+) -> Result<Vec<crate::item_lifecycle::DetachedInstance>, String> {
+    let rows: Vec<(String, i64, String, String, i64)> = sqlx::query_as(
+        "SELECT item_uuid, detached_at_revision, reason, runtime_id, recorded_at_ms \
+         FROM item_instance_finalizations WHERE char_id = ? ORDER BY item_uuid",
+    )
+    .bind(char_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| format!("Lifecycle-Metadaten lesen {char_id}: {e}"))?;
+    let mut out = Vec::new();
+    for (uuid, revision, reason, runtime_id, recorded_at_ms) in rows {
+        let Some(reason) = crate::item_lifecycle::DetachReason::from_db(&reason) else {
+            continue;
+        };
+        out.push(crate::item_lifecycle::DetachedInstance {
+            item_uuid: uuid,
+            reason,
+            runtime_id,
+            recorded_at_ms,
+            detached_at_revision: revision,
+        });
+    }
+    Ok(out)
+}
+
+/// Interne Transaktionshilfe: Wendet die Lifecycle-Sicht EINES Snapshots an
+/// (Aufruf aus `persist::apply_snapshot_to_db`, dieselbe Transaktion).
+/// Altformat-Snapshots (`None`) erreichen diese Funktion nicht — sie lassen
+/// Metadaten und Instanzen unberührt.
+///
+/// K1: Gespeicherte Pflichten werden in derselben Transaktion gelesen und mit
+/// der Snapshot-Sicht zusammengeführt (`merge_pending`) — ein `Some(empty)`
+/// nach Neustart löscht erhaltene Konflikt-/Finalisierungspflichten nicht.
+/// Eine Wiedereinsetzung hebt nur die passende Pflicht auf; die Löschung
+/// bleibt an Snapshot-Abwesenheit UND Referenzprüfung gebunden.
+pub(crate) async fn apply_item_lifecycle(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    lifecycle: &crate::item_lifecycle::ItemLifecycleSnapshot,
+    inventory: &crate::inventory::InventoryState,
+) -> Result<(), String> {
+    let placed = inventory.persistent_uuids();
+    let stored = load_item_lifecycle_metadata(&mut *tx, char_id).await?;
+    let merged = crate::item_lifecycle::merge_pending(&stored, &lifecycle.pending, &placed);
+    write_item_lifecycle_metadata(&mut *tx, char_id, &merged).await?;
+    let mut referenced = std::collections::BTreeSet::new();
+    for d in &merged {
+        if item_uuid_is_referenced(&mut *tx, &d.item_uuid).await? {
+            // Referenziert oder widersprüchlich zugeordnet: Metadaten zur
+            // erneuten Prüfung erhalten, Instanz NICHT löschen.
+            referenced.insert(d.item_uuid.clone());
+        }
+    }
+    for uuid in crate::item_lifecycle::deletable_candidates(&merged, &placed, &referenced) {
+        sqlx::query("DELETE FROM item_instances WHERE item_uuid = ?")
+            .bind(&uuid)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("Instanz finalisieren {uuid}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Ergebnis der Startup-Finalisierung (reine Zähler, keine IDs/Inhalte).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ItemFinalizeReport {
+    pub scanned: usize,
+    pub deleted: usize,
+    pub kept_referenced: usize,
+    pub metadata_dropped: usize,
+    pub skipped_unknown_reason: usize,
+}
+
+/// Startup-Finalisierung alter Runtime-Metadaten (Aufruf aus dem Startpfad
+/// NUR bei vollständig abgeschlossener Recovery — bei unvollständiger
+/// Recovery keine widersprüchliche Bereinigung, keine vorzeitige Freigabe).
+/// Verarbeitet ausschließlich explizit als abgekoppelt markierte Zeilen
+/// (`item_instance_finalizations`) — kein Voll-Scan über `item_instances`
+/// (docs/inventory_system.md §16). Je Zeile eine eigene kleine Transaktion;
+/// ein Fehler bricht ab, der nächste Start versucht erneut.
+pub async fn finalize_detached_item_instances(
+    pool: &Pool<MySql>,
+) -> Result<ItemFinalizeReport, String> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT char_id, item_uuid, reason FROM item_instance_finalizations \
+         ORDER BY char_id, item_uuid",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Lifecycle-Metadaten lesen: {e}"))?;
+    let mut report = ItemFinalizeReport::default();
+    for (char_id, uuid, reason) in &rows {
+        if uuid.trim().is_empty() {
+            continue;
+        }
+        report.scanned += 1;
+        if crate::item_lifecycle::DetachReason::from_db(reason).is_none() {
+            report.skipped_unknown_reason += 1;
+            continue;
+        }
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| format!("Lifecycle-Finalisierung beginnen: {e}"))?;
+        if item_uuid_is_referenced(&mut tx, uuid).await? {
+            report.kept_referenced += 1;
+            tx.commit()
+                .await
+                .map_err(|e| format!("Lifecycle-Finalisierung commit: {e}"))?;
+            continue;
+        }
+        let exists: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM item_instances WHERE item_uuid = ? LIMIT 1")
+                .bind(uuid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| format!("Instanzbestand prüfen: {e}"))?;
+        if exists.is_some() {
+            sqlx::query("DELETE FROM item_instances WHERE item_uuid = ?")
+                .bind(uuid)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Instanz finalisieren: {e}"))?;
+            report.deleted += 1;
+        }
+        sqlx::query("DELETE FROM item_instance_finalizations WHERE char_id = ? AND item_uuid = ?")
+            .bind(char_id)
+            .bind(uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Lifecycle-Metadaten bereinigen: {e}"))?;
+        report.metadata_dropped += 1;
+        tx.commit()
+            .await
+            .map_err(|e| format!("Lifecycle-Finalisierung commit: {e}"))?;
+    }
+    Ok(report)
+}
+
 /// Quest-Zeile aus der Tabelle `quests` (docs/Quest-System.md §27/Quest V1,
 /// Migration 004_quests.sql). Die rohe TINYINT-Spalte `state` wird erst im
 /// QuestService auf den Questzustand abgebildet (ACTIVE=1, COMPLETED=2,

@@ -504,8 +504,10 @@ Beispielhafte Lifecycle-Endpunkte ohne neue Gameplayregeln:
 * Ein Puffer-Item, das beim Session-Ende gemäß Abschnitt 11 verworfen wird –
   die Instanz ist damit endgültig vernichtet.
 
-Die konkrete Umsetzung (Zeitpunkt, Transaktionsgrenze) wird im Implementierungs-
-auftrag gegen den vorhandenen Code entschieden (vorhandene Bausteine: `write_*`-
+Die konkrete Umsetzung (Zeitpunkt, Transaktionsgrenze) ist für den
+Single-Process-Realm entschieden und in Abschnitt 18 beschrieben
+(revisionsgebundene Finalisierung im Drain, selbe Transaktion wie Inventar,
+Idia und `persist_revision`; vorhandene Bausteine: `write_*`-
 Transaktionshelfer, `wipe_logout_buffer` als Entwurf, `db.rs`).
 
 ### Kein pauschaler periodischer SQL-Garbage-Collector (V1)
@@ -600,3 +602,96 @@ Diese API prüft nur inventarlokale UUID-Eindeutigkeit. Globale Eigentumsprüfun
 History-/Spool-Anschluss und der endgültige persistente Instanz-Lifecycle
 bleiben beim späteren Spiellayer. Die Operationen selbst markieren keinen
 Player-Dirty-State.
+
+---
+
+## 18. Revisionsgebundene Instanzfinalisierung (eingebaut, Single-Process-Realm)
+
+Dieser Abschnitt beschreibt die eingebaute Umsetzung der §16-Regel für den
+Single-Process-Realm (genau ein Realm-Serverprozess je RealmDB,
+`Login_Realm_Architektur.md` Abschnitt „Realm-Server“,
+`Datenbank_Architektur.md` §17).
+
+**Neubewertung des bisherigen Zuständigkeitsblockers:** Die Finalisierung war
+zuvor blockiert, weil bei mehreren gleichzeitig autoritativen Prozessen
+derselben RealmDB unklar blieb, welcher Prozess eine abgekoppelte UUID
+verbindlich finalisieren darf (fremder RAM-Bestand könnte die UUID noch
+führen). Unter dem verbindlichen Single-Process-Betriebsvertrag entfällt
+dieser Blocker: Der eine Realm-Prozess besitzt den maßgeblichen RAM-Bestand
+seiner RealmDB; Zuordnung und Finalisierung liegen allein bei ihm. Das ist ein
+Betriebsvertrag, kein technischer Doppelstartschutz — gegen vertragswidrige
+parallele Starts wird keine Sicherheit behauptet; ein solcher Betrieb ist
+kein geprüfter Zustand.
+
+**Trennung (verbindlich):**
+
+* Runtime-History (`SellHistory`, `src/realm-rs/src/item_lifecycle.rs`):
+  ausschließlich Runtime-State der laufenden Session (max. 20 Einträge, FIFO),
+  nicht persistent, Verwerfen am Session-Ende. Takeover und RAM-Übernahme
+  innerhalb des laufenden Prozesses erhalten sie.
+* Dauerhafte Lifecycle-Metadaten (`ItemLifecycle` → Snapshot-Sicht →
+  `item_instance_finalizations`, Migration 021): ermöglichen nur Zuordnung und
+  kontrollierte Finalisierung abgekoppelter UUIDs.
+
+**Anschlussstellen (ohne Händlerhandler, Preise oder Angebote):**
+`try_take_instance` (Vollentnahme) und `try_insert_instance` (`retired_uuid`
+bei Vollverschmelzung) liefern die Abkopplungen; die Verrechnung
+(`reconcile_after_take`/`reconcile_after_insert`, Buyback-Aufhebung vor dem
+Snapshot) steht für den späteren Händler-Spiellayer bereit. Die
+Dirty-Markierung bleibt Aufgabe des aufrufenden Spiellayers (§17): Ohne
+Dirty-State entsteht kein Snapshot und keine Finalisierung. Ein Teilstack-Rest
+behält seine UUID und ist dadurch vor Finalisierung geschützt.
+
+**Snapshot-/Drain-Pfad (abwärtskompatibel):** Der Snapshot trägt die
+Lifecycle-Sicht (`item_lifecycle`, neues optionales Feld neben `cooldowns`).
+Neues Format (`Some`, auch leer) schreibt die Metadaten vollständig neu —
+nach Zusammenführung mit den gespeicherten Pflichten in derselben Transaktion
+(`merge_pending`): Ein `Some(empty)` nach Neustart löscht erhaltene
+Konflikt-/Finalisierungspflichten nicht; eine Wiedereinsetzung hebt nur die
+passende Pflicht auf. Altformat (`None`, Feld fehlt) lässt Metadaten und
+Instanzen unberührt. Unbestätigte Entfernungen bleiben in neueren Snapshots
+erhalten, bis der DB-Commit bestätigt ist; bei der Bestätigung hebt eine zuvor
+erfasste Wiedereinsetzung die Entfernung auf (keine versehentliche Freigabe
+neuer Änderungen).
+
+**Transaktion:** Inventar, Idia, Lifecycle-Metadaten, zulässige
+Instanzentfernung und `persist_revision` werden in derselben DB-Transaktion
+angewendet (`persist::apply_snapshot_to_db`, docs/Player_Persistenz.md §30).
+Referenzierte oder widersprüchlich zugeordnete Instanzen (Platzierungs- oder
+Pufferzeile, auch fremder Charaktere) werden nicht gelöscht; ihre Metadaten
+bleiben zur erneuten Prüfung erhalten.
+
+**Startup/Shutdown:** Die Startup-Finalisierung alter Runtime-Metadaten läuft
+ausschließlich bei vollständig abgeschlossener Spool-Recovery; bei
+unvollständiger Recovery keine widersprüchliche Bereinigung und keine
+vorzeitige Freigabe. Wird die Recovery erst später durch den periodischen
+Drainer vollständig, holt dieser die Finalisierung über denselben gemeinsamen
+Mechanismus (`finalize_startup_lifecycle`) genau einmal nach — READY gilt
+erst nach erfolgreichem Abschluss aller notwendigen Schritte; bei Fehler
+bleibt die Pflicht erhalten (DEGRADED, kontrollierter Retry im Folgetick),
+und nach Erfolg findet im laufenden Betrieb keine erneute pauschale
+Startup-Finalisierung statt. Session-Ende und Shutdown fließen vor dem
+maßgeblichen (finalen, erzwungenen) Snapshot ein; bei Savefehler bleiben die
+Lifecycle-Pflichten im erhaltenen RAM (§16-Regel).
+
+**Grenzen (ausdrücklich):** FakeDb-/Harness-Tests belegen die
+Entscheidungslogik, kein SQL-/FK-/Rollback-Verhalten und keine echte
+MariaDB-Semantik. Die fünf Harness-Ablauftests sind ausdrücklich Modelle:
+Revisionsvergleich mit Skip/Supersede und Commit-Atomarität sind darin
+nachgebaut; einzige Produktionsfunktion unter Test ist
+`deletable_candidates` (Merge: `merge_pending`). Das produktive
+Revisions-Gating liegt in `spool.rs`, die Transaktionsatomarität und der
+erfolgreiche DB-Durchlauf der Startup-Finalisierung sind offline
+prinzipbedingt unbelegt („offline" allein beweist keine Untestbarkeit —
+unbelegt bleibt unbelegt benannt). Es wird keine universelle Crash- oder
+Mehrprozessgarantie behauptet. Eigene Runtime-Kennung (`rt-<pid>-<nanos>`)
+dient nur der Zuordnung, nicht der Korrektheit.
+
+**Mitführungsgrenze (benannt, keine Löschfrist erfunden):**
+Referenziert-blockierte Pflichten können ohne feste Grenze in RAM und DB
+verbleiben — es gibt bewusst kein Cap, keine TTL und keine automatische
+Zwangslöschung. Die Metadatentabelle wächst nur um tatsächlich abgekoppelte
+UUIDs; verwaiste Zeilen (Instanz bereits weg) bereinigt die
+Startup-Finalisierung. Charakterweise Pflichten sind per SELECT auf
+`item_instance_finalizations` einsehbar (Operator-Diagnose, kein
+Automatik-Eingriff).

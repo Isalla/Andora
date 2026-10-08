@@ -571,6 +571,7 @@ Der Player-Eintrag im Batch enthält für V1 einen **vollständigen Snapshot** d
 * dauerhaft trainierte Weapon Skills
 * dauerhaft erlernte / freigeschaltete Abilities
 * laufende Ability-Cooldowns als **Ablaufzeitpunkte** (verbindlich geregelt in „Cooldowns im Player-Snapshot" unten)
+* Item-Lifecycle-Metadaten (ausstehende UUID-Abkopplungen zur revisionsgebundenen Instanzfinalisierung, `inventory_system.md` §18; kein eigenes Dirty-Bit — sie reisen im vollständigen Snapshot mit)
 
 **Idia als absoluter Gesamtbestand:**
 
@@ -623,7 +624,7 @@ Festlegungen zur Semantik:
 * **Das initiale Laden ist keine Spielzustandsänderung.** Der Player wird beim Login aus der Datenbank gesetzt, ohne eine Komponente dirty zu markieren und ohne die Persistenz-Generation fortzuschreiben. Dirty-Markierungen entstehen erst durch nachfolgende Spielzustandsänderungen.
 * **Abgeleitete Werte bleiben außerhalb** (Abschnitt 23: HP Max, Mana Max, Armor). Ebenso separat persistierte Systeme mit eigenem Persistenzweg (Abschnitt 8: Quest State/Progress) sowie `logout_at`.
 * **Jede Zustandsänderung eines zugeordneten Feldes markiert über `Player::mark_dirty` die zugeordnete Komponente.** `mark_dirty` erhöht zusätzlich die Persistenz-Generation (Abschnitt 15/39); eine reine Bit-Manipulation ohne Generationserhöhung wäre eine Verletzung dieser Regel.
-* **Keine neue Komponente.** Die fünf bestehenden Komponenten decken die persistenten Zustände vollständig ab.
+* **Keine neue Komponente.** Die fünf bestehenden Komponenten decken die persistenten Zustände vollständig ab. Die Item-Lifecycle-Metadaten begründen keine eigene Komponente: Sie reisen im vollständigen Snapshot mit, sobald irgendeine Komponente den Snapshot auslöst (bei Inventaränderungen markiert der aufrufende Spiellayer `Inventory`, `inventory_system.md` §17; ohne Dirty-State entsteht kein Snapshot und keine Finalisierung).
 
 **Verbindliche Zuordnung ohne bestehenden Produktions-Mutationspfad:**
 

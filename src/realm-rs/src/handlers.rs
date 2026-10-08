@@ -1673,6 +1673,8 @@ mod tests {
             // `P-18`: `None` = Altformat ohne Cooldown-Feld; der Cooldown-Bestand
             // bleibt bei diesen Fixtures unberührt.
             cooldowns: None,
+            // Item-Lifecycle: `None` = Altformat ohne Lifecycle-Feld.
+            item_lifecycle: None,
             inventory: crate::inventory::InventoryState::default(),
             generation: 0,
             dirty: crate::persist::PersistDirty::default(),

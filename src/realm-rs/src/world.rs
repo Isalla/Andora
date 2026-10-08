@@ -195,6 +195,23 @@ pub struct TickStat {
 
 pub struct World {
     pub players: HashMap<String, Player>,
+    /// Eigene Runtime-Kennung dieses Realm-Prozesslaufs
+    /// (`item_lifecycle::new_runtime_id`): stempelt Lifecycle-Metadaten zur
+    /// Zuordnung und wird im Snapshot mitgeführt. Takeover und RAM-Übernahme
+    /// innerhalb des laufenden Prozesses erhalten History und Metadaten, weil
+    /// Spieler und World-Einträge dabei bestehen bleiben.
+    pub runtime_id: String,
+    /// Sell-/Buyback-History je Charakter (docs/Handelssystem.md §1–§3):
+    /// ausschließlich Runtime-State der laufenden Session, nicht persistent.
+    /// Wird am Session-Ende mit dem Spieler verworfen (`disconnect_conn`).
+    pub sell_history: HashMap<String, crate::item_lifecycle::SellHistory>,
+    /// Dauerhafte Lifecycle-Metadaten je Charakter (RAM-Abbild; persistent
+    /// über den Snapshot-/Drain-Pfad, Migration 021). Unbestätigte
+    /// Entfernungen bleiben hier erhalten, bis der DB-Commit bestätigt ist;
+    /// bei Savefehler bleiben sie mit dem erhaltenen RAM bestehen (§16).
+    /// Erst der maßgebliche Snapshot trägt sie — `disconnect_conn` entfernt
+    /// sie deshalb erst nach dem finalen Flush.
+    pub item_lifecycle: HashMap<String, crate::item_lifecycle::ItemLifecycle>,
     /// NPC-/Monster-Registry (Combat V2): key = npc_id().
     pub npcs: HashMap<String, crate::npc::Npc>,
     /// Statische Item-Definitionen (Item System V1, Content-Schicht).
@@ -240,11 +257,14 @@ impl World {
     pub fn new() -> Self {
         Self {
             players: HashMap::new(),
+            runtime_id: crate::item_lifecycle::new_runtime_id(),
             npcs: HashMap::new(),
             item_definitions: HashMap::new(),
             loot_tables: HashMap::new(),
             loot_drops: HashMap::new(),
             loot_next_id: 1,
+            sell_history: HashMap::new(),
+            item_lifecycle: HashMap::new(),
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             peer_addrs: HashMap::new(),
@@ -661,6 +681,13 @@ pub fn disconnect_conn(world: &mut World, conn_id: u64) -> Option<String> {
     let player_id = world.by_conn.get(&conn_id)?.clone();
     world.by_conn.remove(&conn_id);
     let me = world.players.remove(&player_id)?;
+    // Session-Ende: Die Sell-/Buyback-History wird verworfen
+    // (docs/Handelssystem.md §2). Die Lifecycle-Metadaten werden hier erst
+    // entfernt, weil der maßgebliche finale Snapshot VOR diesem Aufruf
+    // geflusht wurde (`finish_owner` in net.rs; bei Savefehler läuft
+    // `release_conn` statt dieser Funktion und alles bleibt im RAM).
+    world.sell_history.remove(&player_id);
+    world.item_lifecycle.remove(&player_id);
     let frame = Frame::new(0, s2c::DESPAWN, serde_json::json!({"id": me.id}));
     for q in world.players.values() {
         if q.entities.contains(&me.id) {
@@ -1150,5 +1177,99 @@ mod tests {
         assert_eq!(conn_of(&w, "hero"), Some(1));
         assert_eq!(w.players["hero"].x, 5.0);
         assert_eq!(w.players["hero"].session_id, "sess-2");
+    }
+
+    // ── Item-Lifecycle: History/Metadaten bei Takeover, Übernahme und Ende ──
+
+    fn seed_history_and_lifecycle(w: &mut World, id: &str) {
+        w.sell_history
+            .entry(id.to_string())
+            .or_default()
+            .record(crate::item_lifecycle::SellHistoryEntry {
+                item_id: "hp_potion".into(),
+                item_uuid: "verkauft-1".into(),
+                count: 3,
+                sell_gold_value: 30,
+            });
+        crate::item_lifecycle::reconcile_after_take(
+            w.item_lifecycle.entry(id.to_string()).or_default(),
+            &std::collections::BTreeSet::new(),
+            "verkauft-1",
+            crate::item_lifecycle::DetachReason::Sold,
+            &w.runtime_id.clone(),
+            1_700_000_000_000,
+        );
+    }
+
+    /// Takeover innerhalb des laufenden Prozesses erhält History und
+    /// Lifecycle-Metadaten (der RAM-Spieler bleibt maßgeblich).
+    #[test]
+    fn takeover_preserves_history_and_lifecycle_metadata() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        seed_history_and_lifecycle(&mut w, "hero");
+        let (p2, _r2) = candidate("hero", 7);
+        let (cf2, _rx2) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 2, p2, cf2),
+            Ok(CommitOutcome::Takeover { old_conn_id: 1 })
+        );
+        assert_eq!(w.sell_history["hero"].len(), 1);
+        assert!(w.item_lifecycle["hero"].contains("verkauft-1"));
+    }
+
+    /// RAM-Übernahme (Adopted, z. B. nach fehlgeschlagenem Disconnect-Save)
+    /// erhält History und Lifecycle-Metadaten ebenfalls.
+    #[test]
+    fn adopted_ram_takeover_preserves_history_and_lifecycle_metadata() {
+        let mut w = World::new();
+        let (p, _r) = candidate("hero", 7);
+        w.players.insert("hero".into(), p);
+        seed_history_and_lifecycle(&mut w, "hero");
+        let (cf, _rx) = conn_fields("sess-2");
+        assert_eq!(
+            commit_login(&mut w, 5, candidate("hero", 7).0, cf),
+            Ok(CommitOutcome::Adopted)
+        );
+        assert_eq!(w.sell_history["hero"].len(), 1);
+        assert!(w.item_lifecycle["hero"].contains("verkauft-1"));
+    }
+
+    /// Session-Ende (`disconnect_conn`) verwirft History und Metadaten des
+    /// Spielers — der maßgebliche Snapshot wurde davor geflusht.
+    #[test]
+    fn disconnect_drops_history_and_lifecycle_entries() {
+        let mut w = World::new();
+        let (p1, _r1) = candidate("hero", 7);
+        let (cf1, _rx1) = conn_fields("sess-1");
+        commit_login(&mut w, 1, p1, cf1).unwrap();
+        seed_history_and_lifecycle(&mut w, "hero");
+        assert_eq!(disconnect_conn(&mut w, 1).as_deref(), Some("hero"));
+        assert!(!w.sell_history.contains_key("hero"));
+        assert!(!w.item_lifecycle.contains_key("hero"));
+    }
+
+    /// `release_conn` (Savefehler, §16) behält History und Metadaten im RAM.
+    #[test]
+    fn release_conn_keeps_history_and_lifecycle_in_ram() {
+        let mut w = World::new();
+        let (p, _r) = candidate("hero", 7);
+        w.players.insert("hero".into(), p);
+        w.by_conn.insert(7, "hero".into());
+        seed_history_and_lifecycle(&mut w, "hero");
+        assert_eq!(release_conn(&mut w, 7).as_deref(), Some("hero"));
+        assert_eq!(w.sell_history["hero"].len(), 1);
+        assert!(w.item_lifecycle["hero"].contains("verkauft-1"));
+    }
+
+    /// Jede World trägt eine eigene Runtime-Kennung.
+    #[test]
+    fn worlds_carry_distinct_runtime_ids() {
+        let a = World::new();
+        let b = World::new();
+        assert!(a.runtime_id.starts_with("rt-"));
+        assert_ne!(a.runtime_id, b.runtime_id);
     }
 }

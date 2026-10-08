@@ -16,6 +16,7 @@ mod handlers;
 mod health;
 mod inventory;
 mod item;
+mod item_lifecycle;
 mod loot;
 mod lua;
 mod migrations;
@@ -64,8 +65,16 @@ fn run() -> Result<(), String> {
 /// protokolliert. `READY` folgt erst nach bestätigtem Abschluss (Spool leer);
 /// normale neue Spool-Arbeit im Regelbetrieb erzwingt weiterhin kein
 /// `DEGRADED`. Die Fehlerbehandlung bleibt beim Aufrufer (`Err` → `DEGRADED`).
-fn apply_drain_tick_status(runtime: &crate::spool::PersistRuntime) {
-    match runtime.apply_drain_tick() {
+///
+/// K2: Der Tick nutzt `apply_drain_tick_with_lifecycle` — derselbe gemeinsame
+/// Finalisierungsmechanismus wie der Startpfad. Wird eine zuvor offene
+/// Recovery erst hier vollständig, läuft die ausstehende Finalisierung genau
+/// einmal nach, bevor READY gilt.
+async fn apply_drain_tick_status(
+    runtime: &crate::spool::PersistRuntime,
+    pool: &sqlx::Pool<sqlx::MySql>,
+) {
+    match runtime.apply_drain_tick_with_lifecycle(pool).await {
         Ok(crate::spool::RecoveryStatusUpdate::Ready) => {}
         Ok(crate::spool::RecoveryStatusUpdate::RecoveryStillOpen { remaining }) => {
             // Datensparsam: nur der Restzähler.
@@ -170,6 +179,40 @@ async fn async_main() -> Result<(), String> {
                         remaining
                     );
                 }
+            }
+            // Item-Lifecycle (docs/inventory_system.md §18): Startup-
+            // Finalisierung alter Runtime-Metadaten — ausschließlich bei
+            // vollständig abgeschlossener Recovery. Bei unvollständiger
+            // Recovery keine widersprüchliche Bereinigung und keine
+            // vorzeitige Freigabe; die Metadaten bleiben bis zum Drain der
+            // offenen Batches erhalten. Ein Fehler bricht den Start nicht ab
+            // (DEGRADED, periodischer Drain/Neustart versucht erneut).
+            // Gemeinsamer Mechanismus mit dem Drainer
+            // (`finalize_startup_lifecycle`: einmalig, setzt die
+            // Einmaligkeitsmarke nur bei Erfolg).
+            if outcome.batches_remaining == 0 {
+                match persist.finalize_startup_lifecycle(&pool).await {
+                    Ok(report) => {
+                        if report.deleted > 0 || report.metadata_dropped > 0 {
+                            log::info!(
+                                "Lifecycle-Startup-Finalisierung: {} geprüft, {} Instanzen finalisiert, {} referenziert erhalten, {} Metadaten bereinigt, {} unbekannter Grund",
+                                report.scanned,
+                                report.deleted,
+                                report.kept_referenced,
+                                report.metadata_dropped,
+                                report.skipped_unknown_reason
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Lifecycle-Startup-Finalisierung fehlgeschlagen: {e}");
+                        persist.set_status(crate::spool::PersistStatus::Degraded);
+                    }
+                }
+            } else {
+                log::warn!(
+                    "Lifecycle-Startup-Finalisierung übersprungen: Start-Recovery offen (keine Bereinigung bei unvollständiger Recovery)"
+                );
             }
         }
         Err(e) => {
@@ -436,10 +479,10 @@ async fn async_main() -> Result<(), String> {
                             report.batches_quarantined
                         );
                     }
-                    apply_drain_tick_status(&drain_runtime);
+                    apply_drain_tick_status(&drain_runtime, &drain_pool).await;
                 }
                 Ok(None) => {
-                    apply_drain_tick_status(&drain_runtime);
+                    apply_drain_tick_status(&drain_runtime, &drain_pool).await;
                 }
                 Err(e) => {
                     log::error!("Drain fehlgeschlagen: {e}");

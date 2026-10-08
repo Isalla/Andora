@@ -363,6 +363,22 @@ impl InventoryState {
             .chain(self.buffer.iter().filter_map(|s| s.as_ref()))
     }
 
+    /// UUIDs aller persistenten Platzierungen (Basis, Tascheninhalte,
+    /// Equipment — ohne Sicherheits-Puffer, der nie persistiert wird).
+    /// Anschlussstelle für den Item-Lifecycle (docs/inventory_system.md §18):
+    /// Eine UUID, die hier fehlt, ist aus dem persistenten Inventar
+    /// abgekoppelt; eine UUID, die hier steht, ist lebendig und vor
+    /// Finalisierung geschützt.
+    pub fn persistent_uuids(&self) -> std::collections::BTreeSet<String> {
+        self.base_slots
+            .iter()
+            .chain(self.bags.iter().flat_map(|b| &b.slots))
+            .filter_map(|s| s.as_ref())
+            .chain(self.equipped.values())
+            .map(|it| it.item_uuid.clone())
+            .collect()
+    }
+
     /// Entnimmt exakt `qty` aus genau einer UUID im Grundinventar oder in
     /// Tascheninhalten. Kein Equipment, kein Taschencontainer, kein Puffer.
     /// Vollentnahme erhält die UUID; beim Split behält der Rest seine UUID,
@@ -1813,6 +1829,29 @@ mod tests {
             assert_eq!(EquipSlot::from_db(s.as_db()), Some(s));
         }
         assert!(EquipSlot::from_db("unsinn").is_none());
+    }
+
+    /// Lifecycle-Anschluss (§18): `persistent_uuids` meldet genau die UUIDs
+    /// der persistenten Platzierungen — ohne Sicherheits-Puffer.
+    #[test]
+    fn persistent_uuids_cover_placements_but_never_the_buffer() {
+        let mut inv = InventoryState::new(2);
+        inv.base_slots[0] = Some(plain_item("base-u", 1));
+        inv.equipped.insert(
+            EquipSlot::MainHand,
+            ItemInstance::new("equip-u", "eisenschwert", ItemModifiers::default()),
+        );
+        inv.buffer.push(Some(plain_item("buffer-u", 1)));
+        let uuids = inv.persistent_uuids();
+        assert!(uuids.contains("base-u"));
+        assert!(uuids.contains("equip-u"));
+        assert!(
+            !uuids.contains("buffer-u"),
+            "Puffer ist nie persistente Platzierung"
+        );
+        // Nach Vollentnahme ist die UUID abgekoppelt (nicht mehr gemeldet).
+        inv.try_take_instance("base-u", 1).unwrap();
+        assert!(!inv.persistent_uuids().contains("base-u"));
     }
 
     /// Test-Helfer: Instanz mit gegebener Stackgröße.

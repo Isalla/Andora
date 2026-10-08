@@ -329,4 +329,23 @@ mod tests {
     fn collect_rejects_missing_dir() {
         assert!(collect_files(std::path::Path::new("/gibt/es/nicht")).is_err());
     }
+
+    /// Das ausgelieferte Migrationsverzeichnis folgt dem Projektmuster:
+    /// lückenlos ab 1 nummeriert, einschließlich der
+    /// Lifecycle-Metadaten-Migration (021). Nur Dateiebene — es wird keine
+    /// Migration ausgeführt und keine Datenbank berührt.
+    #[test]
+    fn shipped_migrations_are_gapless_including_lifecycle() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let files = collect_files(&dir).expect("Migrationsverzeichnis lesbar");
+        let nums: Vec<u32> = files.iter().map(|f| f.num).collect();
+        assert_eq!(
+            nums,
+            (1..=21).collect::<Vec<_>>(),
+            "Migrationen 001–021 lückenlos"
+        );
+        let last = files.last().expect("mindestens eine Migration");
+        assert_eq!((last.num, last.tag.as_str()), (21, "item_lifecycle"));
+        assert_eq!(last.file, "021_item_lifecycle.sql");
+    }
 }

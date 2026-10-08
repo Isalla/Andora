@@ -127,13 +127,16 @@ Endgültige Entfernung aus der History erfolgt insbesondere:
   gesamte History.
 
 Erst dann gilt das darin befindliche Item gemäß der bestehenden
-Item-Instanz-Lifecycle-Regel (`inventory_system.md` §16) als endgültig
-vernichtet: Die persistente `item_instances`-Zeile muss entsprechend
-kontrolliert entfernt werden.
-
-In diesem Dokumentationsauftrag wird **keine konkrete DB-Implementierung**
-festgelegt; die Lifecycle-Semantik (wann genau das `item_instances`-Loeschen
-im Zeitverlauf erfolgt) bleibt dem Coding-Auftrag vorbehalten.
+Item-Instanz-Lifecycle-Regel (`inventory_system.md` §16, Umsetzung §18) als
+endgültig vernichtet: Die persistente `item_instances`-Zeile wird
+kontrolliert entfernt — revisionsgebunden im Drain, in derselben Transaktion
+wie Inventar, Idia und `persist_revision`, und nur wenn die UUID weder im
+Snapshot-Inventar steht noch in der DB referenziert ist. Die Abkopplung
+erfolgt über die Inventar-Anschlussstellen (`try_take_instance`,
+`retired_uuid` aus `try_insert_instance`); die Sell-/Buyback-History selbst
+bleibt dabei reiner Runtime-State (Abschnitt 10) und ist kein
+Finalisierungsnachweis. Details regelt `inventory_system.md` §18; Händlerhandler,
+Preise und Angebote folgen mit dem späteren Händler-Spiellayer.
 
 ---
 

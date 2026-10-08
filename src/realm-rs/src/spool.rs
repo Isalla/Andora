@@ -143,6 +143,35 @@ pub enum RecoveryStatusUpdate {
     RecoveryStillOpen { remaining: usize },
 }
 
+/// K2-Aktion eines Drainer-Ticks für die Startup-Finalisierung (reine
+/// Entscheidungsfunktion; produktiv ausgewertet in
+/// `apply_drain_tick_with_lifecycle`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainTickLifecycleAction {
+    /// Kein Finalisierungslauf in diesem Tick.
+    None,
+    /// Zuvor offene Recovery gerade bestätigt abgeschlossen, Finalisierung
+    /// steht noch aus → genau einmal nachholen, bevor READY gilt.
+    RunFinalize,
+}
+
+/// K2-Entscheidung (reine Funktion, ohne DB- und ohne Scheduling-Annahmen):
+/// Nur der Übergang „offen → bestätigt abgeschlossen" bei noch ausstehender
+/// Finalisierung löst einen Lauf aus. Regelbetrieb, bereits erledigte Läufe
+/// und weiterhin offene Recoverys laufen ohne Finalisierung weiter.
+pub fn drain_tick_lifecycle_action(
+    recovery_was_open: bool,
+    update: RecoveryStatusUpdate,
+    already_finalized: bool,
+) -> DrainTickLifecycleAction {
+    if already_finalized {
+        return DrainTickLifecycleAction::None;
+    }
+    match (recovery_was_open, update) {
+        (true, RecoveryStatusUpdate::Ready) => DrainTickLifecycleAction::RunFinalize,
+        _ => DrainTickLifecycleAction::None,
+    }
+}
 /// Durable-Snapshot-Spool. `in_flight` serialisiert pro Spieler (verhindert
 /// konkurrierende Snapshots derselben Revisions-Baseline und serialisiert
 /// zusätzlich den Eigentümer-/Logout-Übergang pro `player_id` — siehe
@@ -351,6 +380,11 @@ pub struct PersistRuntime {
     /// unterscheidet der Hintergrund-Drainer „erster Erfolg bei noch offener
     /// Start-Recovery" von „normale neue Spool-Arbeit im Regelbetrieb".
     recovery_open: Arc<AtomicBool>,
+    /// K2: Startup-Finalisierung bereits erfolgreich abgeschlossen (sofortig
+    /// im Startpfad oder nachgeholt durch den Drainer). Nach Erfolg kein
+    /// erneuter pauschaler Durchlauf im laufenden Betrieb — schützt gültige
+    /// Runtime-Zustände vor wiederholter Blanket-Bereinigung.
+    lifecycle_startup_finalized: Arc<AtomicBool>,
 }
 
 impl PersistRuntime {
@@ -366,6 +400,7 @@ impl PersistRuntime {
             weapon_skill_id: weapon_skill_id.to_string(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -489,6 +524,73 @@ impl PersistRuntime {
                     self.set_status(PersistStatus::Ready);
                     Ok(RecoveryStatusUpdate::Ready)
                 }
+            }
+        }
+    }
+
+    /// K2: Wurde die Startup-Finalisierung bereits erfolgreich abgeschlossen?
+    pub fn lifecycle_startup_finalized(&self) -> bool {
+        self.lifecycle_startup_finalized.load(Ordering::SeqCst)
+    }
+
+    /// K2: Gemeinsamer Finalisierungsmechanismus für den sofortigen
+    /// (Startpfad) und den verzögerten (Drainer) Recovery-Abschluss. Führt
+    /// genau einen Durchlauf aus; nach Erfolg ist die Einmaligkeit über
+    /// `lifecycle_startup_finalized` gesichert (kein erneuter pauschaler
+    /// Durchlauf im laufenden Betrieb). Ein Fehler lässt Pflichten
+    /// unverändert (die fehlgeschlagene Zeile bleibt per Transaktionsabbruch
+    /// erhalten) und wird an den Aufrufer zur kontrollierten Wiederholung
+    /// berichtet.
+    pub async fn finalize_startup_lifecycle(
+        &self,
+        pool: &Pool<MySql>,
+    ) -> Result<crate::db::ItemFinalizeReport, String> {
+        if self.lifecycle_startup_finalized() {
+            return Ok(crate::db::ItemFinalizeReport::default());
+        }
+        let report = crate::db::finalize_detached_item_instances(pool).await?;
+        self.lifecycle_startup_finalized
+            .store(true, Ordering::SeqCst);
+        Ok(report)
+    }
+
+    /// K2: Periodischer Drainer-Tick mit nachgeholter Startup-Finalisierung.
+    /// Nutzt den bestehenden `apply_drain_tick`-Mechanismus unverändert und
+    /// holt die Finalisierung genau dann nach, wenn eine zuvor offene Recovery
+    /// gerade bestätigt abgeschlossen wurde (`drain_tick_lifecycle_action`).
+    /// Bei Finalisierungsfehler bleibt der Realm DEGRADED und die Recovery
+    /// offen (kontrollierter Retry im nächsten Tick); READY gilt erst nach
+    /// erfolgreichem Abschluss aller notwendigen Schritte.
+    pub async fn apply_drain_tick_with_lifecycle(
+        &self,
+        pool: &Pool<MySql>,
+    ) -> Result<RecoveryStatusUpdate, String> {
+        let was_open = self.recovery_open();
+        let update = self.apply_drain_tick()?;
+        if drain_tick_lifecycle_action(was_open, update, self.lifecycle_startup_finalized())
+            != DrainTickLifecycleAction::RunFinalize
+        {
+            return Ok(update);
+        }
+        match self.finalize_startup_lifecycle(pool).await {
+            Ok(report) => {
+                if report.deleted > 0 || report.metadata_dropped > 0 {
+                    log::info!(
+                        "Lifecycle-Finalisierung (verzögert): {} geprüft, {} Instanzen finalisiert, {} referenziert erhalten, {} Metadaten bereinigt, {} unbekannter Grund",
+                        report.scanned,
+                        report.deleted,
+                        report.kept_referenced,
+                        report.metadata_dropped,
+                        report.skipped_unknown_reason
+                    );
+                }
+                Ok(RecoveryStatusUpdate::Ready)
+            }
+            Err(e) => {
+                log::error!("Lifecycle-Finalisierung (verzögert) fehlgeschlagen: {e}");
+                self.set_status(PersistStatus::Degraded);
+                self.set_recovery_open(true);
+                Ok(RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 })
             }
         }
     }
@@ -1992,6 +2094,9 @@ mod tests {
             // `P-18`: `None` = Altformat ohne Cooldown-Feld; diese Fixtures
             // prüfen Revision/Attribution, nicht den Cooldown-Bestand.
             cooldowns: None,
+            // Item-Lifecycle: `None` = Altformat ohne Lifecycle-Feld; diese
+            // Fixtures prüfen Revision/Attribution, nicht die Finalisierung.
+            item_lifecycle: None,
             inventory: InventoryState::default(),
             generation: 0,
             dirty: crate::persist::PersistDirty::default(),
@@ -3472,6 +3577,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3750,6 +3856,119 @@ mod tests {
         assert_eq!(s.count_batches().unwrap(), 0);
         assert_eq!(rt.apply_drain_tick().unwrap(), RecoveryStatusUpdate::Ready);
         assert_eq!(rt.status(), PersistStatus::Ready);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    // ---- K2: nachgeholte Startup-Finalisierung bei verzögertem Abschluss ----
+
+    /// K2-Entscheidung (reine Funktion, ohne DB- und Scheduling-Annahmen):
+    /// Nur der Übergang „offen → bestätigt abgeschlossen" bei noch
+    /// ausstehender Finalisierung löst genau einen Lauf aus.
+    #[test]
+    fn k2_tick_action_runs_only_for_delayed_completion() {
+        assert_eq!(
+            drain_tick_lifecycle_action(false, RecoveryStatusUpdate::Ready, false),
+            DrainTickLifecycleAction::None,
+            "Regelbetrieb ohne offene Recovery: kein Lauf"
+        );
+        assert_eq!(
+            drain_tick_lifecycle_action(true, RecoveryStatusUpdate::Ready, false),
+            DrainTickLifecycleAction::RunFinalize,
+            "verzögerter Abschluss: genau einmal nachholen"
+        );
+        assert_eq!(
+            drain_tick_lifecycle_action(true, RecoveryStatusUpdate::Ready, true),
+            DrainTickLifecycleAction::None,
+            "bereits erledigt: kein zweiter Lauf"
+        );
+        assert_eq!(
+            drain_tick_lifecycle_action(
+                true,
+                RecoveryStatusUpdate::RecoveryStillOpen { remaining: 2 },
+                false
+            ),
+            DrainTickLifecycleAction::None,
+            "weiterhin offen: kein Lauf"
+        );
+        assert_eq!(
+            drain_tick_lifecycle_action(
+                false,
+                RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 },
+                false
+            ),
+            DrainTickLifecycleAction::None,
+            "ohne READY kein Lauf"
+        );
+    }
+
+    /// K2, Fehlerpfad am echten Tick: Unerreichbare DB → Finalisierung
+    /// schlägt fehl → Pflicht erhalten (Marke aus), DEGRADED, Recovery
+    /// offen; der nächste Tick versucht kontrolliert erneut. Keine Sleeps,
+    /// keine Scheduling-Annahmen (Lazy-Pool schlägt beim Verbinden fehl).
+    #[tokio::test(flavor = "current_thread")]
+    async fn k2_delayed_finalize_error_keeps_degraded_and_retries() {
+        let base = temp_dir("k2err");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let rt = p22_runtime(&s);
+        rt.set_recovery_open(true);
+        // Spool leer → Tick meldet Abschluss → Finalisierung läuft in den
+        // DB-Fehler (Pflicht bleibt per Transaktionsabbruch erhalten).
+        let out = rt
+            .apply_drain_tick_with_lifecycle(&unreachable_lazy_pool())
+            .await
+            .expect("Fehlerpfad bleibt Ok mit Offen-Meldung");
+        assert_eq!(
+            out,
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 }
+        );
+        assert_eq!(rt.status(), PersistStatus::Degraded);
+        assert!(rt.recovery_open(), "Abschluss steht weiter aus");
+        assert!(!rt.lifecycle_startup_finalized(), "Pflicht erhalten");
+        // Kontrollierter Retry im Folgetick (keine Schleife, kein Timer).
+        let again = rt
+            .apply_drain_tick_with_lifecycle(&unreachable_lazy_pool())
+            .await
+            .expect("Retry bleibt Ok mit Offen-Meldung");
+        assert_eq!(
+            again,
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 }
+        );
+        assert!(!rt.lifecycle_startup_finalized());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// K2, Einmaligkeit am echten Mechanismus: Nach gesetzter Erfolgsmarke
+    /// (sofortiger Abschluss) läuft im Drainer-Tick keine pauschale
+    /// Startup-Finalisierung mehr — ohne jeden DB-Zugriff (der unerreichbare
+    /// Pool bliebe sonst nicht stumm). Das schützt gültige Runtime-Zustände
+    /// im laufenden Betrieb. Der erfolgreiche DB-Durchlauf selbst ist offline
+    /// prinzipbedingt unbelegt (SQL-Grenze); sein Nachzustand (Marke gesetzt)
+    /// ist hier der Ausgangspunkt.
+    #[tokio::test(flavor = "current_thread")]
+    async fn k2_finalized_flag_skips_blanket_refinalize_without_db() {
+        let base = temp_dir("k2once");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let rt = p22_runtime(&s);
+        rt.set_recovery_open(true);
+        rt.lifecycle_startup_finalized
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        // Gemeinsamer Mechanismus als No-Op: kein DB-Zugriff trotz
+        // unerreichbarem Pool (sonst Fehler statt Default-Bericht).
+        let report = rt
+            .finalize_startup_lifecycle(&unreachable_lazy_pool())
+            .await
+            .expect("gesetzte Marke ist No-Op");
+        assert_eq!(report, crate::db::ItemFinalizeReport::default());
+        // Tick schließt normal ab, ohne Finalisierung anzustoßen.
+        let out = rt
+            .apply_drain_tick_with_lifecycle(&unreachable_lazy_pool())
+            .await
+            .expect("Tick ohne Finalisierung");
+        assert_eq!(out, RecoveryStatusUpdate::Ready);
+        assert_eq!(rt.status(), PersistStatus::Ready);
+        assert!(!rt.recovery_open());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -4547,6 +4766,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
 
         // Schreibziel unbenutzbar → Abbruch vor jeder Veröffentlichung.
@@ -4656,6 +4876,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
 
         // Der erste Lauf scheitert an der Dauerhaftigkeitsgrenze
@@ -4874,6 +5095,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
 
         // Spool-Verzeichnis entfernen: die Veröffentlichung muss scheitern.
@@ -4994,6 +5216,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(runtime.persist_dirty_run(&shared, &ids).await.unwrap(), 3);
 
@@ -5039,6 +5262,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
         let out = runtime
             .persist_dirty_run(&shared, &["42".to_string()])
@@ -5067,6 +5291,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
         let ids: Vec<String> = ["42", "43"].iter().map(|s| s.to_string()).collect();
         runtime.persist_dirty_run(&shared, &ids).await.unwrap();
@@ -5433,6 +5658,7 @@ mod tests {
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),
             recovery_open: Arc::new(AtomicBool::new(false)),
+            lifecycle_startup_finalized: Arc::new(AtomicBool::new(false)),
         };
         let shared = crate::world::new_shared();
         let (p, _rx) = dirty_test_player("p");
