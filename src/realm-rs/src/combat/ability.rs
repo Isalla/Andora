@@ -985,6 +985,23 @@ pub(crate) fn broadcast_combat_event(
 /// Aufräumen bei Tod einer Entität (Ability-System.md §6, §20).
 pub fn on_death(world: &mut World, entity_id: &str, is_player: bool) {
     if is_player {
+        // Tod bricht den noch nicht verbindlich gestarteten Spielerhandel
+        // des Charakters ab und informiert den Partner
+        // (docs/Handelssystem.md §15); verbindlich vorbereitete Inhalte
+        // bleiben von der bestehenden Wiederherstellungspflicht gedeckt.
+        for (partner, note) in crate::player_trade::abort_for(
+            world,
+            entity_id,
+            crate::player_trade::AbortReason::Death,
+        ) {
+            if let Some(q) = world.players.get(&partner) {
+                q.send(&crate::protocol::Frame::new(
+                    0,
+                    crate::protocol::s2c::PLAYER_TRADE,
+                    note,
+                ));
+            }
+        }
         // `P-18`: Das persistente Set stammt aus der tatsächlich geladenen
         // Ability-Registry (`World::persistent_cooldown_ids`, gefüllt beim Start
         // des Spielerservers) — nicht mehr aus einem konstanten Leer-Set.

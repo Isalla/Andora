@@ -379,6 +379,34 @@ impl InventoryState {
             .collect()
     }
 
+    /// Eigene handelbare Instanz für Spielerangebote: genau eine Platzierung
+    /// im Basis-/Tascheninventar. Equipment, Puffer, mehrdeutige oder fremde
+    /// UUIDs liefern `None`. Rucksäcke sind Struktur ohne eigene Container-
+    /// UUID (siehe `Bag`); es gibt kein veräußerbares Container-Exemplar.
+    /// Reine Lesefunktion, keine Mutation.
+    pub fn owned_instance(&self, uuid: &str) -> Option<&ItemInstance> {
+        if uuid.trim().is_empty() {
+            return None;
+        }
+        let placed = self
+            .base_slots
+            .iter()
+            .chain(self.bags.iter().flat_map(|b| &b.slots))
+            .filter_map(|s| s.as_ref())
+            .chain(self.equipped.values())
+            .chain(self.buffer.iter().filter_map(|s| s.as_ref()))
+            .filter(|it| it.item_uuid == uuid)
+            .count();
+        if placed != 1 {
+            return None;
+        }
+        self.base_slots
+            .iter()
+            .chain(self.bags.iter().flat_map(|b| &b.slots))
+            .filter_map(|s| s.as_ref())
+            .find(|it| it.item_uuid == uuid)
+    }
+
     /// Entnimmt exakt `qty` aus genau einer UUID im Grundinventar oder in
     /// Tascheninhalten. Kein Equipment, kein Taschencontainer, kein Puffer.
     /// Vollentnahme erhält die UUID; beim Split behält der Rest seine UUID,
@@ -570,8 +598,7 @@ impl InventoryState {
         base + bags
     }
 
-    fn slot_of(&self, uuid: &str) -> Option<ItemLoc> {
-        for (i, s) in self.base_slots.iter().enumerate() {
+    fn slot_of(&self, uuid: &str) -> Option<ItemLoc> {        for (i, s) in self.base_slots.iter().enumerate() {
             if s.as_ref().map(|it| it.item_uuid.as_str()) == Some(uuid) {
                 return Some(ItemLoc::Base(i));
             }

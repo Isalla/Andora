@@ -577,6 +577,25 @@ pub async fn commit_trade(
     .await
 }
 
+/// Produktionseintrag mit Dialog-Nachprüfung (Spielerhandel): `validate`
+/// läuft unter den erworbenen Gates und derselben Sperre wie die
+/// Vorbereitung (siehe `commit_trade_with_validation`); die Veröffentlichung
+/// ist der bestehende Spool-Write. Keine zweite Pipeline.
+pub async fn commit_validated_trade<V>(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: TradeCommitRequest,
+    validate: V,
+) -> Result<(), String>
+where
+    V: FnOnce(&crate::world::World) -> Result<(), String>,
+{
+    commit_trade_with_validation(spool, shared, request, validate, |artifact| async move {
+        spool.write_trade(&artifact)
+    })
+    .await
+}
+
 pub(crate) async fn commit_trade_with<W, F>(
     spool: &crate::spool::Spool,
     shared: &Shared,
@@ -584,6 +603,32 @@ pub(crate) async fn commit_trade_with<W, F>(
     publish: W,
 ) -> Result<(), String>
 where
+    W: FnOnce(TradeArtifact) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    commit_trade_with_validation(spool, shared, request, |_| Ok(()), publish).await
+}
+
+/// Commit mit zusätzlicher verbindlicher Nachprüfung unmittelbar vor der
+/// Vorbereitung: `validate` läuft unter den erworbenen Charakter-Gates und
+/// derselben World-Sperre, unter der `prepare_trade` die verbindlichen
+/// Nachzustände baut — ohne Await und ohne Freigeben der Sperre dazwischen.
+/// Aufrufer mit Dialogzustand (Spielerhandel) prüfen hier Version,
+/// Bestätigungen, Eigentümer, Alive-/Reichweitenstand, Bindung und
+/// Questschutz erneut; Inventarmechanik (Eigentumsplatzierung, Mengen,
+/// Idia-Erhalt, Kapazität, Split/Merge) prüft `prepare_trade` atomar in
+/// derselben Sperre. Bereits retainede Vorbereitungen (Pending-Wiederholung)
+/// werden nicht erneut validiert: nach verbindlicher Vorbereitung bleibt die
+/// bestehende Pending-/Recovery-Pflicht unverändert maßgeblich.
+pub(crate) async fn commit_trade_with_validation<W, F, V>(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: TradeCommitRequest,
+    validate: V,
+    publish: W,
+) -> Result<(), String>
+where
+    V: FnOnce(&crate::world::World) -> Result<(), String>,
     W: FnOnce(TradeArtifact) -> F,
     F: std::future::Future<Output = Result<(), String>>,
 {
@@ -639,6 +684,9 @@ where
             {
                 return Err("trade commit ID conflict".into());
             }
+            // Verbindliche Nachprüfung (siehe `commit_trade_with_validation`):
+            // kein Await, keine Sperrfreigabe bis einschließlich Vorbereitung.
+            validate(&world)?;
             let prepared = prepare_trade(&world, &request)?;
             world
                 .prepared_trades

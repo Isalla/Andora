@@ -378,6 +378,7 @@ pub fn is_known_c2s(msg_type: i64) -> bool {
             | GROUP_KICK
             | GROUP_TRANSFER
             | SPEND_ATTRIBUTE
+            | PLAYER_TRADE
     )
 }
 
@@ -1402,6 +1403,7 @@ mod tests {
             7,
             &serde_json::json!({"dir": [1.0, 0.0], "hp": 140000, "max_hp": 140000}),
             100,
+            5.0,
         )
         .await;
         crate::handlers::handle_attack(

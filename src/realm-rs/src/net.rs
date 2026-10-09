@@ -934,14 +934,21 @@ async fn dispatch(
         c2s::HEARTBEAT => {
             handlers::handle_heartbeat(&ctx.shared, tx, conn_id, frame.seq, &data).await
         }
-        c2s::MOVE => handlers::handle_move(&ctx.shared, conn_id, &data, ctx.cfg.tick_ms).await,
+        c2s::MOVE => {
+            handlers::handle_move(
+                &ctx.shared,
+                conn_id,
+                &data,
+                ctx.cfg.tick_ms,
+                ctx.cfg.loot.pickup_radius,
+            )
+            .await
+        }
         c2s::ATTACK => {
             handlers::handle_attack(&ctx.shared, conn_id, &data, &ctx.cfg.combat, &ctx.cfg.npc)
                 .await
         }
-        c2s::ABILITY => {
-            handlers::handle_ability(ctx, conn_id, &data).await
-        }
+        c2s::ABILITY => handlers::handle_ability(ctx, conn_id, &data).await,
         c2s::CHAT => {
             handlers::handle_chat(
                 &ctx.parental,
@@ -957,7 +964,9 @@ async fn dispatch(
         c2s::GROUP_INVITE => handlers::handle_group_invite(ctx, conn_id, &data).await,
         c2s::GROUP_INVITE_REACT => handlers::handle_group_invite_react(ctx, conn_id, &data).await,
         c2s::GROUP_SUGGEST => handlers::handle_group_suggest(ctx, conn_id, &data).await,
-        c2s::GROUP_SUGGEST_DECIDE => handlers::handle_group_suggest_decide(ctx, conn_id, &data).await,
+        c2s::GROUP_SUGGEST_DECIDE => {
+            handlers::handle_group_suggest_decide(ctx, conn_id, &data).await
+        }
         c2s::GROUP_LEAVE => handlers::handle_group_leave(ctx, conn_id, &data).await,
         c2s::GROUP_KICK => handlers::handle_group_kick(ctx, conn_id, &data).await,
         c2s::GROUP_TRANSFER => handlers::handle_group_transfer(ctx, conn_id, &data).await,
@@ -965,9 +974,7 @@ async fn dispatch(
         c2s::SPEND_ATTRIBUTE => {
             handlers::handle_spend_attribute(ctx, tx, conn_id, frame.seq, &data).await
         }
-        c2s::AUCTION_BUY => {
-            handlers::handle_auction_buy(ctx, tx, conn_id, frame.seq, &data).await
-        }
+        c2s::AUCTION_BUY => handlers::handle_auction_buy(ctx, tx, conn_id, frame.seq, &data).await,
         c2s::PARENTAL => {
             let pid: Option<String> = {
                 let world = ctx.shared.lock().await;
@@ -979,8 +986,9 @@ async fn dispatch(
                 parental::handle_message(&ctx.parental, tx, &pid, frame.seq, action, pin).await;
             }
         }
-        c2s::NPC_TALK => {
-            handlers::handle_npc_talk(ctx, tx, conn_id, frame.seq, &data).await
+        c2s::NPC_TALK => handlers::handle_npc_talk(ctx, tx, conn_id, frame.seq, &data).await,
+        c2s::PLAYER_TRADE => {
+            handlers::handle_player_trade(ctx, tx, conn_id, frame.seq, &data).await
         }
         // AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
         // Unbekannte Typen werden bereits vor dem Gate verworfen.
@@ -2695,6 +2703,7 @@ mod tests {
             7,
             &serde_json::json!({"dir": [1.0, 0.0]}),
             1000,
+            5.0,
         )
         .await;
         let (x_before, gen_before) = {
@@ -2826,6 +2835,7 @@ mod tests {
             8,
             &serde_json::json!({"dir": [0.0, 1.0]}),
             1000,
+            5.0,
         )
         .await;
         // Erwartungswerte des neuen Owners festhalten (unveränderter RAM-Stand).
@@ -5013,8 +5023,7 @@ mod tests {
         // Bewusst per Schleife statt per `map`: `tungstenite::Error` ist ein
         // großer `Err`-Typ, den ein `map`-Closure als Rückgabetyp aufspannt
         // (Clippy `result_large_err`) — die Basis hatte diese Warnung nicht.
-        let mut items: Vec<Result<Message, tungstenite::Error>> =
-            Vec::with_capacity(frames.len());
+        let mut items: Vec<Result<Message, tungstenite::Error>> = Vec::with_capacity(frames.len());
         for t in frames {
             items.push(Ok(Message::Text(t.into())));
         }
@@ -5037,8 +5046,7 @@ mod tests {
         frames: Vec<String>,
     ) {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut items: Vec<Result<Message, tungstenite::Error>> =
-            Vec::with_capacity(frames.len());
+        let mut items: Vec<Result<Message, tungstenite::Error>> = Vec::with_capacity(frames.len());
         for t in frames {
             items.push(Ok(Message::Text(t.into())));
         }
@@ -5094,19 +5102,20 @@ mod tests {
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let frame_yielded = Arc::new(tokio::sync::Notify::new());
-        let stream = futures_util::stream::iter(vec![Ok::<
-            Message,
-            tungstenite::Error,
-        >(Message::Text(
-            c2s_text(crate::protocol::c2s::MOVE, serde_json::json!({"dir": [1, 0]}))
+        let stream =
+            futures_util::stream::iter(vec![Ok::<Message, tungstenite::Error>(Message::Text(
+                c2s_text(
+                    crate::protocol::c2s::MOVE,
+                    serde_json::json!({"dir": [1, 0]}),
+                )
                 .into(),
-        ))])
-        .inspect({
-            let yielded = frame_yielded.clone();
-            move |_| {
-                yielded.notify_one();
-            }
-        });
+            ))])
+            .inspect({
+                let yielded = frame_yielded.clone();
+                move |_| {
+                    yielded.notify_one();
+                }
+            });
 
         let mut rate_guard = crate::security::ConnGuard::default();
         let clock2 = clock.clone();
@@ -5192,14 +5201,14 @@ mod tests {
             world.players["a"].x, 2.0,
             "genau die zwei erlaubten MOVEs dürfen wirken"
         );
-        assert_eq!(
-            guard.violations, 2,
-            "jeder Rate-Verstoß zählt genau einmal"
-        );
+        assert_eq!(guard.violations, 2, "jeder Rate-Verstoß zählt genau einmal");
         // Wirkungsnachweis der anderen Klasse: `combat` wird **bewaffnet**
         // (Zustandswechsel), nicht die Schlagfolge — der Taktfix darf die
         // Beobachtung nicht verdecken.
-        let armed = world.players["a"].combat.as_ref().map(|c| c.target_id.clone());
+        let armed = world.players["a"]
+            .combat
+            .as_ref()
+            .map(|c| c.target_id.clone());
         assert_eq!(
             armed.as_deref(),
             Some("b"),
@@ -5445,7 +5454,10 @@ mod tests {
             (0.0, 0.0),
             "übergroßer Frame darf keine Bewegung auslösen"
         );
-        assert_eq!(guard.violations, 1, "Größen-Gate zählt genau eine Auffälligkeit");
+        assert_eq!(
+            guard.violations, 1,
+            "Größen-Gate zählt genau eine Auffälligkeit"
+        );
     }
 
     /// Ungültiges JSON wird verworfen (kein Crash, keine Wirkung).
@@ -5461,7 +5473,10 @@ mod tests {
         let world = ctx.shared.lock().await;
         let p = &world.players["a"];
         assert_eq!((p.x, p.y), (0.0, 0.0));
-        assert_eq!(guard.violations, 1, "Parse-Gate zählt genau eine Auffälligkeit");
+        assert_eq!(
+            guard.violations, 1,
+            "Parse-Gate zählt genau eine Auffälligkeit"
+        );
     }
 
     /// Unbekannter Nachrichtentyp wird an der Whitelist verworfen. Ohne die
@@ -5486,7 +5501,10 @@ mod tests {
         let world = ctx.shared.lock().await;
         let p = &world.players["a"];
         assert_eq!((p.x, p.y), (0.0, 0.0));
-        assert_eq!(guard.violations, 1, "Whitelist zählt genau eine Auffälligkeit");
+        assert_eq!(
+            guard.violations, 1,
+            "Whitelist zählt genau eine Auffälligkeit"
+        );
     }
 
     /// Gültige, bekannte Nachricht einer **nicht eingeloggten** Verbindung
@@ -5520,7 +5538,10 @@ mod tests {
             (0.0, 0.0),
             "Session-Gate muss greifen, obwohl der Handler bereit wäre"
         );
-        assert_eq!(guard.violations, 1, "Session-Gate zählt genau eine Auffälligkeit");
+        assert_eq!(
+            guard.violations, 1,
+            "Session-Gate zählt genau eine Auffälligkeit"
+        );
     }
 
     /// Kontrollnachweis: dieselbe Testumgebung erreicht über `read_loop`
@@ -5546,8 +5567,14 @@ mod tests {
 
         let world = ctx.shared.lock().await;
         let x = world.players["a"].x;
-        assert!(x > 0.0, "gültige Nachricht muss den Handler erreichen (x={x})");
-        assert_eq!(guard.violations, 0, "gültige Nachricht ist kein Gate-Verstoß");
+        assert!(
+            x > 0.0,
+            "gültige Nachricht muss den Handler erreichen (x={x})"
+        );
+        assert_eq!(
+            guard.violations, 0,
+            "gültige Nachricht ist kein Gate-Verstoß"
+        );
     }
 
     /// Nach einzelnen verworfenen Frames wird weitergelesen, solange die
@@ -5683,7 +5710,10 @@ mod tests {
         )
         .await;
         assert_eq!(violations, 0, "gültiger Frame ist kein Gate-Verstoß");
-        assert!(x.is_finite() && y.is_finite(), "Position muss endlich sein ({x},{y})");
+        assert!(
+            x.is_finite() && y.is_finite(),
+            "Position muss endlich sein ({x},{y})"
+        );
         assert_eq!(
             (x, y),
             (21.0, 0.0),
@@ -5731,7 +5761,10 @@ mod tests {
         )
         .await;
         assert_eq!(violations, 0, "Frame ist syntaktisch und typseitig gültig");
-        assert!(x.is_finite() && y.is_finite(), "Position muss endlich sein ({x},{y})");
+        assert!(
+            x.is_finite() && y.is_finite(),
+            "Position muss endlich sein ({x},{y})"
+        );
         assert_eq!((x, y), (0.0, 0.0), "Überlauf führt zu kontrolliertem No-op");
     }
 
@@ -6100,5 +6133,487 @@ mod tests {
         assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 5);
         assert_eq!(w.players["a"].idia, 500);
         assert!(!w.players["a"].dirty.any());
+    }
+
+    /// Ein PLAYER_TRADE-Frame durch den echten Dispatcher (kein Abbruch).
+    async fn dispatch_player_trade(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        conn: u64,
+        seq: i64,
+        data: serde_json::Value,
+    ) {
+        let frame = crate::protocol::Frame::new(seq, crate::protocol::c2s::PLAYER_TRADE, data);
+        assert!(
+            !dispatch(ctx, tx, conn, guard, sec_cfg, frame, &Instant::now).await,
+            "Spielerhandel trennt die Verbindung nicht"
+        );
+    }
+
+    fn player_trade_frames(
+        rx: &mut mpsc::UnboundedReceiver<String>,
+    ) -> Vec<crate::protocol::Frame> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            let f: crate::protocol::Frame = serde_json::from_str(&m).expect("Frame lesbar");
+            assert_eq!(f.msg_type, crate::protocol::s2c::PLAYER_TRADE);
+            out.push(f);
+        }
+        out
+    }
+
+    fn pt_player(
+        id: &str,
+        x: f64,
+        idia: i64,
+        tx: mpsc::UnboundedSender<String>,
+    ) -> crate::world::Player {
+        crate::world::Player {
+            id: id.into(),
+            name: id.into(),
+            x,
+            y: 0.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 100,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 1,
+            session_id: String::new(),
+            entities: Default::default(),
+            last_activity: std::time::Instant::now(),
+            tx,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia,
+            armor: 0,
+            weapon_skill: 1,
+            combat: None,
+            last_strike: None,
+            mana: 50,
+            max_mana: 50,
+            effects: Default::default(),
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: Default::default(),
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 50,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: crate::inventory::InventoryState::new(8),
+            quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
+            persist_revision: 0,
+        }
+    }
+
+    /// Zwei Nachbarn mit beobachtbaren Partnerkanälen für Spielerhandel-
+    /// Dispatch-Tests (kanonische IDs, Abstand 2 m, Trank gegen Schwert).
+    async fn insert_player_trade_world(
+        ctx: &Arc<Ctx>,
+    ) -> (
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
+        let (tx1, rx1) = mpsc::unbounded_channel();
+        let (tx2, rx2) = mpsc::unbounded_channel();
+        {
+            let mut w = ctx.shared.lock().await;
+            let mut p1 = pt_player("1", 0.0, 100, tx1);
+            let mut p2 = pt_player("2", 2.0, 50, tx2);
+            let mut def = crate::item::ItemDefinition::new(
+                "hp_potion",
+                "Heiltrank",
+                crate::item::ItemCategory::Potion,
+            );
+            def.max_stack = 20;
+            let mut pot = crate::item::ItemInstance::new(
+                "pot-1",
+                "hp_potion",
+                crate::item::ItemModifiers::default(),
+            );
+            pot.count = 10;
+            p1.inventory.base_slots[0] = Some(pot);
+            let sword = crate::item::ItemDefinition::new(
+                "eisenschwert",
+                "Eisenschwert",
+                crate::item::ItemCategory::Weapon,
+            );
+            let mut sw = crate::item::ItemInstance::new(
+                "sword-2",
+                "eisenschwert",
+                crate::item::ItemModifiers::default(),
+            );
+            sw.count = 1;
+            p2.inventory.base_slots[0] = Some(sw);
+            w.item_definitions.insert("hp_potion".into(), def);
+            w.item_definitions.insert("eisenschwert".into(), sword);
+            w.players.insert("1".into(), p1);
+            w.players.insert("2".into(), p2);
+            w.by_conn.insert(7, "1".into());
+            w.by_conn.insert(8, "2".into());
+        }
+        (rx1, rx2)
+    }
+
+    /// Spielerhandel Ende-zu-Ende: Einladung, Angebote und beidseitige
+    /// Bestätigung über den echten Dispatch- und bestehenden Commit-Pfad;
+    /// `seq` wird zurückgespiegelt, der Partner sieht die gemeinsame
+    /// Angebotssicht, Erfolg erst nach Dauerhaftigkeitsgrenze. Wiederholte
+    /// Bestätigung (gleiche `seq`) erzeugt keinen Zweiteffekt.
+    #[tokio::test]
+    async fn dispatch_player_trade_full_swap_with_seq_correlation() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let (mut rx1, mut rx2) = insert_player_trade_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        let (tx7, mut rx7) = mpsc::unbounded_channel();
+        let (tx8, mut rx8) = mpsc::unbounded_channel();
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            41,
+            serde_json::json!({"action": "request", "target_id": "2"}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep.len(), 1);
+        assert_eq!(rep[0].seq, 41);
+        assert_eq!(rep[0].data["ok"], true);
+        let dialog_id = rep[0].data["dialog_id"].as_str().unwrap().to_string();
+        let push = player_trade_frames(&mut rx2);
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].seq, 0);
+        assert_eq!(push[0].data["event"], "invited");
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            7,
+            serde_json::json!({"action": "accept", "dialog_id": dialog_id}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx8);
+        assert_eq!(rep.len(), 1);
+        assert_eq!(rep[0].seq, 7);
+        assert_eq!(rep[0].data["dialog"]["state"], "open");
+        assert_eq!(player_trade_frames(&mut rx1).len(), 1);
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            13,
+            serde_json::json!({
+                "action": "offer", "dialog_id": dialog_id,
+                "items": [{"item_uuid": "pot-1", "count": 3}], "idia": 10,
+            }),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep[0].seq, 13);
+        assert_eq!(rep[0].data["dialog"]["version"], 1);
+        assert_eq!(player_trade_frames(&mut rx2).len(), 1);
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            14,
+            serde_json::json!({
+                "action": "offer", "dialog_id": dialog_id,
+                "items": [{"item_uuid": "sword-2", "count": 1}], "idia": 0,
+            }),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx8);
+        assert_eq!(rep[0].seq, 14);
+        assert_eq!(rep[0].data["dialog"]["version"], 2);
+        let push = player_trade_frames(&mut rx1);
+        assert_eq!(push[0].data["event"], "updated");
+        // Beide Seiten sehen dieselbe gemeinsame Angebotssicht, ohne fremde
+        // Inventar- oder Kontodaten (nur angebotene Instanzen + Idia).
+        assert_eq!(push[0].data["dialog"]["offers"][0]["idia"], 10);
+        assert_eq!(
+            push[0].data["dialog"]["offers"][1]["items"][0]["item_uuid"],
+            "sword-2"
+        );
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            15,
+            serde_json::json!({"action": "confirm", "dialog_id": dialog_id, "version": 2}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep[0].seq, 15);
+        assert_eq!(
+            rep[0].data["dialog"]["confirmed"],
+            serde_json::json!([true, false])
+        );
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            16,
+            serde_json::json!({"action": "confirm", "dialog_id": dialog_id, "version": 2}),
+        )
+        .await;
+        // Commit-Folgemeldungen laufen über die jeweils aktuelle
+        // Spieler-Verbindung (produktionell identisch zum Conn-Kanal;
+        // Takeover-sicher): Der Auslöser erhält sie auf seinem
+        // Spielerkanal mit seq-Echo, die verdrängte Conn bleibt stumm.
+        assert!(player_trade_frames(&mut rx8).is_empty());
+        let rep = player_trade_frames(&mut rx2);
+        // Spielerkanal 2 trägt die Vorgeschichte (confirmed); der letzte
+        // Frame ist das Commit-Ergebnis mit seq-Echo.
+        assert_eq!(rep.len(), 2);
+        assert_eq!(rep[0].data["event"], "confirmed");
+        let last = rep.last().unwrap();
+        assert_eq!(last.seq, 16);
+        assert_eq!(last.data["event"], "committed");
+        assert_eq!(last.data["idia"], 60);
+        let push = player_trade_frames(&mut rx1);
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].seq, 0);
+        assert_eq!(push[0].data["event"], "committed");
+        assert_eq!(push[0].data["idia"], 90);
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(w.players["1"].inventory.count_of("eisenschwert"), 1);
+            assert_eq!(w.players["1"].inventory.count_of("hp_potion"), 7);
+            assert_eq!(w.players["2"].inventory.count_of("hp_potion"), 3);
+            assert_eq!(w.players["1"].persist_revision, 1);
+            assert_eq!(w.players["2"].persist_revision, 1);
+        }
+        // Wiederholte Bestätigung mit gleicher seq: stabil abgelehnt, kein
+        // Zweiteffekt (kein zweiter Commit, keine weitere Mutation).
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            16,
+            serde_json::json!({"action": "confirm", "dialog_id": dialog_id, "version": 2}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx8);
+        assert_eq!(rep.len(), 1);
+        assert_eq!(rep[0].seq, 16);
+        assert_eq!(rep[0].data["ok"], false);
+        assert_eq!(rep[0].data["reason"], "no_dialog");
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["1"].persist_revision, 1);
+        assert_eq!(w.players["1"].inventory.count_of("hp_potion"), 7);
+    }
+
+    /// Stabile Ablehnungen am Dispatch: unbekannte Aktion, Eigenhandel,
+    /// veraltete Version und belegter Partner — je mit `seq`-Echo.
+    #[tokio::test]
+    async fn dispatch_player_trade_stable_rejects() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let (_rx1, _rx2) = insert_player_trade_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let (tx7, mut rx7) = mpsc::unbounded_channel();
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            51,
+            serde_json::json!({"action": "feilschen"}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep[0].seq, 51);
+        assert_eq!(rep[0].data["reason"], "unknown_action");
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            52,
+            serde_json::json!({"action": "request", "target_id": "1"}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep[0].seq, 52);
+        assert_eq!(rep[0].data["reason"], "self_trade");
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            53,
+            serde_json::json!({"action": "confirm", "dialog_id": "ptd999", "version": 0}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        assert_eq!(rep[0].seq, 53);
+        assert_eq!(rep[0].data["reason"], "no_dialog");
+    }
+
+    /// Takeover während des Commit-Awaits: Das Ergebnis erreicht die aktuell
+    /// zuständige Verbindung (hier Conn 9) mit dem `seq`-Echo der
+    /// ursprünglichen Anfrage; die verdrängte Verbindung erhält nichts, und
+    /// es entsteht kein zweiter Commit. Deterministisch ohne Sleep: Das
+    /// Charakter-Gate wird gehalten, bis der Takeover vollzogen ist.
+    #[tokio::test]
+    async fn dispatch_player_trade_takeover_during_commit_reaches_current_conn() {
+        use crate::player_trade::{
+            accept_dialog, confirm_dialog, request_dialog, set_offer, DialogOffer, OfferedItem,
+        };
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let (mut rx1, mut rx2) = insert_player_trade_world(&ctx).await;
+        let now = std::time::Instant::now();
+        let radius = ctx.cfg.loot.pickup_radius;
+        let dialog_id = {
+            let mut world = ctx.shared.lock().await;
+            let out = request_dialog(&mut world, now, radius, "1", "2").expect("request gelingt");
+            let id = out.actor_msg.unwrap()["dialog_id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            accept_dialog(&mut world, now, radius, "2", &id).expect("accept gelingt");
+            let offer_a = DialogOffer {
+                items: vec![OfferedItem {
+                    item_uuid: "pot-1".into(),
+                    count: 3,
+                }],
+                idia: 10,
+            };
+            let offer_b = DialogOffer {
+                items: vec![OfferedItem {
+                    item_uuid: "sword-2".into(),
+                    count: 1,
+                }],
+                idia: 0,
+            };
+            set_offer(&mut world, &ctx.quest, now, radius, "1", &id, &offer_a).expect("angebot 1");
+            set_offer(&mut world, &ctx.quest, now, radius, "2", &id, &offer_b).expect("angebot 2");
+            confirm_dialog(&mut world, &ctx.quest, now, radius, "1", &id, 2).expect("confirm 1");
+            id
+        };
+        // Commit blockieren: Charakter-Gate halten, finale Bestätigung über
+        // den echten Dispatch absetzen (läuft bis zur Gate-Warte).
+        let _gate = ctx.persist.player_gate("1").await.lock_owned().await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let (tx8, mut rx8) = mpsc::unbounded_channel();
+        let ctx_task = ctx.clone();
+        let dialog_task = dialog_id.clone();
+        let join = tokio::spawn(async move {
+            let mut guard = crate::security::ConnGuard::default();
+            dispatch_player_trade(
+                &ctx_task,
+                &mut guard,
+                &sec_cfg,
+                &tx8,
+                8,
+                16,
+                serde_json::json!({"action": "confirm", "dialog_id": dialog_task, "version": 2}),
+            )
+            .await;
+        });
+        // Warten, bis die Bestätigung den Dialog auf Committing gesetzt hat
+        // (kein Sleep: Fortschritt ist garantiert, Abbruch bei Ausbleiben).
+        let mut spins = 0;
+        loop {
+            {
+                let world = ctx.shared.lock().await;
+                if world
+                    .player_trade_dialogs
+                    .get(&dialog_id)
+                    .is_some_and(|d| d.state == crate::player_trade::DialogState::Committing)
+                {
+                    break;
+                }
+            }
+            spins += 1;
+            assert!(spins < 100_000, "Confirm erreicht Committing nicht");
+            tokio::task::yield_now().await;
+        }
+        // Takeover von "2" auf Conn 9 während des blockierten Commits.
+        // Der beobachtete Kanal gehört in ConnectionFields: `commit_login`
+        // übernimmt ihn als Spielerkanal (apply_connection_fields).
+        let (ntx9, mut rx9) = mpsc::unbounded_channel();
+        {
+            let mut world = ctx.shared.lock().await;
+            let candidate = pt_player("2", 2.0, 50, mpsc::unbounded_channel().0);
+            let outcome = crate::world::commit_login(
+                &mut world,
+                9,
+                candidate,
+                crate::world::ConnectionFields {
+                    tx: ntx9,
+                    session_id: "sess-9".into(),
+                    lang: "de".into(),
+                },
+            )
+            .expect("takeover gelingt");
+            assert!(matches!(
+                outcome,
+                crate::world::CommitOutcome::Takeover { old_conn_id: 8 }
+            ));
+        }
+        drop(_gate);
+        join.await.expect("Dispatch-Task endet");
+        // Aktuelle Verbindung erhält das Ergebnis mit seq-Echo; die
+        // verdrängte Verbindung und der alte Spielerkanal bleiben stumm.
+        let rep = player_trade_frames(&mut rx9);
+        assert_eq!(rep.len(), 1);
+        assert_eq!(rep[0].seq, 16);
+        assert_eq!(rep[0].data["event"], "committed");
+        assert_eq!(rep[0].data["idia"], 60);
+        assert!(player_trade_frames(&mut rx8).is_empty());
+        assert!(player_trade_frames(&mut rx2).is_empty());
+        let push = player_trade_frames(&mut rx1);
+        assert_eq!(push.len(), 1);
+        assert_eq!(push[0].seq, 0);
+        assert_eq!(push[0].data["event"], "committed");
+        assert_eq!(push[0].data["idia"], 90);
+        // Genau ein Commit: Revisionen +1, genau ein Spool-Batch, keine
+        // Wiederholung mit neuer Verbindung.
+        {
+            let w = ctx.shared.lock().await;
+            assert_eq!(w.players["1"].persist_revision, 1);
+            assert_eq!(w.players["2"].persist_revision, 1);
+            assert_eq!(w.players["1"].inventory.count_of("eisenschwert"), 1);
+            assert_eq!(w.players["2"].inventory.count_of("hp_potion"), 3);
+        }
+        assert_eq!(ctx.persist.spool().count_batches().unwrap(), 1);
     }
 }

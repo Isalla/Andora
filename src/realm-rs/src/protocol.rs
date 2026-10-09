@@ -32,6 +32,10 @@ pub mod c2s {
     ///  "wisdom"|"luck"|"endurance"}. KEINE Endwerte (kein SET_*).
     /// Der Server erhöht serverseitig um genau +1, sofern ein Punkt frei ist.
     pub const SPEND_ATTRIBUTE: i64 = 20;
+    /// Spielerhandel (Dialog/Angebote, docs/Handelssystem.md §15):
+    /// {action, dialog_id?, target_id?, items?, idia?, version?} mit
+    /// action = request/accept/decline/offer/confirm/cancel.
+    pub const PLAYER_TRADE: i64 = 21;
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -63,6 +67,10 @@ pub mod s2c {
     /// {ok, attribute?, reason?, strength?, constitution?, dexterity?,
     ///  intelligence?, wisdom?, luck?, endurance?, free_attr_points?}
     pub const ATTRIBUTE_RESULT: i64 = 21;
+    /// Spielerhandel-Antworten (docs/Handelssystem.md §15): {ok, action?,
+    /// event?, reason?, dialog_id?, dialog?, commit_id?, idia?}. `seq` ist
+    /// ausschließlich Korrelation und wird zurückgespiegelt.
+    pub const PLAYER_TRADE: i64 = 22;
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -127,7 +135,9 @@ mod tests {
         assert_eq!(c2s::GROUP_KICK, 18);
         assert_eq!(c2s::GROUP_TRANSFER, 19);
         assert_eq!(c2s::SPEND_ATTRIBUTE, 20);
+        assert_eq!(c2s::PLAYER_TRADE, 21);
         assert_eq!(s2c::ATTRIBUTE_RESULT, 21);
+        assert_eq!(s2c::PLAYER_TRADE, 22);
     }
 
     #[test]

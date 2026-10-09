@@ -631,7 +631,13 @@ pub async fn handle_hello(
 }
 
 /// MOVE: Position serverseitig validiert (Speed-Cap, keine Teleports).
-pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value, tick_ms: u64) {
+pub async fn handle_move(
+    shared: &Shared,
+    conn_id: u64,
+    data: &serde_json::Value,
+    tick_ms: u64,
+    trade_radius: f64,
+) {
     let (dx, dy) = match data.get("dir").and_then(|v| v.as_array()) {
         Some(a) if a.len() >= 2 => (a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0)),
         _ => (
@@ -669,6 +675,11 @@ pub async fn handle_move(shared: &Shared, conn_id: u64, data: &serde_json::Value
             crate::combat::ability::broadcast_combat_event(&world, 0.0, 0.0, 0.0, &event);
         }
     }
+
+    // Spielerhandel: Reichweitenverlust bricht nicht verbindlich gestartete
+    // Dialoge ab und informiert den Partner (docs/Handelssystem.md §15).
+    let notes = crate::player_trade::sweep_stand(&mut world, trade_radius);
+    crate::player_trade::send_notes(&world, &notes);
 }
 
 /// ATTACK (Combat V1 + V2): Auto-Grundangriff starten oder beenden.
@@ -1457,6 +1468,285 @@ fn send_trade_reject(
         v["action"] = serde_json::Value::String(a.to_string());
     }
     let _ = tx.send(Frame::new(seq, s2c::NPC_TEXT, v).encode());
+}
+
+/// PLAYER_TRADE (Spielerhandel, docs/Handelssystem.md §15): Dialog und
+/// Angebote auf dem bestehenden Zwei-Charakter-Commit. `seq` bleibt
+/// Korrelation und wird nur zurückgespiegelt (kein Idempotenz-Dedup auf
+/// Wire-Ebene; wiederholte Bestätigungen erzeugen durch deterministische
+/// Commit-Kennung plus Receipt-Dedup keinen zweiten Commit).
+pub async fn handle_player_trade(
+    ctx: &Ctx,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    data: &serde_json::Value,
+) {
+    use crate::player_trade::{
+        accept_dialog, cancel_dialog, commit_failed, commit_succeeded, commit_uncertain,
+        confirm_dialog, decline_dialog, failure_payload, request_dialog, send_notes, set_offer,
+        DialogOffer, PlayerTradeAction, PlayerTradeReject,
+    };
+    let action = match PlayerTradeAction::parse(&get_str(data, "action")) {
+        Some(a) => a,
+        None => {
+            let _ = tx.send(
+                Frame::new(
+                    seq,
+                    s2c::PLAYER_TRADE,
+                    serde_json::json!({"ok": false, "reason": PlayerTradeReject::UnknownAction.reason()}),
+                )
+                .encode(),
+            );
+            return;
+        }
+    };
+    // Aktionsbezogene Eingaben werden vor der World-Sperre aus dem JSON
+    // gelöst (reine Parsierung; fachliche Prüfung läuft unter der Sperre).
+    enum Input {
+        Request { target: String },
+        Bare,
+        Offer { offer: Result<DialogOffer, ()> },
+        Confirm { version: Option<u64> },
+    }
+    let input = match action {
+        PlayerTradeAction::Request => Input::Request {
+            target: get_str(data, "target_id"),
+        },
+        PlayerTradeAction::Accept | PlayerTradeAction::Decline | PlayerTradeAction::Cancel => {
+            Input::Bare
+        }
+        PlayerTradeAction::Offer => Input::Offer {
+            offer: parse_trade_offer(data),
+        },
+        PlayerTradeAction::Confirm => Input::Confirm {
+            version: data.get("version").and_then(|v| v.as_u64()),
+        },
+    };
+    let dialog_id = get_str(data, "dialog_id");
+    let now = Instant::now();
+    let radius = ctx.cfg.loot.pickup_radius;
+    let mut world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    if !world.players.contains_key(&pid) {
+        return;
+    }
+    let outcome = match input {
+        Input::Request { target } => {
+            if target.is_empty() {
+                Err(crate::player_trade::DialogFailure::reject(
+                    PlayerTradeReject::UnknownTarget,
+                ))
+            } else {
+                request_dialog(&mut world, now, radius, &pid, &target)
+            }
+        }
+        Input::Bare => match action {
+            PlayerTradeAction::Accept => accept_dialog(&mut world, now, radius, &pid, &dialog_id),
+            PlayerTradeAction::Decline => decline_dialog(&mut world, now, &pid, &dialog_id),
+            _ => cancel_dialog(&mut world, now, &pid, &dialog_id),
+        },
+        Input::Offer { offer } => match offer {
+            Ok(offer) => set_offer(
+                &mut world, &ctx.quest, now, radius, &pid, &dialog_id, &offer,
+            ),
+            Err(()) => Err(crate::player_trade::DialogFailure::reject_on(
+                PlayerTradeReject::InvalidOffer,
+                &dialog_id,
+            )),
+        },
+        Input::Confirm { version } => match version {
+            Some(v) => confirm_dialog(&mut world, &ctx.quest, now, radius, &pid, &dialog_id, v),
+            None => Err(crate::player_trade::DialogFailure::reject_on(
+                PlayerTradeReject::StaleVersion,
+                &dialog_id,
+            )),
+        },
+    };
+    match outcome {
+        Ok(out) => {
+            if let Some(msg) = out.actor_msg {
+                let _ = tx.send(Frame::new(seq, s2c::PLAYER_TRADE, msg).encode());
+            }
+            send_notes(&world, &out.partner_msgs);
+            // Beidseitig bestätigt: finaler Austausch ausschließlich über
+            // den bestehenden Zwei-Charakter-Commit. Die World-Sperre wird
+            // vor den Datei-/DB-Awaits freigegeben (Gate → World).
+            if let Some(request) = out.commit {
+                let commit_id = request.commit_id.clone();
+                // Verbindliche Nachprüfung (Version, Bestätigungen,
+                // Eigentümer, Alive-/Reichweitenstand, Bindung, Questschutz,
+                // Eigentum/Mengen/Idia) unter den erworbenen Gates und
+                // derselben Sperre wie die Vorbereitung; Inventarmechanik und
+                // Kapazität prüft der bestehende Pfad atomar danach.
+                let version = world
+                    .player_trade_dialogs
+                    .get(&dialog_id)
+                    .map(|d| d.version)
+                    .unwrap_or(0);
+                let dialog_id_c = dialog_id.clone();
+                let req_c = request.clone();
+                let validate = move |w: &crate::world::World| {
+                    crate::player_trade::validate_binding_preparation(
+                        w,
+                        &ctx.quest,
+                        radius,
+                        &dialog_id_c,
+                        version,
+                        &req_c,
+                    )
+                };
+                drop(world);
+                let result = crate::persist::commit_validated_trade(
+                    ctx.persist.spool(),
+                    &ctx.shared,
+                    request,
+                    validate,
+                )
+                .await;
+                let mut world = ctx.shared.lock().await;
+                match result {
+                    Ok(()) => {
+                        // Erfolg erst nach bestätigter Spool-Dauerhaftigkeit
+                        // und gemeinsamer RAM-Übernahme (Vertrag des
+                        // Commit-Pfads).
+                        match commit_succeeded(&mut world, &dialog_id) {
+                            Some((cid, balances)) => {
+                                for (party, idia) in balances {
+                                    let payload = serde_json::json!({
+                                        "ok": true, "action": action.as_str(),
+                                        "event": "committed",
+                                        "dialog_id": dialog_id,
+                                        "commit_id": cid,
+                                        "idia": idia,
+                                    });
+                                    // Zustellung über die aktuell zuständige
+                                    // Verbindung des Charakters (Takeover-
+                                    // sicher, analog zum Partner); `seq`
+                                    // bleibt Korrelation der Anfrage.
+                                    send_to_current(&world, tx, &party, &pid, seq, payload);
+                                }
+                            }
+                            None => {
+                                // Dialog während des Commits entfallen (kein
+                                // Zweiteffekt): idempotentes Erfolgs-Echo an
+                                // die aktuelle Verbindung des Auslösers.
+                                let payload = serde_json::json!({
+                                    "ok": true, "action": action.as_str(),
+                                    "event": "committed", "dialog_id": dialog_id,
+                                });
+                                send_to_current(&world, tx, &pid, &pid, seq, payload);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("player trade commit {commit_id} failed: {e}");
+                        if world.prepared_trades.contains_key(&commit_id) {
+                            // Unklare Veröffentlichung: als pending
+                            // behandeln; keine falsche Erfolgs- oder
+                            // Rücknahmemeldung. Die bestehende
+                            // Wiederherstellungspflicht läuft weiter.
+                            if let Some(parties) = commit_uncertain(&mut world, &dialog_id) {
+                                for party in parties {
+                                    let payload = serde_json::json!({
+                                        "ok": true, "action": action.as_str(),
+                                        "event": "pending",
+                                        "reason": PlayerTradeReject::TradePending.reason(),
+                                        "dialog_id": dialog_id,
+                                        "commit_id": commit_id,
+                                    });
+                                    send_to_current(&world, tx, &party, &pid, seq, payload);
+                                }
+                            }
+                        } else if let Some((actor_msg, partners)) =
+                            commit_failed(&mut world, &pid, &dialog_id)
+                        {
+                            let _ = tx.send(Frame::new(seq, s2c::PLAYER_TRADE, actor_msg).encode());
+                            send_notes(&world, &partners);
+                        } else {
+                            let _ = tx.send(
+                                Frame::new(
+                                    seq,
+                                    s2c::PLAYER_TRADE,
+                                    serde_json::json!({
+                                        "ok": false, "action": action.as_str(),
+                                        "reason": PlayerTradeReject::NoDialog.reason(),
+                                        "dialog_id": dialog_id,
+                                    }),
+                                )
+                                .encode(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Err(failure) => {
+            crate::security::log_reject(
+                world.players.get(&pid),
+                conn_id,
+                &crate::security::RejectInfo {
+                    reason: failure.reason.reason().into(),
+                    msg_type: crate::protocol::c2s::PLAYER_TRADE,
+                    detail: format!("action={}", action.as_str()),
+                },
+                0,
+            );
+            let _ = tx.send(
+                Frame::new(seq, s2c::PLAYER_TRADE, failure_payload(&failure, action)).encode(),
+            );
+            send_notes(&world, &failure.partner_msgs);
+        }
+    }
+}
+
+/// Stellt eine Commit-Folgemeldung über die aktuell zuständige Verbindung
+/// eines Charakters zu (Takeover-sicher, analog zu Partner-Pushes): Der
+/// Auslöser erhält sie mit dem `seq`-Echo seiner ursprünglichen Anfrage,
+/// alle anderen mit `seq` 0. Ist der Charakter weg, fällt die Sendung an den
+/// mitgegebenen Verbindungssender zurück (toter Kanal, wirkungslos).
+fn send_to_current(
+    world: &crate::world::World,
+    tx: &mpsc::UnboundedSender<String>,
+    party: &str,
+    actor: &str,
+    seq: i64,
+    payload: serde_json::Value,
+) {
+    let out_seq = if party == actor { seq } else { 0 };
+    if let Some(p) = world.players.get(party) {
+        p.send(&Frame::new(out_seq, s2c::PLAYER_TRADE, payload));
+    } else {
+        let _ = tx.send(Frame::new(out_seq, s2c::PLAYER_TRADE, payload).encode());
+    }
+}
+
+/// Löst ein Angebots-Payload (`items: [{item_uuid, count}]`, `idia`) rein
+/// syntaktisch auf. Fachliche Prüfung (Eigentum/Bindung/Quest/Mengen)
+/// läuft unter der World-Sperre in `player_trade::set_offer`.
+fn parse_trade_offer(data: &serde_json::Value) -> Result<crate::player_trade::DialogOffer, ()> {
+    use crate::player_trade::{DialogOffer as Offer, OfferedItem as Entry, MAX_OFFER_ITEMS};
+    let idia = data.get("idia").and_then(|v| v.as_i64()).unwrap_or(0);
+    let items = data.get("items").and_then(|v| v.as_array()).ok_or(())?;
+    if items.len() > MAX_OFFER_ITEMS {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for it in items {
+        let uuid = it
+            .get("item_uuid")
+            .and_then(|v| v.as_str())
+            .ok_or(())?
+            .to_string();
+        let count = it.get("count").and_then(|v| v.as_i64()).ok_or(())?;
+        out.push(Entry {
+            item_uuid: uuid,
+            count,
+        });
+    }
+    Ok(Offer { items: out, idia })
 }
 
 /// HEARTBEAT → SYNC-ACK (plus Ping-/Aktivitäts-Update).
@@ -2970,7 +3260,14 @@ mod tests {
             w.by_conn.insert(7, "a".into());
         }
         // Gültige Bewegung → serverseitig neue Position + Position-dirty.
-        handle_move(&shared, 7, &serde_json::json!({"dir": [1.0, 0.0]}), 1000).await;
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [1.0, 0.0]}),
+            1000,
+            5.0,
+        )
+        .await;
         {
             let w = shared.lock().await;
             let p = &w.players["a"];
@@ -2987,7 +3284,14 @@ mod tests {
                 .dirty
                 .clear(crate::persist::PersistComponent::Position);
         }
-        handle_move(&shared, 7, &serde_json::json!({"dir": [0.0, 0.0]}), 1000).await;
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [0.0, 0.0]}),
+            1000,
+            5.0,
+        )
+        .await;
         {
             let w = shared.lock().await;
             let p = &w.players["a"];
@@ -3128,6 +3432,7 @@ mod tests {
             7,
             &serde_json::json!({"dir": [1.0, 0.0], "x": 500.0, "y": 500.0}),
             100,
+            5.0,
         )
         .await;
         handle_attack(

@@ -27,6 +27,7 @@ mod quest;
 mod regen;
 mod parental;
 mod persist;
+mod player_trade;
 mod protocol;
 mod security;
 mod session_watch;
@@ -357,6 +358,19 @@ async fn async_main() -> Result<(), String> {
             );
             // Loot System V1: abgelaufene Drops entfernen.
             loot::loot_tick(&mut world, &loot_cfg, now);
+            // Spielerhandel: Einladungsfristen plus Standprüfung
+            // (Reichweite/Leben/Anwesenheit) der Runtime-Dialoge.
+            for (party, note) in
+                crate::player_trade::player_trade_tick(&mut world, loot_cfg.pickup_radius, now)
+            {
+                if let Some(p) = world.players.get(&party) {
+                    p.send(&crate::protocol::Frame::new(
+                        0,
+                        crate::protocol::s2c::PLAYER_TRADE,
+                        note,
+                    ));
+                }
+            }
             // Gruppensystem §5: Reconnect-Frist ablaufen lassen.
             for pid in groups_guard.tick(now) {
                 log::info!("Reconnect-Frist für Gruppenmitglied {pid} abgelaufen");

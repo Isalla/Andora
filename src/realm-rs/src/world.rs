@@ -224,6 +224,15 @@ pub struct World {
     /// Händlerrolle je NPC-Spawn plus Sortiment mit Kauf-/Verkaufspreisen.
     /// Wird beim Start aus der RealmDB geladen (docs/Handelssystem.md).
     pub merchant_catalog: crate::trade::MerchantCatalog,
+    /// Spielerhandel-Dialoge (docs/Handelssystem.md §15): charaktergebundene
+    /// Runtime-Dialoge (Dialog-ID → Dialog), höchstens einer je Charakter
+    /// (Charakter → Dialog-ID, Einladung zählt mit). Keine Persistenz
+    /// offener Dialoge; der finale Austausch läuft über den bestehenden
+    /// Zwei-Charakter-Commit (`prepared_trades`/`trade_receipts`).
+    pub player_trade_dialogs: HashMap<String, crate::player_trade::PlayerTradeDialog>,
+    pub player_trade_by_char: HashMap<String, String>,
+    /// Monotoner Zähler für serververgebene Dialogkennungen.
+    pub player_trade_next_id: u64,
     /// NPC-/Monster-Registry (Combat V2): key = npc_id().
     pub npcs: HashMap<String, crate::npc::Npc>,
     /// Statische Item-Definitionen (Item System V1, Content-Schicht).
@@ -281,6 +290,9 @@ impl World {
             sell_history: HashMap::new(),
             item_lifecycle: HashMap::new(),
             merchant_catalog: crate::trade::MerchantCatalog::default(),
+            player_trade_dialogs: HashMap::new(),
+            player_trade_by_char: HashMap::new(),
+            player_trade_next_id: 1,
             by_conn: HashMap::new(),
             closers: HashMap::new(),
             peer_addrs: HashMap::new(),
@@ -481,7 +493,19 @@ pub fn commit_login(
             // Atomarer Eigentümerwechsel: alte Zuordnung ZUERST entfernen,
             // dann die neue setzen. Der RAM-Player wird nicht ersetzt.
             world.by_conn.remove(&old);
-            world.by_conn.insert(conn_id, player_id);
+            world.by_conn.insert(conn_id, player_id.clone());
+            // Takeover bricht den noch nicht verbindlich gestarteten
+            // Spielerhandel des Charakters ab (docs/Handelssystem.md §15);
+            // verbindlich vorbereitete Inhalte bleiben erhalten.
+            for (partner, note) in crate::player_trade::abort_for(
+                world,
+                &player_id,
+                crate::player_trade::AbortReason::Takeover,
+            ) {
+                if let Some(q) = world.players.get(&partner) {
+                    q.send(&Frame::new(0, s2c::PLAYER_TRADE, note));
+                }
+            }
             Ok(CommitOutcome::Takeover { old_conn_id: old })
         }
     }
@@ -712,6 +736,19 @@ pub fn disconnect_conn(world: &mut World, conn_id: u64) -> Option<String> {
     }
     if world.normal_publications.contains_key(&player_id) {
         return None;
+    }
+    // Disconnect bricht den noch nicht verbindlich gestarteten Spielerhandel
+    // ab und informiert den Partner (docs/Handelssystem.md §15). Ist ein
+    // Commit-Inhalt verbindlich vorbereitet, greift bereits der Freeze oben
+    // (Rückgabe `None`): die bestehende Wiederherstellungspflicht bleibt.
+    for (partner, note) in crate::player_trade::abort_for(
+        world,
+        &player_id,
+        crate::player_trade::AbortReason::Disconnect,
+    ) {
+        if let Some(q) = world.players.get(&partner) {
+            q.send(&Frame::new(0, s2c::PLAYER_TRADE, note));
+        }
     }
     world.by_conn.remove(&conn_id);
     let me = world.players.remove(&player_id)?;
