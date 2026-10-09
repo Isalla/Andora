@@ -207,6 +207,7 @@ async fn async_main() -> Result<(), String> {
                     }
                     Err(e) => {
                         log::error!("Lifecycle-Startup-Finalisierung fehlgeschlagen: {e}");
+                        persist.set_recovery_open(true);
                         persist.set_status(crate::spool::PersistStatus::Degraded);
                     }
                 }
@@ -452,6 +453,8 @@ async fn async_main() -> Result<(), String> {
                     .map(|p| p.id.clone())
                     .collect()
             };
+            // The runtime first confirms retained trade publications, then
+            // gates each normal snapshot and defers both pending participants.
             // `P-12`/§35: **ein** Persistenzlauf erzeugt **eine** gemeinsame
             // Batch-Datei mit den dirty Spielern dieses Laufs. Der Lauf gibt
             // den reservierten Snapshot-Speicher nach der dauerhaften

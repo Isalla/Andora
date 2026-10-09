@@ -80,15 +80,24 @@ pub struct SpoolBatch {
     pub entries: Vec<SpoolEntry>,
 }
 
+/// Only produced after the transactional DB identity/content proof succeeds.
+/// Legacy bare TradeArtifact receipts are deliberately not adopted as proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedTradeReceipt {
+    kind: String,
+    format_version: u16,
+    artifact: crate::persist::TradeArtifact,
+}
+
 /// Fassung des Batch-Umschlags. Der Eintrag selbst trägt weiterhin seine
 /// eigene `format_version` (`SpoolEntry`).
 pub const BATCH_FORMAT_VERSION: u16 = 1;
 
 /// Eine (deterministisch beschreibbare) Spool-Datei: einzelner Player-Snapshot.
 ///
-/// `PartialEq` vergleicht **alle** Felder einschließlich des vollständigen
-/// `PersistSnapshot` und ist damit die Grundlage des Inhaltsvergleichs
-/// `batch_content_eq`.
+/// `PartialEq` compares all fields for tests. Publication confirmation compares
+/// the complete serialized content, excluding RAM-only controls and buffer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpoolEntry {
     pub format_version: u16,
@@ -185,6 +194,9 @@ pub fn drain_tick_lifecycle_action(
 pub struct Spool {
     pub base_dir: PathBuf,
     in_flight: Arc<std::sync::Mutex<HashMap<String, Arc<GateEntry>>>>,
+    /// A visible file after failed directory sync must not drain before its
+    /// identical publication and RAM handoff have been confirmed.
+    held_trade_publications: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Ein Spieler-Gate mit Halter-Zähler.
@@ -320,6 +332,32 @@ impl Drop for PlayerGate {
 }
 
 impl Spool {
+    pub(crate) fn trade_receipt(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::persist::TradeArtifact>, String> {
+        for path in list_json_files(&self.dir("trade_receipts"))? {
+            let Some((commit_id, _)) = trade_file_header(&path) else {
+                return Err("trade receipt attribution unavailable".into());
+            };
+            if commit_id == id {
+                let envelope: CommittedTradeReceipt = serde_json::from_slice(
+                    &std::fs::read(&path).map_err(|e| format!("trade receipt read: {e}"))?,
+                )
+                .map_err(|e| format!("trade receipt parse: {e}"))?;
+                if envelope.kind != "two_character_trade_receipt" || envelope.format_version != 1 {
+                    return Err("unproven trade receipt format".into());
+                }
+                let receipt = envelope.artifact;
+                receipt.validate()?;
+                if trade_file_name(&receipt) != path.file_name().unwrap().to_string_lossy() {
+                    return Err("trade receipt attribution conflict".into());
+                }
+                return Ok(Some(receipt));
+            }
+        }
+        Ok(None)
+    }
     /// Bestehende per-player-Serialisierung. Schützt zwei Vorgänge derselben
     /// `player_id` gegeneinander:
     ///
@@ -388,11 +426,78 @@ pub struct PersistRuntime {
 }
 
 impl PersistRuntime {
+    /// Internal paired persistence entry. There is intentionally no network
+    /// message or trade-offer manager attached to it.
+    #[allow(dead_code)]
+    pub async fn commit_trade(
+        &self,
+        shared: &crate::world::Shared,
+        request: crate::persist::TradeCommitRequest,
+    ) -> Result<(), String> {
+        let result = crate::persist::commit_trade(&self.spool, shared, request).await;
+        if result.is_err() {
+            self.set_status(PersistStatus::Degraded);
+        }
+        result
+    }
+
+    /// Retry the retained, identical publication, never recompute a split UUID
+    /// or acquire gates while another character gate is already held.
+    pub async fn retry_trade_publications(
+        &self,
+        shared: &crate::world::Shared,
+    ) -> Result<(), String> {
+        self.retry_trade_publications_for(shared, None).await
+    }
+
+    async fn retry_trade_publications_for(
+        &self,
+        shared: &crate::world::Shared,
+        requested: Option<&[String]>,
+    ) -> Result<(), String> {
+        let requests: Vec<_> = {
+            let world = shared.lock().await;
+            world
+                .prepared_trades
+                .values()
+                .filter(|p| {
+                    requested
+                        .is_none_or(|ids| p.request.characters.iter().any(|id| ids.contains(id)))
+                })
+                .map(|p| p.request.clone())
+                .collect()
+        };
+        let mut errors = Vec::new();
+        for request in requests {
+            if let Err(e) = self.commit_trade(shared, request).await {
+                errors.push(e);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    pub async fn retry_normal_publications(
+        &self,
+        shared: &crate::world::Shared,
+        requested: Option<&[String]>,
+    ) -> Result<(), String> {
+        let result =
+            crate::persist::retry_normal_publications(&self.spool, shared, requested).await;
+        if result.is_err() {
+            self.set_status(PersistStatus::Degraded);
+        }
+        result
+    }
     /// Legt die Spool-Verzeichnisse an (fehlerfrei = bereit).
     pub fn new(base_dir: &Path, weapon_skill_id: &str) -> Result<Self, String> {
         let spool = Spool {
             base_dir: base_dir.to_path_buf(),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            held_trade_publications: Arc::new(Mutex::new(Default::default())),
         };
         spool.ensure_dirs()?;
         Ok(Self {
@@ -480,7 +585,7 @@ impl PersistRuntime {
     ///   `DEGRADED`; die Restarbeit wird als „offen" markiert, damit der
     ///   Hintergrund-Drainer `READY` erst nach dem Abarbeiten zulässt.
     pub fn apply_startup_recovery(&self, outcome: &RecoveryOutcome) -> RecoveryStatusUpdate {
-        if outcome.batches_remaining == 0 {
+        if outcome.batches_remaining == 0 && !self.spool.has_unresolved_trades().unwrap_or(true) {
             self.set_recovery_open(false);
             self.set_status(PersistStatus::Ready);
             RecoveryStatusUpdate::Ready
@@ -513,6 +618,11 @@ impl PersistRuntime {
     pub fn apply_drain_tick(&self) -> Result<RecoveryStatusUpdate, String> {
         match self.spool.count_batches()? {
             0 => {
+                if self.spool.has_unresolved_trades()? {
+                    self.set_status(PersistStatus::Degraded);
+                    self.set_recovery_open(true);
+                    return Ok(RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 });
+                }
                 self.set_recovery_open(false);
                 self.set_status(PersistStatus::Ready);
                 Ok(RecoveryStatusUpdate::Ready)
@@ -547,6 +657,9 @@ impl PersistRuntime {
     ) -> Result<crate::db::ItemFinalizeReport, String> {
         if self.lifecycle_startup_finalized() {
             return Ok(crate::db::ItemFinalizeReport::default());
+        }
+        if self.spool.has_unresolved_trades()? {
+            return Err("trade recovery pending; lifecycle finalization deferred".into());
         }
         let report = crate::db::finalize_detached_item_instances(pool).await?;
         self.lifecycle_startup_finalized
@@ -605,6 +718,8 @@ impl PersistRuntime {
         player_id: &str,
         force: bool,
     ) -> Result<(), String> {
+        self.retry_trade_publications_for(shared, Some(&[player_id.to_string()]))
+            .await?;
         match crate::persist::persist_player(&self.spool, shared, player_id, force).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -627,11 +742,55 @@ impl PersistRuntime {
         player_ids: &[String],
     ) -> Result<u32, String> {
         let spool = self.spool.clone();
-        match crate::persist::persist_dirty_run(shared, player_ids, |snapshots| async move {
+        self.persist_dirty_run_with(shared, player_ids, |snapshots| async move {
             spool.write_batch_run(snapshots).map(|_| ())
         })
         .await
+    }
+
+    pub(crate) async fn persist_dirty_run_with<W, F>(
+        &self,
+        shared: &crate::world::Shared,
+        player_ids: &[String],
+        write: W,
+    ) -> Result<u32, String>
+    where
+        W: FnOnce(Vec<PersistSnapshot>) -> F,
+        F: std::future::Future<Output = Result<(), String>>,
+    {
+        // Retry every group, but do not let an unrelated failure prevent ready
+        // characters from saving. Report partial failure AFTER processing them.
+        let trade_error = self.retry_trade_publications(shared).await.err();
+        let normal_error = self.retry_normal_publications(shared, None).await.err();
+        // All producers use the same gates from capture through publication
+        // and revision handoff. Stable order also applies to a two-player commit.
+        let mut ids = player_ids.to_vec();
+        ids.sort();
+        ids.dedup();
+        let mut guards = Vec::new();
+        for id in &ids {
+            guards.push(self.player_gate(id).await.lock_owned().await);
+        }
+        let mut ready = Vec::new();
+        let mut deferred = trade_error.is_some() || normal_error.is_some();
+        let pending_normal: std::collections::HashSet<_> = {
+            let world = shared.lock().await;
+            world.normal_publications.keys().cloned().collect()
+        };
+        for id in &ids {
+            if !pending_normal.contains(id) && self.spool.ensure_trade_save_allowed(id).is_ok() {
+                ready.push(id.clone());
+            } else {
+                deferred = true;
+            }
+        }
+        match crate::persist::persist_dirty_run(shared, &ready, write)
+        .await
         {
+            Ok(n) if deferred => {
+                self.set_status(PersistStatus::Degraded);
+                Err(format!("publications deferred; {n} independent snapshots saved; trade={trade_error:?}; normal={normal_error:?}"))
+            }
             Ok(n) => Ok(n),
             Err(e) => {
                 self.set_status(PersistStatus::Degraded);
@@ -653,6 +812,10 @@ impl PersistRuntime {
         player_id: &str,
         force: bool,
     ) -> Result<(), String> {
+        if let Err(e) = self.spool.ensure_trade_save_allowed(player_id) {
+            self.set_status(PersistStatus::Degraded);
+            return Err(e);
+        }
         match crate::persist::persist_dirty_into(shared, player_id, force, |snapshot| {
             let spool = self.spool.clone();
             async move { spool.write_batch(&snapshot) }
@@ -750,6 +913,14 @@ trait DrainDb: Send + Sync {
         snapshot: &'a PersistSnapshot,
         weapon_skill_id: &'a str,
     ) -> BoxFuture<'a, Result<(), String>>;
+
+    fn apply_trade<'a>(
+        &'a self,
+        _trade: &'a crate::persist::TradeArtifact,
+        _weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
+        Box::pin(async { Err("trade DB adapter unavailable".into()) })
+    }
 }
 
 /// Produktionsanbindung: reicht den echten Pool unverändert durch.
@@ -758,6 +929,17 @@ struct PoolDrainDb<'a> {
 }
 
 impl DrainDb for PoolDrainDb<'_> {
+    fn apply_trade<'a>(
+        &'a self,
+        trade: &'a crate::persist::TradeArtifact,
+        weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
+        Box::pin(crate::persist::apply_trade_to_db(
+            self.pool,
+            trade,
+            weapon_skill_id,
+        ))
+    }
     fn load_persist_revision<'a>(
         &'a self,
         char_id: &'a str,
@@ -779,6 +961,196 @@ impl DrainDb for PoolDrainDb<'_> {
 }
 
 impl Spool {
+    pub(crate) fn hold_trade_publication(&self, id: &str) {
+        self.held_trade_publications
+            .lock()
+            .unwrap()
+            .insert(id.to_string());
+    }
+
+    pub(crate) fn release_trade_publication(&self, id: &str) {
+        self.held_trade_publications.lock().unwrap().remove(id);
+    }
+
+    pub(crate) fn write_trade(&self, trade: &crate::persist::TradeArtifact) -> Result<(), String> {
+        self.write_trade_with_sync(trade, sync_dir)
+    }
+
+    pub(crate) fn write_trade_with_sync<S>(
+        &self,
+        trade: &crate::persist::TradeArtifact,
+        sync: S,
+    ) -> Result<(), String>
+    where
+        S: FnOnce(&Path) -> Result<(), String>,
+    {
+        trade.validate()?;
+        let expected_name = trade_file_name(trade);
+        for dir in [
+            self.spool_dir(),
+            self.dir("trade_receipts"),
+            self.quarantine_open_dir(),
+        ] {
+            for path in list_json_files(&dir)? {
+                if trade_file_header(&path).is_some_and(|(id, _)| id == trade.commit_id)
+                    && (dir == self.quarantine_open_dir()
+                        || path.file_name().unwrap().to_string_lossy() != expected_name)
+                {
+                    return Err("trade commit ID conflict".into());
+                }
+            }
+        }
+        let target = self.spool_dir().join(trade_file_name(trade));
+        let bytes = serde_json::to_vec(trade).map_err(|e| format!("trade serialize: {e}"))?;
+        publish_trade_bytes(&target, &bytes, sync)
+    }
+
+    /// Both participants are attributed from the canonical filename even if
+    /// the payload becomes unreadable. Quarantine never releases one half.
+    pub(crate) fn ensure_trade_save_allowed(&self, id: &str) -> Result<(), String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            for path in list_json_files(&dir)? {
+                if let Some((_, pair)) = trade_file_header(&path) {
+                    if pair.iter().any(|(pid, _)| pid == id) {
+                        return Err("trade commit pending".into());
+                    }
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("t-"))
+                {
+                    return Err("trade attribution unavailable".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn has_unresolved_trades(&self) -> Result<bool, String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            if list_json_files(&dir)?.iter().any(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("t-"))
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(!self.held_trade_publications.lock().unwrap().is_empty())
+    }
+
+    fn normal_trade_dependency_allows(&self, snapshot: &PersistSnapshot) -> Result<bool, String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            for path in list_json_files(&dir)? {
+                if let Some((_, pair)) = trade_file_header(&path) {
+                    for (pid, target) in pair {
+                        if pid == snapshot.player_id && snapshot.persist_revision >= target {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn normal_publication_allowed(
+        &self,
+        snapshot: &PersistSnapshot,
+    ) -> Result<bool, String> {
+        self.normal_trade_dependency_allows(snapshot)
+    }
+
+    fn quarantine_trade(&self, path: &Path, raw: &[u8]) -> Result<(), String> {
+        let name = path
+            .file_name()
+            .ok_or("trade filename missing")?
+            .to_string_lossy();
+        let target = self
+            .quarantine_open_dir()
+            .join(format!("{name}--malformed.json"));
+        publish_trade_bytes(&target, raw, sync_dir)?;
+        remove_file(path)?;
+        sync_dir(path)
+    }
+
+    async fn drain_trade<D: DrainDb>(
+        &self,
+        db: &D,
+        weapon_skill_id: &str,
+        path: &Path,
+    ) -> Result<Option<DrainReport>, String> {
+        let (id, pair) = trade_file_header(path).ok_or("trade attribution conflict")?;
+        let _a = self.player_gate(&pair[0].0).await.lock_owned().await;
+        let _b = self.player_gate(&pair[1].0).await.lock_owned().await;
+        if self.held_trade_publications.lock().unwrap().contains(&id) {
+            return Ok(None);
+        }
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("trade read: {e}")),
+        };
+        let trade = serde_json::from_slice::<crate::persist::TradeArtifact>(&raw);
+        let valid = trade.as_ref().is_ok_and(|t| {
+            t.validate().is_ok()
+                && trade_file_name(t) == path.file_name().unwrap().to_string_lossy()
+        });
+        if !valid {
+            self.quarantine_trade(path, &raw)?;
+            return Ok(Some(DrainReport {
+                batches_processed: 1,
+                batches_quarantined: 1,
+                ..Default::default()
+            }));
+        }
+        let trade = trade.map_err(|e| format!("trade parse: {e}"))?;
+        // Content was read under both gates; all writers of these paths use them.
+        let receipt = self.trade_receipt(&trade.commit_id)?;
+        if receipt.as_ref().is_some_and(|r| r != &trade) {
+            return Err("trade receipt content conflict".into());
+        }
+        match db
+            .apply_trade(&trade, weapon_skill_id)
+            .await?
+        {
+            crate::persist::TradeApply::Waiting => Ok(None),
+            crate::persist::TradeApply::Conflict => {
+                self.quarantine_trade(path, &raw)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    batches_quarantined: 1,
+                    ..Default::default()
+                }))
+            }
+            outcome => {
+                // Keep the immutable identity/content receipt across restarts.
+                // Only after durable receipt publication may pending disappear.
+                let receipt = self.dir("trade_receipts").join(trade_file_name(&trade));
+                let receipt_bytes = serde_json::to_vec(&CommittedTradeReceipt {
+                    kind: "two_character_trade_receipt".into(),
+                    format_version: 1,
+                    artifact: trade.clone(),
+                })
+                .map_err(|e| format!("trade receipt serialize: {e}"))?;
+                publish_trade_bytes(&receipt, &receipt_bytes, sync_dir)?;
+                remove_file(path)?;
+                sync_dir(path)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    entries_applied: if outcome == crate::persist::TradeApply::Applied {
+                        2
+                    } else {
+                        0
+                    },
+                    entries_skipped: if outcome == crate::persist::TradeApply::AlreadyApplied {
+                        2
+                    } else {
+                        0
+                    },
+                    ..Default::default()
+                }))
+            }
+        }
+    }
     fn dir(&self, name: &str) -> PathBuf {
         self.base_dir.join(name)
     }
@@ -803,6 +1175,7 @@ impl Spool {
     pub fn ensure_dirs(&self) -> Result<(), String> {
         for d in [
             self.spool_dir(),
+            self.dir("trade_receipts"),
             self.superseded_dir(),
             self.quarantine_open_dir(),
             self.quarantine_archive_dir(),
@@ -849,6 +1222,13 @@ impl Spool {
         player_id: &str,
         database_revision: i64,
     ) -> CharacterAvailability {
+        if let Err(e) = self.ensure_trade_save_allowed(player_id) {
+            return if e == "trade commit pending" {
+                CharacterAvailability::SaveRecoveryPending
+            } else {
+                CharacterAvailability::CheckFailed
+            };
+        }
         let (cases, _) = match self.scan_quarantine_open() {
             Ok(v) => v,
             Err(_) => return CharacterAvailability::CheckFailed,
@@ -989,6 +1369,17 @@ impl Spool {
         &self,
         snapshots: Vec<PersistSnapshot>,
     ) -> Result<Option<PathBuf>, String> {
+        self.write_batch_run_with_sync(snapshots, sync_dir)
+    }
+
+    pub(crate) fn write_batch_run_with_sync<S>(
+        &self,
+        snapshots: Vec<PersistSnapshot>,
+        sync: S,
+    ) -> Result<Option<PathBuf>, String>
+    where
+        S: FnOnce(&Path) -> Result<(), String>,
+    {
         if snapshots.is_empty() {
             return Ok(None);
         }
@@ -1025,7 +1416,8 @@ impl Spool {
         // den Verzeichnis-Sync, bevor der Zustand als dauerhaft gilt. Das ist
         // genau der Fall "Sync-Fehler, Datei lag bereits vor" (§40).
         if target.exists() {
-            return confirm_existing_publication(&target, &batch).map(|()| Some(target));
+            return confirm_existing_publication_with_sync(&target, &batch, sync)
+                .map(|()| Some(target));
         }
 
         // Atomar veroeffentlichen OHNE Ueberschreiben: Inhalt vollstaendig
@@ -1033,9 +1425,9 @@ impl Spool {
         // (`publish_new_file`). Ein Renennen-Rennen scheitert dort, statt eine
         // fremde Datei zu verdraengen.
         let tmp = self.spool_dir().join(format!(".tmp-{file_name}"));
-        match write_atomic_if_absent(&tmp, &target, body.as_bytes()) {
-            Ok(true) => Ok(Some(target)),
-            Ok(false) => {
+        match publish_new_file_with_sync(&tmp, &target, body.as_bytes(), sync) {
+            Ok(PublishOutcome::Published) => Ok(Some(target)),
+            Ok(PublishOutcome::TargetExists) => {
                 // Konkurrierende Veroeffentlichung: derselbe echte
                 // Bestaetigungspfad — Inhalt **und** Dauerhaftigkeit pruefen.
                 confirm_existing_publication(&target, &batch).map(|()| Some(target))
@@ -1077,8 +1469,32 @@ impl Spool {
     }
 
     /// Älteste offene Batch-Datei (lexikografisch = chronologisch).
+    #[cfg(test)]
     fn next_batch_path(&self) -> Result<Option<PathBuf>, String> {
-        Ok(list_json_files(&self.spool_dir())?.into_iter().next())
+        // A wall-clock filename is not a revision dependency. Drain normal
+        // predecessors first, but never let a later snapshot overtake a trade.
+        for path in list_json_files(&self.spool_dir())? {
+            if trade_file_header(&path).is_some() {
+                return Ok(Some(path));
+            }
+            let allowed = match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| entries_in_file(&s))
+            {
+                Some(entries) => {
+                    let mut allowed = false;
+                    for e in entries {
+                        allowed |= self.normal_trade_dependency_allows(&e)?;
+                    }
+                    allowed
+                }
+                None => true,
+            };
+            if allowed {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
     /// Produktionsweg: zwingend ein echter `&Pool<MySql>`.
@@ -1097,9 +1513,29 @@ impl Spool {
         db: &D,
         weapon_skill_id: &str,
     ) -> Result<Option<DrainReport>, String> {
-        let Some(batch_path) = self.next_batch_path()? else {
-            return Ok(None);
-        };
+        // A blocked entry or waiting trade is not a reason to stop other ready
+        // files. Return on real progress; repeated skips in a partial batch do
+        // not starve its prerequisite trade later in the directory.
+        for path in list_json_files(&self.spool_dir())? {
+            if let Some(report) = self.drain_path_with(db, weapon_skill_id, path).await? {
+                return Ok(Some(report));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn drain_path_with<D: DrainDb>(
+        &self,
+        db: &D,
+        weapon_skill_id: &str,
+        batch_path: PathBuf,
+    ) -> Result<Option<DrainReport>, String> {
+        if batch_path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("t-"))
+        {
+            return self.drain_trade(db, weapon_skill_id, &batch_path).await;
+        }
         let file_name = batch_path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -1115,6 +1551,13 @@ impl Spool {
             .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
             .map(|v| v.get("entries").is_some())
             .unwrap_or(false);
+        if raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .is_some_and(|v| v.get("kind").is_some())
+        {
+            return Err("trade envelope under non-trade filename".into());
+        }
         if is_shared_batch {
             return self
                 .drain_shared_batch(db, weapon_skill_id, &batch_path, &file_name, raw)
@@ -1203,6 +1646,9 @@ impl Spool {
         // Ein Eintrag je Batch-Datei (V1). Robust trotzdem als Liste gedacht:
         // Batch wird erst NACH Abschluss ALLER Einträge entfernt.
         let player_id = entry.snapshot.player_id.clone();
+        if !self.normal_trade_dependency_allows(&entry.snapshot)? {
+            return Ok(None);
+        }
         let db_rev = match db.load_persist_revision(&player_id).await {
             Ok(Some(rev)) => rev,
             Ok(None) => {
@@ -1280,7 +1726,7 @@ impl Spool {
         entry: &SpoolEntry,
         dir: &Path,
         key: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let snap = &entry.snapshot;
         let stem = format!(
             "{:013}-{}-r{}.json",
@@ -1298,23 +1744,26 @@ impl Spool {
         entry: &SpoolEntry,
         dir: &Path,
         file_name: &str,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let file_name = file_name.to_string();
         let target = dir.join(&file_name);
-        if target.exists() {
-            return Ok(()); // bereits durable (idempotent)
-        }
-        let body = serde_json::to_string(&SpoolBatch {
+        let batch = SpoolBatch {
             format_version: BATCH_FORMAT_VERSION,
             batch_id: file_name.trim_end_matches(".json").to_string(),
             entries: vec![entry.clone()],
-        })
+        };
+        if target.exists() {
+            confirm_existing_publication(&target, &batch)?;
+            return Ok(false);
+        }
+        let body = serde_json::to_string(&batch)
         .map_err(|e| format!("Spool-Eintrag serialisieren: {e}"))?;
         let tmp = dir.join(format!(".tmp-{file_name}"));
         if publish_new_file(&tmp, &target, body.as_bytes())? != PublishOutcome::Published {
-            return Err(format!("Spool Zieldatei bereits belegt: {:?}", target));
+            confirm_existing_publication(&target, &batch)?;
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// `P-12`: quarantänisiert **einen** eindeutig zuordenbaren Eintrag eines
@@ -1325,7 +1774,7 @@ impl Spool {
         &self,
         entry: &SpoolEntry,
         reason: QuarantineReason,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.write_entry_to_dir(entry, &self.quarantine_open_dir(), &reason.key())
     }
 
@@ -1410,10 +1859,16 @@ impl Spool {
             return Ok(Some(report));
         }
 
+        let mut unfinished = false;
+        let mut made_progress = false;
         for entry in &batch.entries {
             let player_id = entry.snapshot.player_id.clone();
             // P-30: Charakter-Gate je Eintrag, vor jeder Mutation.
             let _entry_gate = self.player_gate(&player_id).await.lock_owned().await;
+            if !self.normal_trade_dependency_allows(&entry.snapshot)? {
+                unfinished = true;
+                continue;
+            }
             // Reverify **nach** dem Gate und **vor** jedem DB-Zugriff: nur die
             // seit dem Lesen unveränderte Datei abarbeiten. Damit erkennt ein
             // zweiter Aufrufer die zwischenzeitliche Mutation und beendet sich
@@ -1427,7 +1882,8 @@ impl Spool {
                 Ok(None) => {
                     // Kein Charakter-Datensatz: nur dieser Eintrag wird
                     // dauerhaft quarantänisiert, die übrigen laufen weiter.
-                    self.quarantine_entry(entry, QuarantineReason::UnknownCharacter)?;
+                    made_progress |=
+                        self.quarantine_entry(entry, QuarantineReason::UnknownCharacter)?;
                     report.batches_quarantined += 1;
                     continue;
                 }
@@ -1446,11 +1902,13 @@ impl Spool {
                         entry.snapshot.player_id, entry.snapshot.persist_revision
                     );
                     let name = format!("{stem}.json");
-                    self.write_entry_to_dir_as(entry, &self.superseded_dir(), &name)?;
+                    made_progress |=
+                        self.write_entry_to_dir_as(entry, &self.superseded_dir(), &name)?;
                     report.entries_superseded += 1;
                 }
                 std::cmp::Ordering::Less => {
                     db.apply_snapshot(&entry.snapshot, weapon_skill_id).await?;
+                    made_progress = true;
                     report.entries_applied += 1;
                     let _ = self.archive_resolved_quarantine_cases_inner(
                         &player_id,
@@ -1458,6 +1916,13 @@ impl Spool {
                     );
                 }
             }
+        }
+        if unfinished {
+            return if made_progress {
+                Ok(Some(report))
+            } else {
+                Ok(None)
+            };
         }
         // Erst jetzt ist jeder Eintrag erledigt: die Datei darf entfernt werden.
         remove_file(batch_path)?;
@@ -1705,7 +2170,12 @@ fn batch_content_eq(path: &Path, batch: &SpoolBatch) -> bool {
     let Ok(existing) = serde_json::from_slice::<SpoolBatch>(&raw) else {
         return false;
     };
-    existing == *batch
+    // generation/dirty and the inventory buffer are RAM-only. Compare ALL wire
+    // fields, not deserialized zeroed control fields with the retained controls.
+    match (serde_json::to_value(existing), serde_json::to_value(batch)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// `P-12`/§35: bringt die Einträge eines Batches in die **kanonische**
@@ -1745,6 +2215,17 @@ fn canonicalize_entries(mut entries: Vec<SpoolEntry>) -> Result<Vec<SpoolEntry>,
 /// Wiederholungsfaellen — vorhandene Datei vor dem Schreibversuch und
 /// Konkurrenz während der Veröffentlichung.
 fn confirm_existing_publication(target: &Path, batch: &SpoolBatch) -> Result<(), String> {
+    confirm_existing_publication_with_sync(target, batch, sync_dir)
+}
+
+fn confirm_existing_publication_with_sync<S>(
+    target: &Path,
+    batch: &SpoolBatch,
+    sync: S,
+) -> Result<(), String>
+where
+    S: FnOnce(&Path) -> Result<(), String>,
+{
     if !target.exists() {
         return Err("Spool Bestätigung: Zieldatei fehlt".to_string());
     }
@@ -1758,13 +2239,20 @@ fn confirm_existing_publication(target: &Path, batch: &SpoolBatch) -> Result<(),
         ));
     }
     // Inhalt stimmt; die Dauerhaftigkeit wird dennoch erneut bestätigt.
-    sync_dir(target)
+    sync(target)
 }
 
 /// `P-12`: liefert die Snapshots **einer** Spool-Datei unabhängig vom Format.
 /// Unterstützt das gemeinsame Batch-Format (`entries`) und die alte
 /// Einzeldatei (V1). `None` = nicht lesbar bzw. kein bekanntes Format.
 fn entries_in_file(raw: &str) -> Option<Vec<PersistSnapshot>> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if value.get("kind").is_some() {
+        return serde_json::from_str::<crate::persist::TradeArtifact>(raw)
+            .ok()
+            .filter(|t| t.validate().is_ok())
+            .map(|t| t.characters.into_iter().map(|c| c.snapshot).collect());
+    }
     if serde_json::from_str::<serde_json::Value>(raw)
         .map(|v| v.get("entries").is_some())
         .unwrap_or(false)
@@ -1910,6 +2398,12 @@ fn publish_new_file(
     target: &Path,
     bytes: &[u8],
 ) -> Result<PublishOutcome, String> {
+    publish_new_file_with_sync(tmp, target, bytes, sync_dir)
+}
+
+fn publish_new_file_with_sync<S>(tmp: &Path, target: &Path, bytes: &[u8], sync: S)
+    -> Result<PublishOutcome, String>
+where S: FnOnce(&Path) -> Result<(), String> {
     // 1) Vollständig unter dem temporären Namen schreiben und sichern.
     {
         let mut f =
@@ -1942,8 +2436,74 @@ fn publish_new_file(
 
     // 4) Dauerhaftigkeitsgrenze: ohne bestätigten Verzeichnis-Sync gilt die
     // Veröffentlichung NICHT als abgeschlossen.
-    sync_dir(target)?;
+    sync(target)?;
     Ok(PublishOutcome::Published)
+}
+
+fn trade_file_name(t: &crate::persist::TradeArtifact) -> String {
+    format!(
+        "t-{}-{}-r{}-{}-r{}.json",
+        t.commit_id,
+        t.characters[0].snapshot.player_id,
+        t.characters[0].snapshot.persist_revision,
+        t.characters[1].snapshot.player_id,
+        t.characters[1].snapshot.persist_revision
+    )
+}
+
+fn trade_file_header(path: &Path) -> Option<(String, [(String, i64); 2])> {
+    let name = path.file_name()?.to_str()?;
+    let original = name.split_once("--").map_or(name, |(s, _)| s);
+    let stem = original.strip_suffix(".json")?.strip_prefix("t-")?;
+    let parts: Vec<_> = stem.split('-').collect();
+    if parts.len() != 5
+        || parts[0].is_empty()
+        || parts[0].len() > 64
+        || !parts[0]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    let a = canonical_player_id(parts[1])?;
+    let b = canonical_player_id(parts[3])?;
+    let ar = canonical_revision(parts[2].strip_prefix('r')?)?;
+    let br = canonical_revision(parts[4].strip_prefix('r')?)?;
+    if a >= b || ar == 0 || br == 0 {
+        return None;
+    }
+    Some((parts[0].to_string(), [(a, ar), (b, br)]))
+}
+
+/// Same publication primitive as ordinary batches, including confirmation of
+/// a visible file after sync failure. The seam replaces only directory sync.
+fn publish_trade_bytes<S>(target: &Path, bytes: &[u8], sync: S) -> Result<(), String>
+where
+    S: FnOnce(&Path) -> Result<(), String>,
+{
+    if target.exists() {
+        if std::fs::read(target).map_err(|e| format!("trade confirmation: {e}"))? != bytes {
+            return Err("trade commit content conflict".into());
+        }
+        return sync(target);
+    }
+    let tmp = target.with_file_name(format!(
+        ".tmp-{}",
+        target
+            .file_name()
+            .ok_or("trade filename")?
+            .to_string_lossy()
+    ));
+    // A producer holds both gates; TargetExists is still verified, never trusted.
+    match publish_new_file_with_sync(&tmp, target, bytes, sync)? {
+        PublishOutcome::Published => Ok(()),
+        PublishOutcome::TargetExists => {
+            if std::fs::read(target).map_err(|e| format!("trade confirmation: {e}"))? != bytes {
+                return Err("trade commit content conflict".into());
+            }
+            sync_dir(target)
+        }
+    }
 }
 
 /// Ergebnis eines Veröffentlichungsversuchs (`publish_new_file`).
@@ -1973,6 +2533,7 @@ fn sync_dir(path: &Path) -> Result<(), String> {
 /// vorhandene Datei zu ueberschreiben. Der Inhalt wird nur geschrieben, wenn
 /// die Datei neu angelegt wurde; eine bereits vorhandene Datei bleibt
 /// unberuehrt und wird als `false` gemeldet.
+#[cfg(test)]
 fn write_atomic_if_absent(tmp: &Path, target: &Path, bytes: &[u8]) -> Result<bool, String> {
     Ok(publish_new_file(tmp, target, bytes)? == PublishOutcome::Published)
 }
@@ -2107,7 +2668,652 @@ mod tests {
         Spool {
             base_dir: base.to_path_buf(),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            held_trade_publications: Arc::new(Mutex::new(Default::default())),
         }
+    }
+
+    fn trade_artifact() -> crate::persist::TradeArtifact {
+        let pair = ["1", "2"].map(|id| {
+            let mut s = snapshot(id, 2, 1.0);
+            s.item_lifecycle =
+                Some(crate::item_lifecycle::ItemLifecycle::new().snapshot_view(2, "test"));
+            crate::persist::TradeCharacter {
+                base_revision: 1,
+                before_inventory: s.inventory.clone(),
+                before_idia: s.idia,
+                snapshot: s,
+            }
+        });
+        crate::persist::TradeArtifact {
+            kind: "two_character_trade".into(),
+            format_version: 1,
+            commit_id: "spool_test".into(),
+            characters: pair,
+            transfers: Vec::new(),
+        }
+    }
+
+    /// SQL/rollback MODEL only. The real drain/format/gates/files and the real
+    /// revision decision are exercised; this adapter does not prove MariaDB.
+    struct TradeDbModel {
+        revisions: Mutex<HashMap<String, i64>>,
+        committed: Mutex<HashMap<String, String>>,
+        normal_applies: Mutex<Vec<(String, i64)>>,
+        pair_applies: std::sync::atomic::AtomicUsize,
+        fail_pair: bool,
+        lose_commit_ack: bool,
+    }
+
+    impl TradeDbModel {
+        fn new(a: i64, b: i64) -> Self {
+            Self {
+                revisions: Mutex::new(HashMap::from([("1".into(), a), ("2".into(), b)])),
+                committed: Mutex::new(HashMap::new()),
+                normal_applies: Mutex::new(Vec::new()),
+                pair_applies: std::sync::atomic::AtomicUsize::new(0),
+                fail_pair: false,
+                lose_commit_ack: false,
+            }
+        }
+    }
+
+    impl DrainDb for TradeDbModel {
+        fn load_persist_revision<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+            Box::pin(async move { Ok(self.revisions.lock().unwrap().get(id).copied()) })
+        }
+        fn apply_snapshot<'a>(
+            &'a self,
+            s: &'a PersistSnapshot,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.normal_applies
+                    .lock()
+                    .unwrap()
+                    .push((s.player_id.clone(), s.persist_revision));
+                self.revisions
+                    .lock()
+                    .unwrap()
+                    .insert(s.player_id.clone(), s.persist_revision);
+                Ok(())
+            })
+        }
+        fn apply_trade<'a>(
+            &'a self,
+            t: &'a crate::persist::TradeArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
+            Box::pin(async move {
+                let mut revisions = self.revisions.lock().unwrap();
+                let mut committed = self.committed.lock().unwrap();
+                let action = crate::persist::trade_revision_action_with_proof(
+                    t,
+                    t.characters
+                        .each_ref()
+                        .map(|c| revisions.get(&c.snapshot.player_id).copied()),
+                    committed.get(&t.commit_id).map(String::as_str),
+                );
+                if action == crate::persist::TradeApply::Applied {
+                    if self.fail_pair {
+                        return Err("model: second write rolled back".into());
+                    }
+                    for c in &t.characters {
+                        revisions.insert(c.snapshot.player_id.clone(), c.snapshot.persist_revision);
+                    }
+                    committed.insert(t.commit_id.clone(), t.commit_payload()?);
+                    self.pair_applies
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if self.lose_commit_ack {
+                        return Err("model: DB commit acknowledged after cancellation/crash".into());
+                    }
+                }
+                Ok(action)
+            })
+        }
+    }
+
+    #[test]
+    fn trade_commit_publication_sync_failure_confirms_identical_content_only() {
+        let base = temp_dir("trade-sync");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let t = trade_artifact();
+        let target = s.spool_dir().join(trade_file_name(&t));
+        let bytes = serde_json::to_vec(&t).unwrap();
+        assert!(publish_trade_bytes(&target, &bytes, |_| Err(
+            "injected directory sync failure".into()
+        ))
+        .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        for id in ["1", "2"] {
+            assert!(s.ensure_trade_save_allowed(id).is_err());
+            assert_eq!(s.pending_revision(id).unwrap(), Some(2));
+        }
+        let called = std::sync::atomic::AtomicBool::new(false);
+        publish_trade_bytes(&target, &bytes, |p| {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            sync_dir(p)
+        })
+        .unwrap();
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(publish_trade_bytes(&target, b"different", sync_dir).is_err());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_drain_predecessors_then_pair_and_durable_receipt() {
+        let base = temp_dir("trade-dependencies");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let t = trade_artifact();
+        s.write_trade(&t).unwrap();
+        let db = TradeDbModel::new(0, 0);
+        assert!(s.drain_one_with(&db, "sword").await.unwrap().is_none());
+        s.write_batch_run(vec![snapshot("1", 1, 0.0), snapshot("2", 1, 0.0)])
+            .unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 2);
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 2);
+        assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(s.count_batches().unwrap(), 0);
+        assert_eq!(s.trade_receipt("spool_test").unwrap(), Some(t.clone()));
+        assert!(s.ensure_trade_save_allowed("1").is_ok());
+        // Crash-after-DB-commit model: same file again, shared skip, no apply.
+        s.write_trade(&t).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_skipped, 2);
+        assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_receipt_replay_after_restart_does_not_prepare_again() {
+        let base = temp_dir("trade-receipt-restart");
+        {
+            let runtime = PersistRuntime::new(&base, "sword").unwrap();
+            runtime.spool().write_trade(&trade_artifact()).unwrap();
+            runtime
+                .spool()
+                .drain_one_with(&TradeDbModel::new(1, 1), "sword")
+                .await
+                .unwrap();
+        }
+        let runtime = PersistRuntime::new(&base, "sword").unwrap();
+        let shared = crate::world::new_shared();
+        let req = crate::persist::TradeCommitRequest {
+            commit_id: "spool_test".into(),
+            characters: ["1".into(), "2".into()],
+            idia: [42, 42],
+            transfers: Vec::new(),
+        };
+        runtime.commit_trade(&shared, req.clone()).await.unwrap();
+        let mut changed = req;
+        changed.idia = [41, 43];
+        assert!(runtime.commit_trade(&shared, changed).await.is_err());
+        assert!(shared.lock().await.prepared_trades.is_empty());
+        assert_eq!(runtime.spool().count_batches().unwrap(), 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_drain_conflict_quarantines_both_and_blocks_lifecycle() {
+        let base = temp_dir("trade-conflict");
+        let runtime = PersistRuntime::new(&base, "sword").unwrap();
+        let s = runtime.spool();
+        s.write_trade(&trade_artifact()).unwrap();
+        let db = TradeDbModel::new(2, 1);
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .batches_quarantined,
+            1
+        );
+        for id in ["1", "2"] {
+            // Even a numerically newer DB revision is not pair recovery proof.
+            assert_eq!(
+                s.evaluate_character_availability(id, 99),
+                CharacterAvailability::SaveRecoveryPending
+            );
+            assert!(s.ensure_trade_save_allowed(id).is_err());
+        }
+        assert_eq!(
+            s.evaluate_character_availability("3", 0),
+            CharacterAvailability::Available
+        );
+        assert!(s.has_unresolved_trades().unwrap());
+        let outcome = runtime.recover_with_limit(&db, 10).await.unwrap();
+        assert_eq!(outcome.batches_remaining, 0);
+        assert_eq!(
+            runtime.apply_startup_recovery(&outcome),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 }
+        );
+        assert_eq!(
+            runtime.apply_drain_tick().unwrap(),
+            RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 }
+        );
+        assert!(runtime
+            .finalize_startup_lifecycle(&unreachable_lazy_pool())
+            .await
+            .is_err());
+        assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_drain_failure_retains_whole_pair_model() {
+        let base = temp_dir("trade-model-rollback");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        s.write_trade(&trade_artifact()).unwrap();
+        let mut db = TradeDbModel::new(1, 1);
+        db.fail_pair = true;
+        assert!(s.drain_one_with(&db, "sword").await.is_err());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(
+            db.revisions
+                .lock()
+                .unwrap()
+                .values()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        db.fail_pair = false;
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .entries_applied,
+            2
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_held_publication_never_drains_or_allows_later_snapshot() {
+        let base = temp_dir("trade-held");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let t = trade_artifact();
+        s.hold_trade_publication(&t.commit_id);
+        s.write_trade(&t).unwrap();
+        // A legacy/later ordinary snapshot must not run ahead of the pair.
+        s.write_legacy_single(&snapshot("1", 3, 2.0)).unwrap();
+        let db = TradeDbModel::new(1, 1);
+        assert!(s.drain_one_with(&db, "sword").await.unwrap().is_none());
+        assert_eq!(db.revisions.lock().unwrap()["1"], 1);
+        s.release_trade_publication(&t.commit_id);
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .entries_applied,
+            2
+        );
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .entries_applied,
+            1
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_corrupt_payload_attribution_survives_quarantine() {
+        let base = temp_dir("trade-corrupt");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let path = s.spool_dir().join(trade_file_name(&trade_artifact()));
+        std::fs::write(&path, b"not json").unwrap();
+        let db = TradeDbModel::new(1, 1);
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .batches_quarantined,
+            1
+        );
+        for id in ["1", "2"] {
+            assert!(s.ensure_trade_save_allowed(id).is_err());
+        }
+        assert_eq!(
+            std::fs::read(
+                list_json_files(&s.quarantine_open_dir())
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+            )
+            .unwrap(),
+            b"not json"
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_normal_durable_before_handoff_then_trade_uses_next_revision() {
+        let base = temp_dir("cancel-normal-handoff");
+        let runtime = Arc::new(PersistRuntime::new(&base, "sword").unwrap());
+        let shared = crate::world::new_shared();
+        for id in ["1", "2"] {
+            let (mut p, _) = dirty_test_player(id);
+            p.persist_revision = 0;
+            p.idia = 42;
+            shared.lock().await.players.insert(id.into(), p);
+        }
+        let (published_tx, published_rx) = tokio::sync::oneshot::channel();
+        let r = runtime.clone();
+        let save_shared = shared.clone();
+        let hold_shared = shared.clone();
+        let spool = runtime.spool().clone();
+        let save = tokio::spawn(async move {
+            r.persist_dirty_run_with(
+                &save_shared,
+                &["1".into(), "2".into()],
+                move |snapshots| async move {
+                    spool.write_batch_run(snapshots)?;
+                    // Hand the controller the actual World lock AFTER confirmed
+                    // file+directory sync. Production handoff must now wait.
+                    let guard = hold_shared.lock_owned().await;
+                    published_tx
+                        .send(guard)
+                        .map_err(|_| "controller gone".to_string())?;
+                    Ok(())
+                },
+            )
+            .await
+        });
+        let guard = published_rx.await.unwrap();
+        assert_eq!(guard.normal_publications.len(), 2);
+        assert_eq!(guard.players["1"].persist_revision, 0);
+        let before = std::fs::read(
+            list_json_files(&runtime.spool().spool_dir())
+                .unwrap()
+                .pop()
+                .unwrap(),
+        )
+        .unwrap();
+        save.abort();
+        assert!(save.await.unwrap_err().is_cancelled());
+        drop(guard);
+        // Model DB drain may already have removed the old publication. Its
+        // revision/content reservation still survives in World, not the future.
+        let db = TradeDbModel::new(0, 0);
+        runtime.spool().drain_one_with(&db, "sword").await.unwrap();
+        assert_eq!(runtime.spool().count_batches().unwrap(), 0);
+        runtime
+            .commit_trade(
+                &shared,
+                crate::persist::TradeCommitRequest {
+                    commit_id: "after_cancel".into(),
+                    characters: ["1".into(), "2".into()],
+                    idia: [41, 43],
+                    transfers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let files = list_json_files(&runtime.spool().spool_dir()).unwrap();
+        let normal = files
+            .iter()
+            .find(|p| trade_file_header(p).is_none())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(normal).unwrap(),
+            before,
+            "identical reserved publication recreated"
+        );
+        let world = shared.lock().await;
+        assert!(world.normal_publications.is_empty());
+        assert_eq!(
+            (
+                world.players["1"].persist_revision,
+                world.players["2"].persist_revision
+            ),
+            (2, 2)
+        );
+        drop(world);
+        runtime.spool().drain_one_with(&db, "sword").await.unwrap(); // old normal skip
+        let report = runtime
+            .spool()
+            .drain_one_with(&db, "sword")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            report.entries_applied, 2,
+            "trade really applies, not false equal-revision skip"
+        );
+        assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_visible_normal_sync_failure_retains_content_and_force_captures_fresh_state(
+    ) {
+        let base = temp_dir("normal-sync-reservation");
+        let runtime = PersistRuntime::new(&base, "sword").unwrap();
+        let shared = crate::world::new_shared();
+        let (p, _) = dirty_test_player("1");
+        shared.lock().await.players.insert("1".into(), p);
+        let spool = runtime.spool();
+        assert!(runtime
+            .persist_dirty_run_with(&shared, &["1".into()], move |snapshots| async move {
+                spool
+                    .write_batch_run_with_sync(snapshots, |_| Err("injected sync failure".into()))
+                    .map(|_| ())
+            })
+            .await
+            .is_err());
+        let path = list_json_files(&runtime.spool().spool_dir())
+            .unwrap()
+            .pop()
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        {
+            let mut w = shared.lock().await;
+            assert_eq!(w.normal_publications["1"][0].persist_revision, 6);
+            assert_eq!(w.players["1"].persist_revision, 5);
+            let p = w.players.get_mut("1").unwrap();
+            p.x = 999.0;
+            p.mark_dirty(crate::persist::PersistComponent::Position);
+        }
+        runtime.persist_player(&shared, "1", true).await.unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            bytes,
+            "no same-revision content substitution"
+        );
+        let w = shared.lock().await;
+        assert!(w.normal_publications.is_empty());
+        assert_eq!(w.players["1"].persist_revision, 7);
+        assert!(!w.players["1"].dirty.any());
+        drop(w);
+        assert!(list_json_files(&runtime.spool().spool_dir())
+            .unwrap()
+            .iter()
+            .any(|p| {
+                entries_in_file(&std::fs::read_to_string(p).unwrap())
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.persist_revision == 7 && s.x == 999.0)
+            }));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_trade_commit_before_receipt_recovers_only_from_db_proof_model() {
+        let base = temp_dir("commit-before-receipt-proof");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let t = trade_artifact();
+        s.write_trade(&t).unwrap();
+        let mut db = TradeDbModel::new(1, 1);
+        db.lose_commit_ack = true; // model: transaction committed, response lost
+        assert!(s.drain_one_with(&db, "sword").await.is_err());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert!(s.trade_receipt(&t.commit_id).unwrap().is_none());
+        assert_eq!(
+            db.committed.lock().unwrap()[&t.commit_id],
+            t.commit_payload().unwrap()
+        );
+        let restarted = spool(&base);
+        let report = restarted
+            .drain_one_with(&db, "sword")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.entries_skipped, 2);
+        assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(restarted.trade_receipt(&t.commit_id).unwrap(), Some(t));
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_equal_revisions_without_matching_proof_never_create_receipt() {
+        for mismatch in [false, true] {
+            let base = temp_dir(if mismatch {
+                "wrong-proof"
+            } else {
+                "missing-proof"
+            });
+            let s = spool(&base);
+            s.ensure_dirs().unwrap();
+            let t = trade_artifact();
+            s.write_trade(&t).unwrap();
+            let db = TradeDbModel::new(2, 2);
+            if mismatch {
+                let mut different = t.clone();
+                different.characters[0].snapshot.x = 123.0;
+                db.committed
+                    .lock()
+                    .unwrap()
+                    .insert(t.commit_id.clone(), different.commit_payload().unwrap());
+            }
+            assert_eq!(
+                s.drain_one_with(&db, "sword")
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .batches_quarantined,
+                1
+            );
+            assert!(s.trade_receipt(&t.commit_id).unwrap().is_none());
+            let kept = list_json_files(&s.quarantine_open_dir())
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<crate::persist::TradeArtifact>(
+                    &std::fs::read(kept).unwrap()
+                )
+                .unwrap(),
+                t
+            );
+            for id in ["1", "2"] {
+                assert!(s.ensure_trade_save_allowed(id).is_err());
+            }
+            assert_eq!(db.pair_applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+            std::fs::remove_dir_all(base).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_normal_batch_blocked_a_does_not_block_c_or_prerequisite_trade() {
+        let base = temp_dir("entry-dependency-isolation");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        s.write_trade(&trade_artifact()).unwrap();
+        s.write_batch_run(vec![snapshot("1", 3, 9.0), snapshot("3", 1, 3.0)])
+            .unwrap();
+        let db = TradeDbModel::new(1, 1);
+        db.revisions.lock().unwrap().insert("3".into(), 0);
+        let report = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(report.entries_applied, 1);
+        assert_eq!(report.batches_processed, 0, "partial batch stays");
+        assert_eq!(s.count_batches().unwrap(), 2);
+        assert_eq!(db.revisions.lock().unwrap()["3"], 1);
+        // Repeated C skip must not starve the prerequisite trade.
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .entries_applied,
+            2
+        );
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .batches_processed,
+            1
+        );
+        assert_eq!(
+            db.normal_applies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == "3")
+                .count(),
+            1
+        );
+        assert_eq!(s.count_batches().unwrap(), 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_quarantined_trade_keeps_partial_batch_without_blocking_c() {
+        let base = temp_dir("partial-quarantine-isolation");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        s.write_trade(&trade_artifact()).unwrap();
+        s.write_batch_run(vec![snapshot("1", 3, 9.0), snapshot("3", 1, 3.0)])
+            .unwrap();
+        let db = TradeDbModel::new(2, 1); // no matching proof; whole trade conflict
+        db.revisions.lock().unwrap().insert("3".into(), 0);
+        s.drain_one_with(&db, "sword").await.unwrap();
+        assert_eq!(
+            s.drain_one_with(&db, "sword")
+                .await
+                .unwrap()
+                .unwrap()
+                .batches_quarantined,
+            1
+        );
+        assert!(s.drain_one_with(&db, "sword").await.unwrap().is_none());
+        assert_eq!(
+            s.count_batches().unwrap(),
+            1,
+            "blocked A keeps complete normal file"
+        );
+        assert_eq!(
+            db.normal_applies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == "3")
+                .count(),
+            1
+        );
+        assert_eq!(
+            s.evaluate_character_availability("3", 1),
+            CharacterAvailability::Available
+        );
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -5654,6 +6860,7 @@ mod tests {
             spool: Spool {
                 base_dir: base.clone(),
                 in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                held_trade_publications: Arc::new(Mutex::new(Default::default())),
             },
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),

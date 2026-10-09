@@ -1,5 +1,106 @@
 # Andora – Player-Persistenzstrategie (laufende Spielerzustände)
 
+## Trade-Ausnahme: recovery-sicherer Zwei-Charakter-Commit (eingebaut)
+
+Freigegebene Ausnahme zu §§24,35–39, innerhalb desselben Spool-Pfads:
+`PersistRuntime::commit_trade` / `persist::commit_trade` sind interne
+Persistenz-APIs; Handelsanfragen, Angebote und C2S-Nachrichten existieren dadurch
+nicht. Fachliche Handelsfreigaben bleiben Aufgabe des späteren Spiellayers.
+
+**Cancellation-/Isolierungs-Korrektur (eingebaut):** Normale Publikationen
+reservieren ihre vollständigen Snapshots vor dem ersten Schreibversuch in
+`World::normal_publications`, gemeinsam je ursprünglichem Batch. Das speichernde
+Future besitzt die Reservierung nicht exklusiv: Abbruch nach Veröffentlichung,
+sichtbare Datei nach Sync-Fehler und Drain vor RAM-Handoff lassen Inhalt,
+Erfassungszeit, Zielrevision und Generation erhalten. Wiederaufnahme verwendet
+denselben vollständigen Inhalt; sie erwirbt sämtliche Teilnehmer-Gates stabil
+geordnet und übernimmt anschließend nur Revision/Dirty-Zustand. Erst dieser
+World-Lock-Handoff entfernt die Reservierung. Auch bei bereits gedrainter Datei
+bleibt die ursprüngliche Revision reserviert; ein Folgesave/Trade löst den
+Vorgänger zuerst auf oder wird kontrolliert zurückgestellt. Ein Force-Save darf
+nicht bloß einen älteren reservierten Zustand als aktuellen Abschluss bestätigen.
+Normale Wirtschaftsänderungen während eines Saves bleiben über Generation/Dirty
+geschützt. Keine World-Sperre über Datei-/DB-I/O; keine Gate-Wartezyklen.
+
+Dies präzisiert die Speicherfreigabe aus §35: Die normale Snapshot-Reservierung
+bleibt bei ausstehendem RAM-Handoff als unverlierbarer Wiederaufnahmezustand
+erhalten, ohne auf den DB-Drain zu warten. Wire-Inhaltsbestätigung vergleicht alle
+persistierten Felder, nicht die nie serialisierten RAM-Steuerfelder oder Puffer.
+
+* `TradeArtifact`, `kind = two_character_trade`, Formatversion 1: genau zwei
+  kanonisch geordnete Charaktere, Commit-Kennung, Basis-/Zielrevisionen,
+  vollständige Nachzustände sowie RAM-Quellinventare/-Idia und konkrete
+  Transfer-/Split-/Merge-Zuordnung. Zielrevision = Basis + 1, geprüft statt
+  saturiert. Auch normale Saves verweigern Revisionsüberlauf.
+* Ein Trade wird gemeinsam vollständig geschrieben, Datei-gesynct, atomar ohne
+  Überschreiben veröffentlicht und verzeichnis-gesynct. **Erfolg erst nach
+  bestätigter Spool-Dauerhaftigkeit und gemeinsamer RAM-Übernahme.** Eine bereits
+  sichtbare Datei nach Sync-Fehler ist keine Erfolgsbestätigung: vorbereiteter
+  Inhalt und Kennung bleiben unverändert ausstehend. Periodischer Save und
+  Disconnect/Shutdown bestätigen denselben Inhalt erneut, ohne neuen Split oder
+  zweiten Commit. Auch ein vor Veröffentlichung fehlgeschlagener Versuch bleibt
+  für diesen internen Baustein zur identischen Wiederholung vorbereitet.
+* Beide Charakter-Gates in stabiler Reihenfolge **vor** World-Lock. Periodischer
+  Mehrspieler-Save und Force-Save verwenden dieselben Gates bis zur
+  Revisionsübernahme. World-Locks umfassen keine Datei-/DB-I/O. Während der
+  Veröffentlichung sind Inventar/Idia/Lifecycle der beiden Charaktere geschützt
+  (heutige Mutationspfade: NPC-Handel und Loot); Position/HP und andere Änderungen
+  dürfen weiterlaufen und werden nicht durch vollständiges Player-Rückkopieren
+  überschrieben. Dirty-Freigabe bleibt generationsgebunden.
+* Vorbereitete Commit-Daten liegen in `World::prepared_trades`. Nach dauerhafter
+  Veröffentlichung bleibt eine beidseitige Persistenzbarriere bis zum gemeinsamen
+  DB-Commit: spätere Saves/Transfers dürfen den Trade nicht überholen. Unbeteiligte
+  normale Saves laufen weiter; zurückgestellte Saves melden keinen Erfolg.
+  Disconnect behält neueren RAM bei Savefehler; Shutdown zählt nicht gesicherte
+  Force-Saves als Fehler. Beim Warten wird kein Gate gehalten, das der Drain
+  benötigt.
+* Trade-Drain: beide Gates, Revisionen **innerhalb einer** DB-Transaktion sperren
+  und prüfen. Vorgänger müssen beide Basisrevisionen erreicht haben. Dann globale
+  UUID-Platzierungen/Transferquellen validieren, beide vollständigen Snapshots
+  schreiben, Transferpflichten bereinigen, Lifecycle nach beiden Inventaren
+  ausführen, beide Zielrevisionen setzen, einmal COMMIT. Fehler rollt beide zurück;
+  die vollständige Datei bleibt. Gemischter angewandter/nicht angewandter Stand
+  ist Konflikt, kein Einzel-Apply und kein einseitiges Superseding.
+* **Eindeutiger gemeinsamer DB-Nachweis:** Migration 023 ergänzt
+  `character_trade_commits(commit_id, artifact_json)`. Der vollständige kanonische
+  Trade-Inhalt (kein bloßer Hash/Revisionstoken) wird per INSERT in derselben
+  Transaktion wie beide Charaktere geschrieben. Beim Retry wird dieser Inhalt
+  unter Commit-Kennung in der Transaktion vollständig verglichen. Nur passender
+  Nachweis UND beide Revisionen >= Ziel erlauben `AlreadyApplied`. Gleiche
+  Zielrevisionen ohne Nachweis, abweichender Inhalt oder gemischter Stand bleiben
+  Konflikt. Der Marker deckt DB-COMMIT vor Datei-Quittung/Antwortverlust ab.
+* Nach gemeinsamer DB-Bestätigung wird das vollständige Artefakt dauerhaft unter
+  `<spool-base>/trade_receipts/` gesichert, erst danach aus `spool/` entfernt.
+  Quittungen erhalten Kennung/Inhalt auch über Neustarts; keine automatische
+  Retention für diese Einmaligkeitsnachweise. Der neue Quittungsumschlag trägt
+  `kind = two_character_trade_receipt`, Version 1 und das vollständige Artefakt.
+  Frühere nackte Artefakt-Quittungen werden nicht als nachgewiesen übernommen;
+  sie erfordern kontrollierte Klärung statt blindem Skip. Eine Datei-Quittung
+  allein ersetzt beim Drain niemals den transaktionalen DB-Nachweis. Sowohl
+  DB-Marker (ohne Lösch-Cascade) als auch Datei-Quittungen haben bewusst keine
+  automatische Bereinigung/Frist; Speicherwachstum ist eine Betriebsgrenze.
+* Der kanonische Trade-Dateiname ordnet beide Charaktere auch bei beschädigtem
+  Inhalt zu. Problematische Trades werden **vollständig dauerhaft** quarantänisiert;
+  beide Charaktere bleiben gesperrt. Offene/quarantänisierte Trades verhindern
+  Startup-Lifecycle-Finalisierung; bloß hohe Einzelrevisionen heben sie nicht auf.
+  Ein unzuordenbarer Trade wird fail-closed erhalten, nicht teilweise eingespielt.
+
+Retries fehlerhafter Trade-/Normalpublikationsgruppen erhalten deren Zustand,
+melden DEGRADED/Fehler und versuchen andere Gruppen weiter. Periodische Saves
+verarbeiten unbeteiligte Charaktere trotz Gruppenfehler und melden anschließend
+den Teilerfolg mit Fehler; Force-Saves lösen nur ihre eigenen Abhängigkeiten auf.
+Normale `SpoolBatch`- und alte Einzelsnapshot-Formate behalten unabhängige
+Eintragsverarbeitung, Quarantäne und Superseding: ein durch Trade-Abhängigkeit
+blockierter Eintrag hält keinen verarbeitbaren Nachbarn auf. Die Datei bleibt
+bis zum Abschluss aller Einträge; wiederholte Skips in einem Teilbatch dürfen
+dessen vorausgesetzten Trade nicht dauerhaft aufhalten. Ganze Trade-Umschläge
+bleiben unteilbar. Neue Trade-Formate werden nicht als normale Batches interpretiert.
+Migration 023 wurde erstellt, nicht ausgeführt; keine neue Abhängigkeit.
+Nachweise: Produktionspfade mit injizierter Directory-Sync-/DB-Grenze und
+bestehender Drain-Testinterface; SQL-/Rollback-Adapter sind ausdrücklich Modelle,
+keine echte MariaDB-/FK-/Crash-Verifikation. Single-Process-/lokaler-Datenträger-
+Betriebsvertrag bleibt maßgeblich.
+
 ## 1. Status
 
 **Player-Persistenz Stufe A (Dirty-State, periodischer Player-Save, Disconnect-/Shutdown-Flush) ist implementiert und abgeschlossen.**

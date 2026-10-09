@@ -132,6 +132,8 @@ pub enum TradeReject {
     /// (fail-closed, `handle_hello`); nur Definitionen fehlen ohne
     /// Content-Loader. Kein Violation-Zähler, Disconnect oder Bann.
     QuestDataUnavailable,
+    /// Economic state is frozen while a paired spool publication is pending.
+    CommitPending,
     PriceOverflow,
     InsufficientIdia,
     InventoryFull,
@@ -155,6 +157,7 @@ impl TradeReject {
             TradeReject::BoundItem => "bound_item",
             TradeReject::QuestItemProtected => "quest_item_protected",
             TradeReject::QuestDataUnavailable => "quest_data_unavailable",
+            TradeReject::CommitPending => "trade_commit_pending",
             TradeReject::PriceOverflow => "price_overflow",
             TradeReject::InsufficientIdia => "insufficient_idia",
             TradeReject::InventoryFull => "inventory_full",
@@ -290,6 +293,9 @@ pub fn attempt_trade(
     actor: &str,
     req: &TradeRequest,
 ) -> Result<TradeOutcome, TradeReject> {
+    if !world.economic_mutation_allowed(actor) {
+        return Err(TradeReject::CommitPending);
+    }
     let player = world.players.get(actor).ok_or(TradeReject::UnknownPlayer)?;
     let npc = world.npcs.get(&req.npc_id).ok_or(TradeReject::UnknownNpc)?;
     if !world.merchant_catalog.is_merchant(npc.spawn_id) {

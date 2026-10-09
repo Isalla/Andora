@@ -364,6 +364,13 @@ pub fn reconcile_after_take(
     });
 }
 
+/// A continuing UUID changes owner, it does not die. Cancel retained obligations
+/// instead of recording Sold. The pair drain performs the matching global DB
+/// cancellation, after both inventory placements have been established.
+pub fn reconcile_transfer(lifecycle: &mut ItemLifecycle, uuid: &str) {
+    lifecycle.cancel(uuid);
+}
+
 /// Anschlussstelle Wiedereinsetzen (`try_insert_instance`, Buyback-Pfad):
 /// - `retired_uuid` (Vollverschmelzung): die aufgegebene UUID ist
 ///   abgekoppelt und wird erfasst.

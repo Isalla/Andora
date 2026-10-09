@@ -734,6 +734,18 @@ async fn finish_owner(
     flush: DisconnectFlush,
     write_logout: DisconnectLogout,
 ) -> bool {
+    // Confirmation retries acquire a PAIR of gates. Run them before the
+    // single-character logout gate, never while holding a gate needed by drain.
+    if let Err(e) = ctx.persist.retry_trade_publications(&ctx.shared).await {
+        log::error!("disconnect trade publication deferred: {e}");
+    }
+    if let Err(e) = ctx
+        .persist
+        .retry_normal_publications(&ctx.shared, Some(&[player_id.to_string()]))
+        .await
+    {
+        log::error!("disconnect normal publication deferred: {e}");
+    }
     // Gate zuerst: verhindert, dass ein Login-/Takeover für dieselbe player_id
     // zwischen Eigentümerprüfung und `logout_at`-Write abschließt.
     let _logout_gate = ctx.persist.player_gate(player_id).await.lock_owned().await;
@@ -1274,6 +1286,65 @@ mod tests {
         TestCtx {
             ctx,
             _dir: dir_guard,
+        }
+    }
+
+    #[tokio::test]
+    async fn trade_commit_pending_disconnect_keeps_ram_and_shutdown_reports_unsaved() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        insert_cadence_players(&ctx, &[("1", 0.0, 0.0, 100), ("2", 1.0, 0.0, 100)]).await;
+        ctx.shared.lock().await.by_conn.insert(7, "1".into());
+        ctx.persist
+            .commit_trade(
+                &ctx.shared,
+                crate::persist::TradeCommitRequest {
+                    commit_id: "disconnect_test".into(),
+                    characters: ["1".into(), "2".into()],
+                    idia: [0, 0],
+                    transfers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        // Newer resources cannot be represented by a deferred force-save.
+        {
+            let mut world = ctx.shared.lock().await;
+            world
+                .players
+                .get_mut("1")
+                .unwrap()
+                .mark_dirty(crate::persist::PersistComponent::Resources);
+        }
+        let persist = ctx.persist.clone();
+        let shared = ctx.shared.clone();
+        let flush: DisconnectFlush = Box::new(move || {
+            let persist = persist.clone();
+            let shared = shared.clone();
+            Box::pin(async move { persist.persist_player_gate_held(&shared, "1", true).await })
+        });
+        let logout: DisconnectLogout = Box::new(|_| Box::pin(async { Ok(()) }));
+        assert!(finish_owner(&ctx, 7, "1", flush, logout).await);
+        assert!(ctx.shared.lock().await.players.contains_key("1"));
+        assert!(!ctx.shared.lock().await.by_conn.contains_key(&7));
+        let make_write = |_: &str| -> DisconnectLogout { Box::new(|_| Box::pin(async { Ok(()) })) };
+        let report = shutdown_logout_phase(
+            &ctx.persist,
+            &ctx.shared,
+            &["1".into(), "2".into()],
+            TEST_PLAN,
+            Duration::from_secs(5),
+            &no_wait(),
+            &make_write,
+        )
+        .await;
+        assert_eq!(report.spool_failed, 2);
+        assert_eq!(ctx.persist.spool().count_batches().unwrap(), 1);
+        for id in ["1", "2"] {
+            assert_eq!(
+                ctx.persist.evaluate_character_availability(id, 0),
+                crate::spool::CharacterAvailability::SaveRecoveryPending
+            );
         }
     }
 

@@ -739,6 +739,121 @@ pub(crate) async fn write_persist_revision(
     Ok(())
 }
 
+/// Pair revisions are read and locked inside the SAME transaction as the
+/// transfer. A pool-level pre-read is not a trade commit guard.
+pub(crate) async fn lock_persist_revision(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+) -> Result<Option<i64>, String> {
+    sqlx::query_scalar("SELECT persist_revision FROM characters WHERE id = ? FOR UPDATE")
+        .bind(char_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| format!("trade revision lock: {e}"))
+}
+
+pub(crate) async fn load_trade_commit_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    commit_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
+        "SELECT artifact_json FROM character_trade_commits WHERE commit_id = ? FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("trade proof read: {e}"))
+}
+
+pub(crate) async fn write_trade_commit_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    trade: &crate::persist::TradeArtifact,
+) -> Result<(), String> {
+    // INSERT only, never overwrite an existing identity with a different trade.
+    sqlx::query("INSERT INTO character_trade_commits (commit_id, artifact_json) VALUES (?, ?)")
+        .bind(&trade.commit_id)
+        .bind(trade.commit_payload()?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("trade proof write: {e}"))?;
+    Ok(())
+}
+
+/// Global placement validation includes buffer and all characters. Newly
+/// acquired unsaved RAM items may have no DB placement yet; existing placements
+/// must belong exactly to the witnessed source, never to a third character.
+pub(crate) async fn validate_trade_placements(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    trade: &crate::persist::TradeArtifact,
+) -> Result<bool, String> {
+    let mut before = std::collections::BTreeMap::new();
+    for c in &trade.characters {
+        for it in crate::persist::persistent_instances(&c.before_inventory) {
+            if before
+                .insert(it.item_uuid.clone(), c.snapshot.player_id.clone())
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+    }
+    let mut uuids: std::collections::BTreeSet<String> = before.keys().cloned().collect();
+    for c in &trade.characters {
+        uuids.extend(c.snapshot.inventory.persistent_uuids());
+    }
+    for t in &trade.transfers {
+        uuids.insert(t.moved.item_uuid.clone());
+    }
+    for uuid in &uuids {
+        let mut refs = Vec::new();
+        for table in [
+            "character_inventory",
+            "bag_slots",
+            "character_equipment",
+            "inventory_buffer",
+        ] {
+            let rows: Vec<i32> = sqlx::query_scalar(&format!(
+                "SELECT char_id FROM {table} WHERE item_uuid = ? FOR UPDATE"
+            ))
+            .bind(uuid)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| format!("trade placements: {e}"))?;
+            for owner in rows {
+                refs.push((owner.to_string(), table == "inventory_buffer"));
+            }
+        }
+        if !trade_placement_refs_valid(before.get(uuid).map(String::as_str), &refs) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn trade_placement_refs_valid(expected: Option<&str>, refs: &[(String, bool)]) -> bool {
+    refs.len() <= 1
+        && refs
+            .iter()
+            .all(|(owner, buffer)| !buffer && Some(owner.as_str()) == expected)
+}
+
+/// Ownership transfer is NOT Sold. Remove old obligations for continuing UUIDs
+/// globally, including obligations retained by a previous owner. A genuinely
+/// retired UUID remains governed by the recipient's Merged obligation.
+pub(crate) async fn clear_transferred_lifecycle(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    trade: &crate::persist::TradeArtifact,
+) -> Result<(), String> {
+    for t in &trade.transfers {
+        sqlx::query("DELETE FROM item_instance_finalizations WHERE item_uuid = ?")
+            .bind(&t.moved.item_uuid)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("trade lifecycle transfer: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Persistierte Persistenz-Revision eines Charakters lesen
 /// (docs/Player_Persistenz.md §29). `None` = kein Charakter-Datensatz
 /// (der Drain quarantäniert solche Batches, statt den Drain zu blockieren).

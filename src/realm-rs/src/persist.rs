@@ -29,6 +29,669 @@ use serde::{Deserialize, Serialize};
 use crate::inventory::InventoryState;
 use crate::world::{Player, Shared};
 
+pub(crate) type NormalPublication = std::sync::Arc<Vec<PersistSnapshot>>;
+
+/// Reserve before invoking any writer. The World owns the immutable snapshots,
+/// not the saving future: cancellation cannot release a revision for new data.
+fn reserve_normal(
+    world: &mut crate::world::World,
+    snapshots: Vec<PersistSnapshot>,
+) -> Result<NormalPublication, String> {
+    let mut ids = std::collections::BTreeSet::new();
+    for s in &snapshots {
+        if !ids.insert(&s.player_id) || world.normal_publications.contains_key(&s.player_id) {
+            return Err("normal publication participant conflict".into());
+        }
+    }
+    let publication = std::sync::Arc::new(snapshots);
+    for s in publication.iter() {
+        world
+            .normal_publications
+            .insert(s.player_id.clone(), publication.clone());
+    }
+    Ok(publication)
+}
+
+/// Caller holds ALL participant gates. Repeated writes use the same complete
+/// batch, including capture time. The reservation is removed only after RAM
+/// revision/dirty handoff, under the same World lock as that handoff.
+async fn finish_normal_publication<W, F>(
+    shared: &Shared,
+    publication: NormalPublication,
+    write: W,
+) -> Result<(), String>
+where
+    W: FnOnce(Vec<PersistSnapshot>) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    write(publication.as_ref().clone()).await?;
+    let mut world = shared.lock().await;
+    for s in publication.iter() {
+        if !world.players.contains_key(&s.player_id)
+            || !world
+                .normal_publications
+                .get(&s.player_id)
+                .is_some_and(|p| std::sync::Arc::ptr_eq(p, &publication))
+        {
+            return Err("normal publication handoff conflict".into());
+        }
+    }
+    for s in publication.iter() {
+        let p = world
+            .players
+            .get_mut(&s.player_id)
+            .ok_or("normal publication player lost")?;
+        p.persist_revision = p.persist_revision.max(s.persist_revision);
+        if p.persist_generation == s.generation {
+            p.dirty.clear_components(s.dirty);
+        }
+        world.normal_publications.remove(&s.player_id);
+    }
+    Ok(())
+}
+
+/// Resume matching groups independently. No single gate is held while acquiring
+/// a group's gates; stale handles are rechecked after stable-order acquisition.
+pub(crate) async fn retry_normal_publications(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    requested: Option<&[String]>,
+) -> Result<(), String> {
+    let publications = {
+        let world = shared.lock().await;
+        let mut groups: Vec<NormalPublication> = Vec::new();
+        for (id, p) in &world.normal_publications {
+            if requested.is_none_or(|ids| ids.contains(id))
+                && !groups.iter().any(|g| std::sync::Arc::ptr_eq(g, p))
+            {
+                groups.push(p.clone());
+            }
+        }
+        groups
+    };
+    let mut errors = Vec::new();
+    for publication in publications {
+        let mut ids: Vec<_> = publication.iter().map(|s| s.player_id.clone()).collect();
+        ids.sort();
+        let mut guards = Vec::new();
+        for id in &ids {
+            guards.push(spool.player_gate(id).await.lock_owned().await);
+        }
+        let still_reserved = {
+            let world = shared.lock().await;
+            publication.iter().all(|s| {
+                world
+                    .normal_publications
+                    .get(&s.player_id)
+                    .is_some_and(|p| std::sync::Arc::ptr_eq(p, &publication))
+            })
+        };
+        if !still_reserved {
+            continue;
+        }
+        let mut allowed = true;
+        for snapshot in publication.iter() {
+            match spool.normal_publication_allowed(snapshot) {
+                Ok(true) => {}
+                Ok(false) => {
+                    allowed = false;
+                    errors.push("normal publication trade dependency pending".to_string());
+                }
+                Err(e) => {
+                    allowed = false;
+                    errors.push(e);
+                }
+            }
+        }
+        if allowed {
+            if let Err(e) = finish_normal_publication(shared, publication, |snapshots| async move {
+                spool.write_batch_run(snapshots).map(|_| ())
+            })
+            .await
+            {
+                errors.push(e);
+            }
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Internal persistence intent, not a trade dialog/offer or an authorization
+/// API. The future game layer must validate binding/quest/ownership policy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeCommitRequest {
+    pub commit_id: String,
+    pub characters: [String; 2],
+    /// Absolute resulting balances; their sum must be conserved.
+    pub idia: [i64; 2],
+    pub transfers: Vec<TradeTransferRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeTransferRequest {
+    pub source: String,
+    pub item_uuid: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradeCharacter {
+    pub base_revision: i64,
+    /// RAM source witnesses also cover items acquired since the last save.
+    pub before_inventory: InventoryState,
+    pub before_idia: i64,
+    pub snapshot: PersistSnapshot,
+}
+
+/// Source witness plus the actual split/transfer and merge outcome. No Sold
+/// detachment is created by ownership transfer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradeTransfer {
+    pub source: String,
+    pub destination: String,
+    pub original: crate::item::ItemInstance,
+    pub moved: crate::item::ItemInstance,
+    pub retired_uuid: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TradeArtifact {
+    pub kind: String,
+    pub format_version: u16,
+    pub commit_id: String,
+    pub characters: [TradeCharacter; 2],
+    pub transfers: Vec<TradeTransfer>,
+}
+
+#[derive(Clone)]
+pub struct PreparedTrade {
+    pub request: TradeCommitRequest,
+    pub artifact: TradeArtifact,
+    pub lifecycle: [crate::item_lifecycle::ItemLifecycle; 2],
+}
+
+impl TradeArtifact {
+    pub(crate) fn commit_payload(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|e| format!("trade proof serialize: {e}"))
+    }
+    pub(crate) fn matches_request(&self, request: &TradeCommitRequest) -> bool {
+        self.commit_id == request.commit_id
+            && request.characters.iter().enumerate().all(|(i, id)| {
+                self.characters
+                    .iter()
+                    .any(|c| &c.snapshot.player_id == id && c.snapshot.idia == request.idia[i])
+            })
+            && self.transfers.len() == request.transfers.len()
+            && self.transfers.iter().zip(&request.transfers).all(|(t, r)| {
+                t.source == r.source
+                    && t.original.item_uuid == r.item_uuid
+                    && t.moved.count == r.count
+            })
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kind != "two_character_trade"
+            || self.format_version != 1
+            || self.commit_id.is_empty()
+            || self.commit_id.len() > 64
+            || !self
+                .commit_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("invalid trade envelope".into());
+        }
+        let ids = self
+            .characters
+            .each_ref()
+            .map(|c| c.snapshot.player_id.as_str());
+        if ids[0] >= ids[1] {
+            return Err("trade needs two canonically ordered distinct characters".into());
+        }
+        let mut uuids = std::collections::BTreeSet::new();
+        let mut before_owners = std::collections::BTreeMap::new();
+        for c in &self.characters {
+            crate::db::parse_character_id(&c.snapshot.player_id)?;
+            if c.base_revision < 0
+                || c.base_revision.checked_add(1) != Some(c.snapshot.persist_revision)
+                || c.snapshot.idia < 0
+                || c.snapshot.item_lifecycle.is_none()
+            {
+                return Err("invalid trade revision/state".into());
+            }
+            for it in persistent_instances(&c.snapshot.inventory) {
+                if it.item_uuid.trim().is_empty()
+                    || it.count <= 0
+                    || !uuids.insert(it.item_uuid.clone())
+                {
+                    return Err("invalid or duplicate trade placement".into());
+                }
+            }
+            for it in persistent_instances(&c.before_inventory) {
+                if it.item_uuid.trim().is_empty()
+                    || it.count <= 0
+                    || before_owners
+                        .insert(it.item_uuid.clone(), c.snapshot.player_id.clone())
+                        .is_some()
+                {
+                    return Err("duplicate trade source placement".into());
+                }
+            }
+        }
+        if self
+            .characters
+            .iter()
+            .map(|c| i128::from(c.before_idia))
+            .sum::<i128>()
+            != self
+                .characters
+                .iter()
+                .map(|c| i128::from(c.snapshot.idia))
+                .sum::<i128>()
+            || self.characters.iter().any(|c| c.before_idia < 0)
+        {
+            return Err("trade currency not conserved".into());
+        }
+        let quantities =
+            |before: bool| -> Result<std::collections::BTreeMap<String, i128>, String> {
+                let mut out = std::collections::BTreeMap::new();
+                for c in &self.characters {
+                    let inv = if before {
+                        &c.before_inventory
+                    } else {
+                        &c.snapshot.inventory
+                    };
+                    for it in persistent_instances(inv) {
+                        let mut properties = it.clone();
+                        properties.item_uuid.clear();
+                        properties.count = 0;
+                        let key = serde_json::to_string(&properties).map_err(|e| e.to_string())?;
+                        *out.entry(key).or_insert(0) += i128::from(it.count);
+                    }
+                }
+                Ok(out)
+            };
+        if quantities(true)? != quantities(false)? {
+            return Err("trade items not conserved".into());
+        }
+        let mut sources = std::collections::BTreeSet::new();
+        let mut moved = std::collections::BTreeSet::new();
+        for t in &self.transfers {
+            if !ids.contains(&t.source.as_str())
+                || !ids.contains(&t.destination.as_str())
+                || t.source == t.destination
+                || t.moved.count <= 0
+                || t.moved.count > t.original.count
+                || t.original.item_uuid.trim().is_empty()
+                || !sources.insert(t.original.item_uuid.clone())
+                || !moved.insert(t.moved.item_uuid.clone())
+                || (t.original.count == t.moved.count)
+                    != (t.original.item_uuid == t.moved.item_uuid)
+                || t.retired_uuid
+                    .as_ref()
+                    .is_some_and(|u| u != &t.moved.item_uuid)
+            {
+                return Err("invalid trade transfer witness".into());
+            }
+            let mut expected = t.original.clone();
+            expected.item_uuid = t.moved.item_uuid.clone();
+            expected.count = t.moved.count;
+            if expected != t.moved {
+                return Err("trade changed instance properties".into());
+            }
+            let source = self
+                .characters
+                .iter()
+                .find(|c| c.snapshot.player_id == t.source)
+                .ok_or("missing source")?;
+            if !persistent_instances(&source.before_inventory)
+                .iter()
+                .any(|it| **it == t.original)
+            {
+                return Err("transfer source witness missing".into());
+            }
+            if t.moved.count < t.original.count {
+                let mut rest = t.original.clone();
+                rest.count -= t.moved.count;
+                if !persistent_instances(&source.snapshot.inventory)
+                    .iter()
+                    .any(|it| **it == rest)
+                {
+                    return Err("split remainder changed".into());
+                }
+            }
+            let destination = &self
+                .characters
+                .iter()
+                .find(|c| c.snapshot.player_id == t.destination)
+                .ok_or("missing destination")?
+                .snapshot
+                .inventory;
+            if t.retired_uuid.is_some() {
+                if uuids.contains(&t.moved.item_uuid) {
+                    return Err("retired trade UUID still placed".into());
+                }
+            } else if !persistent_instances(destination).iter().any(|it| {
+                let mut remainder = t.moved.clone();
+                remainder.count = it.count;
+                **it == remainder && it.count <= t.moved.count
+            }) {
+                return Err("transferred UUID missing from destination".into());
+            }
+        }
+        for c in &self.characters {
+            for it in persistent_instances(&c.snapshot.inventory) {
+                if before_owners.get(&it.item_uuid) == Some(&c.snapshot.player_id) {
+                    continue;
+                }
+                if !self.transfers.iter().any(|t| {
+                    t.moved.item_uuid == it.item_uuid
+                        && t.destination == c.snapshot.player_id
+                        && t.retired_uuid.is_none()
+                }) {
+                    return Err("unwitnessed UUID ownership change".into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn persistent_instances(inv: &InventoryState) -> Vec<&crate::item::ItemInstance> {
+    inv.base_slots
+        .iter()
+        .chain(inv.bags.iter().flat_map(|b| &b.slots))
+        .filter_map(|s| s.as_ref())
+        .chain(inv.equipped.values())
+        .collect()
+}
+
+fn prepare_trade(
+    world: &crate::world::World,
+    req: &TradeCommitRequest,
+) -> Result<PreparedTrade, String> {
+    if req.characters[0] == req.characters[1] {
+        return Err("trade needs distinct characters".into());
+    }
+    let players = req.characters.each_ref().map(|id| world.players.get(id));
+    let [Some(a), Some(b)] = players else {
+        return Err("trade character unavailable".into());
+    };
+    if req
+        .characters
+        .iter()
+        .any(|id| !world.economic_mutation_allowed(id))
+    {
+        return Err("trade commit pending".into());
+    }
+    if req.idia.iter().any(|n| *n < 0)
+        || a.idia < 0
+        || b.idia < 0
+        || i128::from(a.idia) + i128::from(b.idia)
+            != i128::from(req.idia[0]) + i128::from(req.idia[1])
+    {
+        return Err("trade currency not conserved".into());
+    }
+    let mut inventories = [a.inventory.clone(), b.inventory.clone()];
+    for inventory in &inventories {
+        for it in persistent_instances(inventory) {
+            let def = world
+                .item_definitions
+                .get(&it.item_id)
+                .ok_or("trade item definition unavailable")?;
+            def.validate()
+                .map_err(|e| format!("trade definition: {e}"))?;
+            it.validate(def)
+                .map_err(|e| format!("trade instance: {e}"))?;
+        }
+    }
+    let mut lifecycle = req
+        .characters
+        .each_ref()
+        .map(|id| world.item_lifecycle.get(id).cloned().unwrap_or_default());
+    let mut taken = Vec::new();
+    let mut sources = std::collections::BTreeSet::new();
+    for r in &req.transfers {
+        let i = req
+            .characters
+            .iter()
+            .position(|id| id == &r.source)
+            .ok_or("invalid transfer source")?;
+        if !sources.insert(r.item_uuid.clone()) {
+            return Err("duplicate transfer source".into());
+        }
+        let original = persistent_instances(&inventories[i])
+            .into_iter()
+            .find(|it| it.item_uuid == r.item_uuid)
+            .ok_or("transfer source unavailable")?
+            .clone();
+        let occurrences = world
+            .players
+            .values()
+            .map(|p| {
+                persistent_instances(&p.inventory)
+                    .into_iter()
+                    .filter(|it| it.item_uuid == r.item_uuid)
+                    .count()
+                    + p.inventory
+                        .buffer
+                        .iter()
+                        .flatten()
+                        .filter(|it| it.item_uuid == r.item_uuid)
+                        .count()
+            })
+            .sum::<usize>();
+        if occurrences != 1 {
+            return Err("global UUID placement conflict".into());
+        }
+        let moved = inventories[i]
+            .try_take_instance(&r.item_uuid, r.count)
+            .map_err(|e| format!("trade take: {e:?}"))?;
+        taken.push((i, original, moved));
+    }
+    let mut transfers = Vec::new();
+    for (i, original, moved) in taken {
+        let j = 1 - i;
+        let def = world
+            .item_definitions
+            .get(&moved.item_id)
+            .ok_or("trade item definition unavailable")?;
+        let outcome = inventories[j]
+            .try_insert_instance(def, &moved)
+            .map_err(|e| format!("trade insert: {e:?}"))?;
+        // Transfer cancels old-owner obligations; only a real merge retires UUID.
+        crate::item_lifecycle::reconcile_transfer(&mut lifecycle[i], &moved.item_uuid);
+        crate::item_lifecycle::reconcile_transfer(&mut lifecycle[j], &moved.item_uuid);
+        crate::item_lifecycle::reconcile_after_insert(
+            &mut lifecycle[j],
+            &inventories[j].persistent_uuids(),
+            &moved.item_uuid,
+            outcome.retired_uuid.as_deref(),
+            &world.runtime_id,
+            now_ms(),
+        );
+        transfers.push(TradeTransfer {
+            source: req.characters[i].clone(),
+            destination: req.characters[j].clone(),
+            original,
+            moved,
+            retired_uuid: outcome.retired_uuid,
+        });
+    }
+    let mut characters = Vec::new();
+    for (i, p) in [a, b].into_iter().enumerate() {
+        let revision = p
+            .persist_revision
+            .checked_add(1)
+            .ok_or("trade revision exhausted")?;
+        let mut snap = build_snapshot(p, true, &lifecycle[i], &world.runtime_id)?
+            .ok_or("missing trade snapshot")?;
+        snap.persist_revision = revision;
+        snap.inventory = inventories[i].clone();
+        snap.idia = req.idia[i];
+        snap.item_lifecycle = Some(lifecycle[i].snapshot_view(revision, &world.runtime_id));
+        characters.push((
+            TradeCharacter {
+                base_revision: p.persist_revision,
+                before_inventory: p.inventory.clone(),
+                before_idia: p.idia,
+                snapshot: snap,
+            },
+            lifecycle[i].clone(),
+        ));
+    }
+    characters.sort_by(|a, b| a.0.snapshot.player_id.cmp(&b.0.snapshot.player_id));
+    let [(a, la), (b, lb)] = characters.try_into().map_err(|_| "trade pair size")?;
+    let artifact = TradeArtifact {
+        kind: "two_character_trade".into(),
+        format_version: 1,
+        commit_id: req.commit_id.clone(),
+        characters: [a, b],
+        transfers,
+    };
+    artifact.validate()?;
+    Ok(PreparedTrade {
+        request: req.clone(),
+        artifact,
+        lifecycle: [la, lb],
+    })
+}
+
+/// The only success boundary is confirmed spool durability, not a RAM swap.
+/// A failed/uncertain write retains the exact prepared data for the same ID.
+pub async fn commit_trade(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: TradeCommitRequest,
+) -> Result<(), String> {
+    commit_trade_with(spool, shared, request, |artifact| async move {
+        spool.write_trade(&artifact)
+    })
+    .await
+}
+
+pub(crate) async fn commit_trade_with<W, F>(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: TradeCommitRequest,
+    publish: W,
+) -> Result<(), String>
+where
+    W: FnOnce(TradeArtifact) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    retry_normal_publications(spool, shared, Some(&request.characters)).await?;
+    let mut ids = request.characters.clone();
+    ids.sort();
+    if ids[0] == ids[1] {
+        return Err("trade needs distinct characters".into());
+    }
+    let _a = spool.player_gate(&ids[0]).await.lock_owned().await;
+    let _b = spool.player_gate(&ids[1]).await.lock_owned().await;
+    if let Some(receipt) = spool.trade_receipt(&request.commit_id)? {
+        return if receipt.matches_request(&request) {
+            Ok(())
+        } else {
+            Err("trade commit ID conflict".into())
+        };
+    }
+    let retained = {
+        let world = shared.lock().await;
+        if let Some(receipt) = world.trade_receipts.get(&request.commit_id) {
+            return if receipt == &request {
+                Ok(())
+            } else {
+                Err("trade commit ID conflict".into())
+            };
+        }
+        if let Some(prepared) = world.prepared_trades.get(&request.commit_id) {
+            if prepared.request != request {
+                return Err("trade commit ID conflict".into());
+            }
+            Some(prepared.clone())
+        } else {
+            None
+        }
+    };
+    let prepared = match retained {
+        Some(prepared) => prepared,
+        None => {
+            // Filesystem availability checks stay outside the World lock.
+            for id in &ids {
+                spool.ensure_trade_save_allowed(id)?;
+            }
+            let mut world = shared.lock().await;
+            if ids
+                .iter()
+                .any(|id| world.normal_publications.contains_key(id))
+            {
+                return Err("normal publication pending".into());
+            }
+            if world.prepared_trades.contains_key(&request.commit_id)
+                || world.trade_receipts.contains_key(&request.commit_id)
+            {
+                return Err("trade commit ID conflict".into());
+            }
+            let prepared = prepare_trade(&world, &request)?;
+            world
+                .prepared_trades
+                .insert(request.commit_id.clone(), prepared.clone());
+            spool.hold_trade_publication(&request.commit_id);
+            prepared
+        }
+    };
+    publish(prepared.artifact.clone()).await?;
+    let mut world = shared.lock().await;
+    if prepared
+        .artifact
+        .characters
+        .iter()
+        .any(|c| !world.players.contains_key(&c.snapshot.player_id))
+    {
+        return Err("prepared trade player lost".into());
+    }
+    for lifecycle in world.item_lifecycle.values_mut() {
+        for transfer in &prepared.artifact.transfers {
+            crate::item_lifecycle::reconcile_transfer(lifecycle, &transfer.moved.item_uuid);
+        }
+    }
+    // Registry writers are serialized by both gates. Copy only economic fields.
+    for (i, c) in prepared.artifact.characters.iter().enumerate() {
+        let p = world
+            .players
+            .get_mut(&c.snapshot.player_id)
+            .ok_or("prepared trade player lost")?;
+        let unchanged = p.persist_generation == c.snapshot.generation;
+        p.inventory = c.snapshot.inventory.clone();
+        p.idia = c.snapshot.idia;
+        p.mark_dirty(PersistComponent::Inventory);
+        p.mark_dirty(PersistComponent::Idia);
+        p.persist_revision = c.snapshot.persist_revision;
+        if unchanged {
+            let mut saved = c.snapshot.dirty;
+            saved.mark(PersistComponent::Inventory);
+            saved.mark(PersistComponent::Idia);
+            p.dirty.clear_components(saved);
+        }
+        world
+            .item_lifecycle
+            .insert(c.snapshot.player_id.clone(), prepared.lifecycle[i].clone());
+    }
+    world.prepared_trades.remove(&request.commit_id);
+    world
+        .trade_receipts
+        .insert(request.commit_id.clone(), request.clone());
+    spool.release_trade_publication(&request.commit_id);
+    Ok(())
+}
+
 /// Die fünf Komponenten des Player-Dirty-State (Stufe B, docs
 /// Player_Persistenz.md §6/§42). Der Snapshot selbst ist vollständig;
 /// die Komponenten steuern nur, WANN persistiert wird.
@@ -189,12 +852,15 @@ fn build_snapshot(
     force: bool,
     lifecycle: &crate::item_lifecycle::ItemLifecycle,
     runtime_id: &str,
-) -> Option<PersistSnapshot> {
+) -> Result<Option<PersistSnapshot>, String> {
     let dirty = player.dirty;
     if !force && !dirty.any() {
-        return None;
+        return Ok(None);
     }
-    let revision = player.persist_revision.saturating_add(1);
+    let revision = player
+        .persist_revision
+        .checked_add(1)
+        .ok_or("persist revision exhausted")?;
     let mut learned: Vec<String> = player.learned_abilities.iter().cloned().collect();
     learned.sort();
     // `P-18`: Ablaufzeitpunkte in die persistierte Zeiteinheit umrechnen.
@@ -205,7 +871,7 @@ fn build_snapshot(
         .iter()
         .map(|(id, ready_at)| (id.clone(), crate::combat::cooldowns::to_epoch_ms(*ready_at)))
         .collect();
-    Some(PersistSnapshot {
+    Ok(Some(PersistSnapshot {
         player_id: player.id.clone(),
         persist_revision: revision,
         captured_at_ms: now_ms(),
@@ -228,7 +894,7 @@ fn build_snapshot(
         item_lifecycle: Some(lifecycle.snapshot_view(revision, runtime_id)),
         generation: player.persist_generation,
         dirty,
-    })
+    }))
 }
 
 /// Zentraler Player-Persistenzpfad (Stufe A-Skelett, Stufe B-Duck):
@@ -258,42 +924,37 @@ where
 {
     // Phase 1: konsistenten Snapshot unter der Sperre erfassen, danach
     // Sperre sofort freigeben.
-    let snapshot = {
-        let world = shared.lock().await;
-        match world.players.get(player_id) {
+    let publication = {
+        let mut world = shared.lock().await;
+        if !world.economic_mutation_allowed(player_id) {
+            return Err("trade commit publication pending".into());
+        }
+        if let Some(p) = world.normal_publications.get(player_id) {
+            // A force-save must cover the CURRENT state, not acknowledge only
+            // an older reserved snapshot. Its caller resolves groups first.
+            if force || p.len() != 1 {
+                return Err("normal publication pending".into());
+            }
+            p.clone()
+        } else {
+        let snapshot = match world.players.get(player_id) {
             Some(player) => {
                 let empty_lifecycle = crate::item_lifecycle::ItemLifecycle::new();
                 let lifecycle = world
                     .item_lifecycle
                     .get(player_id)
                     .unwrap_or(&empty_lifecycle);
-                match build_snapshot(player, force, lifecycle, &world.runtime_id) {
+                match build_snapshot(player, force, lifecycle, &world.runtime_id)? {
                     Some(snapshot) => snapshot,
                     None => return Ok(()), // nichts dirty (und nicht erzwungen) → kein Write
                 }
             }
             None => return Ok(()), // Spieler offline → nichts zu flushen
+        };
+        reserve_normal(&mut world, vec![snapshot])?
         }
     };
-    // Steuergrößen vor dem Verschieben des Snapshots in den Schreiber kopieren.
-    let snapshot_revision = snapshot.persist_revision;
-    let generation = snapshot.generation;
-    let dirty = snapshot.dirty;
-    let id = snapshot.player_id.clone();
-    // Phase 2: Durable-Write außerhalb der World-Sperre.
-    write(snapshot).await?;
-    // Phase 3: erneut sperren. §39: Revision immer weiterschreiben; §15:
-    // Dirty-Flags nur bei unveränderter Generation zurücksetzen.
-    let mut world = shared.lock().await;
-    if let Some(player) = world.players.get_mut(&id) {
-        if player.persist_revision < snapshot_revision {
-            player.persist_revision = snapshot_revision;
-        }
-        if player.persist_generation == generation {
-            player.dirty.clear_components(dirty);
-        }
-    }
-    Ok(())
+    finish_normal_publication(shared, publication, |snapshots| write(snapshots[0].clone())).await
 }
 
 /// `P-12`/§35: **ein** Persistenzlauf über mehrere Spieler.
@@ -315,50 +976,41 @@ where
     F: std::future::Future<Output = Result<(), String>>,
 {
     // Phase 1: konsistente Snapshots aller dirty Spieler unter EINER Sperre.
-    let (snapshots, controls) = {
-        let world = shared.lock().await;
+    let publication = {
+        let mut world = shared.lock().await;
+        let existing = player_ids
+            .iter()
+            .find_map(|id| world.normal_publications.get(id))
+            .cloned();
+        if let Some(p) = existing {
+            let ids: std::collections::BTreeSet<_> = player_ids.iter().collect();
+            if ids.len() != p.len() || p.iter().any(|s| !ids.contains(&s.player_id)) {
+                return Err("normal publication pending".into());
+            }
+            p
+        } else {
         let mut snapshots = Vec::new();
-        let mut controls: Vec<(String, i64, u64, PersistDirty)> = Vec::new();
         let empty_lifecycle = crate::item_lifecycle::ItemLifecycle::new();
         for id in player_ids {
+            if !world.economic_mutation_allowed(id) {
+                return Err("trade commit publication pending".into());
+            }
             let Some(player) = world.players.get(id) else {
                 continue; // Spieler offline → nichts zu flushen
             };
             let lifecycle = world.item_lifecycle.get(id).unwrap_or(&empty_lifecycle);
-            let Some(snapshot) = build_snapshot(player, false, lifecycle, &world.runtime_id)
+            let Some(snapshot) = build_snapshot(player, false, lifecycle, &world.runtime_id)?
             else {
                 continue; // nicht dirty → kein Snapshot in diesem Lauf
             };
-            controls.push((
-                snapshot.player_id.clone(),
-                snapshot.persist_revision,
-                snapshot.generation,
-                snapshot.dirty,
-            ));
             snapshots.push(snapshot);
         }
-        (snapshots, controls)
-    };
-    if snapshots.is_empty() {
-        return Ok(0); // leere Dirty-Menge → keine Datei
-    }
-    let count = snapshots.len() as u32;
-    // Phase 2: eine gemeinsame Batch-Datei, außerhalb der World-Sperre.
-    // `snapshots` wandert in `write` und wird danach freigegeben.
-    write(snapshots).await?;
-    // Phase 3: Dirty-Rücknahme je Eintrag, an gesicherte Revision und
-    // unveränderte Generation gebunden.
-    let mut world = shared.lock().await;
-    for (id, revision, generation, dirty) in controls {
-        if let Some(player) = world.players.get_mut(&id) {
-            if player.persist_revision < revision {
-                player.persist_revision = revision;
-            }
-            if player.persist_generation == generation {
-                player.dirty.clear_components(dirty);
-            }
+        if snapshots.is_empty() { return Ok(0); }
+        reserve_normal(&mut world, snapshots)?
         }
-    }
+    };
+    let count = publication.len() as u32;
+    finish_normal_publication(shared, publication, write).await?;
     Ok(count)
 }
 
@@ -376,7 +1028,9 @@ pub async fn persist_player(
     player_id: &str,
     force: bool,
 ) -> Result<(), String> {
+    retry_normal_publications(spool, shared, Some(&[player_id.to_string()])).await?;
     let _guard = spool.player_gate(player_id).await.lock_owned().await;
+    spool.ensure_trade_save_allowed(player_id)?;
     let spool = spool.clone();
     persist_dirty_into(shared, player_id, force, move |snapshot| {
         let spool = spool.clone();
@@ -404,9 +1058,28 @@ pub(crate) async fn apply_snapshot_to_db(
         .await
         .map_err(|e| format!("Drain {char_id}: Transaktion beginnen: {e}"))?;
 
-    crate::db::write_position(&mut tx, char_id, snapshot.x, snapshot.y).await?;
+    write_snapshot_fields(&mut tx, snapshot, weapon_skill_id).await?;
+    if let Some(lifecycle) = snapshot.item_lifecycle.as_ref() {
+        crate::db::apply_item_lifecycle(&mut tx, char_id, lifecycle, &snapshot.inventory).await?;
+    }
+    crate::db::write_persist_revision(&mut tx, char_id, snapshot.persist_revision).await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Drain {char_id}: commit: {e}"))?;
+    Ok(())
+}
+
+/// Common full-state writer; lifecycle and revision are deliberately separate
+/// so the pair can establish BOTH inventories before any finalization.
+async fn write_snapshot_fields(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    snapshot: &PersistSnapshot,
+    weapon_skill_id: &str,
+) -> Result<(), String> {
+    let char_id = &snapshot.player_id;
+    crate::db::write_position(tx, char_id, snapshot.x, snapshot.y).await?;
     crate::db::write_progression_fields(
-        &mut tx,
+        tx,
         char_id,
         snapshot.level,
         snapshot.exp,
@@ -414,33 +1087,142 @@ pub(crate) async fn apply_snapshot_to_db(
         snapshot.rested_pool,
     )
     .await?;
-    crate::db::write_idia(&mut tx, char_id, snapshot.idia).await?;
-    crate::db::write_resources(&mut tx, char_id, snapshot.hp, snapshot.mana).await?;
-    crate::db::write_attributes(&mut tx, char_id, &snapshot.attributes).await?;
-    crate::db::write_inventory(&mut tx, char_id, &snapshot.inventory).await?;
+    crate::db::write_idia(tx, char_id, snapshot.idia).await?;
+    crate::db::write_resources(tx, char_id, snapshot.hp, snapshot.mana).await?;
+    crate::db::write_attributes(tx, char_id, &snapshot.attributes).await?;
+    crate::db::write_inventory(tx, char_id, &snapshot.inventory).await?;
     // Item-Lifecycle (docs/inventory_system.md §18, Migration 021): NUR bei
     // neuem Snapshot-Format. Altformat (`None`) lässt Metadaten und Instanzen
     // unberührt. Alles läuft in derselben Transaktion wie Inventar, Idia und
     // `persist_revision` — entweder wird alles committet oder nichts.
-    if let Some(lifecycle) = snapshot.item_lifecycle.as_ref() {
-        crate::db::apply_item_lifecycle(&mut tx, char_id, lifecycle, &snapshot.inventory).await?;
-    }
     let class = crate::class::ClassStatus::from_db_name(&snapshot.char_class);
-    crate::db::write_character_class(&mut tx, char_id, class, snapshot.faction_transition).await?;
-    crate::db::write_weapon_skill(&mut tx, char_id, weapon_skill_id, snapshot.weapon_skill).await?;
-    crate::db::write_character_abilities(&mut tx, char_id, &snapshot.learned_abilities).await?;
+    crate::db::write_character_class(tx, char_id, class, snapshot.faction_transition).await?;
+    crate::db::write_weapon_skill(tx, char_id, weapon_skill_id, snapshot.weapon_skill).await?;
+    crate::db::write_character_abilities(tx, char_id, &snapshot.learned_abilities).await?;
     // `P-18`: Cooldowns gehören zum normalen Snapshot und werden in derselben
     // Transaktion gespeichert. Nur ein **vorhandenes** Feld ersetzt den
     // Bestand; `None` = Altformat ohne Feld und lässt ihn unberührt.
     if let Some(cooldowns) = snapshot.cooldowns.as_ref() {
-        crate::db::write_character_cooldowns(&mut tx, char_id, cooldowns).await?;
+        crate::db::write_character_cooldowns(tx, char_id, cooldowns).await?;
     }
-    crate::db::write_persist_revision(&mut tx, char_id, snapshot.persist_revision).await?;
+    Ok(())
+}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TradeApply {
+    Applied,
+    AlreadyApplied,
+    Waiting,
+    Conflict,
+}
+
+/// Used by the real transaction, not a duplicate test decision model.
+pub(crate) fn trade_revision_action(
+    trade: &TradeArtifact,
+    current: [Option<i64>; 2],
+) -> TradeApply {
+    trade_revision_action_with_proof(trade, current, None)
+}
+
+pub(crate) fn trade_revision_action_with_proof(
+    trade: &TradeArtifact,
+    current: [Option<i64>; 2],
+    committed_payload: Option<&str>,
+) -> TradeApply {
+    let [Some(a), Some(b)] = current else {
+        return TradeApply::Conflict;
+    };
+    let values = [a, b];
+    if let Some(payload) = committed_payload {
+        if trade.commit_payload().as_deref() != Ok(payload) {
+            return TradeApply::Conflict;
+        }
+        return if trade
+            .characters
+            .iter()
+            .zip(values)
+            .all(|(c, r)| r >= c.snapshot.persist_revision)
+        {
+            TradeApply::AlreadyApplied
+        } else {
+            TradeApply::Conflict
+        };
+    }
+    if trade
+        .characters
+        .iter()
+        .zip(values)
+        .any(|(c, r)| r >= c.snapshot.persist_revision)
+    {
+        return TradeApply::Conflict;
+    }
+    if trade
+        .characters
+        .iter()
+        .zip(values)
+        .all(|(c, r)| r == c.base_revision)
+    {
+        TradeApply::Applied
+    } else {
+        TradeApply::Waiting
+    }
+}
+
+pub(crate) async fn apply_trade_to_db(
+    pool: &Pool<MySql>,
+    trade: &TradeArtifact,
+    weapon_skill_id: &str,
+) -> Result<TradeApply, String> {
+    trade.validate()?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("trade begin: {e}"))?;
+    let mut current = [None; 2];
+    for (i, c) in trade.characters.iter().enumerate() {
+        current[i] = crate::db::lock_persist_revision(&mut tx, &c.snapshot.player_id).await?;
+    }
+    let proof = crate::db::load_trade_commit_proof(&mut tx, &trade.commit_id).await?;
+    let action = if proof.is_some() {
+        trade_revision_action_with_proof(trade, current, proof.as_deref())
+    } else {
+        trade_revision_action(trade, current)
+    };
+    if action != TradeApply::Applied {
+        return Ok(action);
+    }
+    if !crate::db::validate_trade_placements(&mut tx, trade).await? {
+        return Ok(TradeApply::Conflict);
+    }
+    for c in &trade.characters {
+        write_snapshot_fields(&mut tx, &c.snapshot, weapon_skill_id).await?;
+    }
+    crate::db::clear_transferred_lifecycle(&mut tx, trade).await?;
+    for c in &trade.characters {
+        crate::db::apply_item_lifecycle(
+            &mut tx,
+            &c.snapshot.player_id,
+            c.snapshot
+                .item_lifecycle
+                .as_ref()
+                .ok_or("trade lifecycle missing")?,
+            &c.snapshot.inventory,
+        )
+        .await?;
+    }
+    for c in &trade.characters {
+        crate::db::write_persist_revision(
+            &mut tx,
+            &c.snapshot.player_id,
+            c.snapshot.persist_revision,
+        )
+        .await?;
+    }
+    crate::db::write_trade_commit_proof(&mut tx, trade).await?;
     tx.commit()
         .await
-        .map_err(|e| format!("Drain {char_id}: commit: {e}"))?;
-    Ok(())
+        .map_err(|e| format!("trade commit: {e}"))?;
+    Ok(TradeApply::Applied)
 }
 
 #[cfg(test)]
@@ -453,6 +1235,395 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::inventory::InventoryState;
+
+    fn trade_runtime(tag: &str) -> (crate::spool::PersistRuntime, std::path::PathBuf) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "pair-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        (
+            crate::spool::PersistRuntime::new(&path, "sword").unwrap(),
+            path,
+        )
+    }
+
+    async fn trade_world() -> (Shared, TradeCommitRequest) {
+        let shared = crate::world::new_shared();
+        let (mut a, _) = test_player("1");
+        let (mut b, _) = test_player("2");
+        a.idia = 100;
+        b.idia = 50;
+        let mut def =
+            crate::item::ItemDefinition::new("ore", "Ore", crate::item::ItemCategory::RawMaterial);
+        def.max_stack = 100;
+        let mut item = crate::item::ItemInstance::new("source", "ore", Default::default());
+        item.count = 10;
+        a.inventory.base_slots[0] = Some(item);
+        let mut world = shared.lock().await;
+        world.item_definitions.insert("ore".into(), def);
+        world.players.insert("1".into(), a);
+        world.players.insert("2".into(), b);
+        world.by_conn.insert(1, "1".into());
+        world.by_conn.insert(2, "2".into());
+        drop(world);
+        (
+            shared,
+            TradeCommitRequest {
+                commit_id: "test_commit".into(),
+                characters: ["1".into(), "2".into()],
+                idia: [90, 60],
+                transfers: vec![TradeTransferRequest {
+                    source: "1".into(),
+                    item_uuid: "source".into(),
+                    count: 10,
+                }],
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn trade_commit_durable_pair_preserves_other_fields_and_retries_once() {
+        let (runtime, path) = trade_runtime("durable");
+        let (shared, req) = trade_world().await;
+        let spool = runtime.spool();
+        let shared_during = &shared;
+        commit_trade_with(spool, &shared, req.clone(), |artifact| async move {
+            let mut w = shared_during.lock().await;
+            assert!(!w.economic_mutation_allowed("1"));
+            assert!(!w.economic_mutation_allowed("2"));
+            let p = w.players.get_mut("1").unwrap();
+            p.x = 321.0;
+            p.hp = 7;
+            p.mark_dirty(PersistComponent::Position);
+            p.mark_dirty(PersistComponent::Resources);
+            drop(w);
+            spool.write_trade(&artifact)
+        })
+        .await
+        .unwrap();
+        {
+            let w = shared.lock().await;
+            assert_eq!((w.players["1"].x, w.players["1"].hp), (321.0, 7));
+            assert_eq!((w.players["1"].idia, w.players["2"].idia), (90, 60));
+            assert_eq!(
+                w.players["2"].inventory.base_slots[0]
+                    .as_ref()
+                    .unwrap()
+                    .item_uuid,
+                "source"
+            );
+            assert!(w.players["1"].dirty.any());
+            assert!(!w.players["2"].dirty.any());
+        }
+        commit_trade(spool, &shared, req.clone()).await.unwrap();
+        assert_eq!(shared.lock().await.players["1"].persist_revision, 1);
+        let mut changed = req;
+        changed.idia = [80, 70];
+        assert!(commit_trade(spool, &shared, changed).await.is_err());
+        assert!(runtime.persist_player(&shared, "1", true).await.is_err());
+        assert!(runtime
+            .persist_dirty_run(&shared, &["1".into(), "2".into()])
+            .await
+            .is_err());
+        assert_eq!(spool.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_failed_publication_keeps_exact_split_and_freezes_mutators() {
+        let (runtime, path) = trade_runtime("failure");
+        let (shared, mut req) = trade_world().await;
+        req.transfers[0].count = 4;
+        assert!(
+            commit_trade_with(runtime.spool(), &shared, req.clone(), |_| async {
+                Err("publication failed".into())
+            })
+            .await
+            .is_err()
+        );
+        let split = {
+            let mut w = shared.lock().await;
+            assert_eq!(w.players["1"].idia, 100);
+            assert_eq!(w.players["1"].persist_revision, 0);
+            assert!(!w.economic_mutation_allowed("1"));
+            assert!(crate::world::ensure_takeover_allowed(&w, "1", 0).is_err());
+            assert!(crate::world::disconnect_conn(&mut w, 1).is_none());
+            assert_eq!(
+                crate::trade::attempt_trade(
+                    &mut w,
+                    &crate::quest::QuestService::new(),
+                    5.0,
+                    "1",
+                    &crate::trade::TradeRequest {
+                        npc_id: "npc_1".into(),
+                        action: crate::trade::TradeAction::Open,
+                        item_id: String::new(),
+                        item_uuid: String::new(),
+                        history_id: String::new(),
+                        count: 0
+                    }
+                ),
+                Err(crate::trade::TradeReject::CommitPending)
+            );
+            w.prepared_trades["test_commit"].artifact.transfers[0]
+                .moved
+                .item_uuid
+                .clone()
+        };
+        assert!(persist_dirty_into(&shared, "1", true, |_| async { Ok(()) })
+            .await
+            .is_err());
+        runtime.retry_trade_publications(&shared).await.unwrap();
+        let w = shared.lock().await;
+        assert_eq!(
+            w.players["1"].inventory.base_slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            6
+        );
+        assert_eq!(
+            w.players["2"].inventory.base_slots[0]
+                .as_ref()
+                .unwrap()
+                .item_uuid,
+            split
+        );
+        assert!(w.prepared_trades.is_empty());
+        drop(w);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_visible_sync_failure_keeps_pair_until_confirmation() {
+        let (runtime, path) = trade_runtime("uncertain");
+        let (shared, req) = trade_world().await;
+        let spool = runtime.spool();
+        assert!(
+            commit_trade_with(spool, &shared, req.clone(), |artifact| async move {
+                spool.write_trade_with_sync(&artifact, |_| Err("injected sync uncertainty".into()))
+            })
+            .await
+            .is_err()
+        );
+        assert_eq!(spool.count_batches().unwrap(), 1);
+        {
+            let w = shared.lock().await;
+            assert_eq!(w.players["1"].idia, 100);
+            assert!(!w.economic_mutation_allowed("2"));
+        }
+        commit_trade(spool, &shared, req).await.unwrap();
+        assert_eq!(spool.count_batches().unwrap(), 1);
+        assert_eq!(shared.lock().await.players["1"].idia, 90);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_revision_matrix_and_global_placement_decision() {
+        let (shared, req) = trade_world().await;
+        let world = shared.lock().await;
+        let trade = prepare_trade(&world, &req).unwrap().artifact;
+        drop(world);
+        for (current, expected) in [
+            ([Some(0), Some(0)], TradeApply::Applied),
+            ([Some(1), Some(1)], TradeApply::Conflict),
+            ([Some(1), Some(0)], TradeApply::Conflict),
+            ([Some(0), Some(1)], TradeApply::Conflict),
+            ([Some(2), Some(2)], TradeApply::Conflict),
+            ([None, Some(0)], TradeApply::Conflict),
+        ] {
+            assert_eq!(trade_revision_action(&trade, current), expected);
+        }
+        let mut predecessors = trade.clone();
+        for c in &mut predecessors.characters {
+            c.base_revision = 4;
+            c.snapshot.persist_revision = 5;
+        }
+        for current in [[Some(4), Some(3)], [Some(3), Some(4)]] {
+            assert_eq!(
+                trade_revision_action(&predecessors, current),
+                TradeApply::Waiting
+            );
+        }
+        assert_eq!(
+            trade_revision_action_with_proof(
+                &trade,
+                [Some(2), Some(2)],
+                Some(&trade.commit_payload().unwrap())
+            ),
+            TradeApply::AlreadyApplied
+        );
+        assert_eq!(
+            trade_revision_action_with_proof(
+                &trade,
+                [Some(2), Some(0)],
+                Some(&trade.commit_payload().unwrap())
+            ),
+            TradeApply::Conflict
+        );
+        assert!(crate::db::trade_placement_refs_valid(
+            Some("1"),
+            &[("1".into(), false)]
+        ));
+        assert!(!crate::db::trade_placement_refs_valid(
+            Some("1"),
+            &[("2".into(), false)]
+        ));
+        assert!(!crate::db::trade_placement_refs_valid(
+            Some("1"),
+            &[("1".into(), true)]
+        ));
+        assert!(!crate::db::trade_placement_refs_valid(
+            Some("1"),
+            &[("1".into(), false), ("1".into(), false)]
+        ));
+        assert!(crate::db::trade_placement_refs_valid(None, &[])); // new unsaved split UUID
+        assert!(!crate::db::trade_placement_refs_valid(
+            None,
+            &[("3".into(), false)]
+        ));
+    }
+
+    #[tokio::test]
+    async fn trade_commit_full_merge_cancels_old_owner_only_retiring_incoming_uuid() {
+        let (shared, req) = trade_world().await;
+        let mut w = shared.lock().await;
+        let mut other = w.players["1"].inventory.base_slots[0].clone().unwrap();
+        other.item_uuid = "destination".into();
+        w.players.get_mut("2").unwrap().inventory.base_slots[0] = Some(other);
+        let rt = w.runtime_id.clone();
+        crate::item_lifecycle::reconcile_after_take(
+            w.item_lifecycle.entry("1".into()).or_default(),
+            &Default::default(),
+            "source",
+            crate::item_lifecycle::DetachReason::Sold,
+            &rt,
+            1,
+        );
+        let prepared = prepare_trade(&w, &req).unwrap();
+        assert_eq!(
+            prepared.artifact.transfers[0].retired_uuid.as_deref(),
+            Some("source")
+        );
+        assert!(!prepared.lifecycle[0].contains("source"));
+        assert!(prepared.lifecycle[1].contains("source"));
+        assert_eq!(
+            prepared.artifact.characters[1]
+                .snapshot
+                .item_lifecycle
+                .as_ref()
+                .unwrap()
+                .pending[0]
+                .reason,
+            crate::item_lifecycle::DetachReason::Merged
+        );
+        prepared.artifact.validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_rejects_partial_failure_without_prepared_state() {
+        let (runtime, path) = trade_runtime("validation");
+        let (shared, req) = trade_world().await;
+        shared.lock().await.players.get_mut("2").unwrap().inventory = InventoryState::new(0);
+        assert!(commit_trade(runtime.spool(), &shared, req).await.is_err());
+        let w = shared.lock().await;
+        assert!(w.prepared_trades.is_empty());
+        assert_eq!(w.players["1"].inventory.count_of("ore"), 10);
+        assert_eq!(w.players["1"].idia, 100);
+        assert_eq!(runtime.spool().count_batches().unwrap(), 0);
+        drop(w);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_commit_gates_periodic_and_force_saves_without_sleep() {
+        use futures_util::FutureExt;
+        let (runtime, path) = trade_runtime("gates");
+        let (shared, req) = trade_world().await;
+        let gate = runtime.player_gate("1").await.lock_owned().await;
+        let periodic = runtime.persist_dirty_run(&shared, &req.characters);
+        let force = runtime.persist_player(&shared, "1", true);
+        let commit = runtime.commit_trade(&shared, req.clone());
+        tokio::pin!(periodic, force, commit);
+        assert!(periodic.as_mut().now_or_never().is_none());
+        assert!(force.as_mut().now_or_never().is_none());
+        assert!(commit.as_mut().now_or_never().is_none());
+        drop(gate);
+        periodic.await.unwrap();
+        force.await.unwrap();
+        commit.await.unwrap();
+        let w = shared.lock().await;
+        // Force reserved revision 1 before the trade; no duplicate revision.
+        assert_eq!(w.players["1"].persist_revision, 2);
+        assert_eq!(w.players["2"].persist_revision, 1);
+        drop(w);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancellation_fix_failed_pair_retries_other_pair_and_saves_unrelated_c() {
+        let (runtime, path) = trade_runtime("isolated-retries");
+        let (shared, req) = trade_world().await;
+        assert!(
+            commit_trade_with(runtime.spool(), &shared, req.clone(), |_| async {
+                Err("initial publication unavailable".into())
+            })
+            .await
+            .is_err()
+        );
+        let artifact = shared.lock().await.prepared_trades[&req.commit_id]
+            .artifact
+            .clone();
+        // A file-specific failure, not a broken common spool directory. It
+        // remains bound to A/B and must not stop publication for C or D/E.
+        let name = format!(
+            "t-{}-{}-r{}-{}-r{}.json",
+            artifact.commit_id,
+            artifact.characters[0].snapshot.player_id,
+            artifact.characters[0].snapshot.persist_revision,
+            artifact.characters[1].snapshot.player_id,
+            artifact.characters[1].snapshot.persist_revision
+        );
+        std::fs::write(path.join("spool").join(name), b"conflicting content").unwrap();
+        for id in ["3", "4", "5"] {
+            let (mut p, _) = test_player(id);
+            if id == "3" {
+                p.mark_dirty(PersistComponent::Position);
+            }
+            shared.lock().await.players.insert(id.into(), p);
+        }
+        let healthy = TradeCommitRequest {
+            commit_id: "healthy_pair".into(),
+            characters: ["4".into(), "5".into()],
+            idia: [76, 78],
+            transfers: Vec::new(),
+        };
+        assert!(
+            commit_trade_with(runtime.spool(), &shared, healthy, |_| async {
+                Err("injected first attempt".into())
+            })
+            .await
+            .is_err()
+        );
+        assert!(runtime
+            .persist_dirty_run(&shared, &["1".into(), "2".into(), "3".into()])
+            .await
+            .is_err());
+        runtime.persist_player(&shared, "3", true).await.unwrap();
+        let w = shared.lock().await;
+        assert_eq!(w.players["3"].persist_revision, 2);
+        assert!(!w.players["3"].dirty.any());
+        assert!(w.prepared_trades.contains_key(&req.commit_id));
+        assert!(!w.prepared_trades.contains_key("healthy_pair"));
+        assert_eq!((w.players["4"].idia, w.players["5"].idia), (76, 78));
+        assert!(!w.economic_mutation_allowed("1"));
+        assert!(!w.economic_mutation_allowed("2"));
+        assert_eq!(runtime.status(), crate::spool::PersistStatus::Degraded);
+        drop(w);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     /// Test-Spieler mit definierten persistenten Werten.
     fn test_player(id: &str) -> (Player, mpsc::UnboundedReceiver<String>) {

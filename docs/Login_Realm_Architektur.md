@@ -1,6 +1,35 @@
 # Login-, Account- und Realm-Architektur
 
+## Ergänzung: beidseitige Verfügbarkeit bei ausstehendem Trade-Commit
+
+Der Zwei-Charakter-Persistenzbaustein (`Player_Persistenz.md`, „Trade-Ausnahme“)
+erweitert die bestehenden Pending-/Quarantäneprüfungen auf **beide** Charaktere.
+Ein offener oder vollständig quarantänisierter Trade sperrt den Einstieg beider
+Seiten, auch wenn eine Einzelrevision bereits hoch genug erscheint. Zuordnung
+bleibt über den kanonischen Trade-Dateinamen bei beschädigtem Inhalt erhalten.
+Unzuordenbare Trade-Dateien werden fail-closed behandelt, nicht geraten.
+
+Während noch unbestätigter Veröffentlichung verhindert die RAM-Vorprüfung auch
+Takeover/Adoption des vorbereiteten Zustands. Relevante Registry-Übergänge und
+finale Saves verwenden weiterhin die Charakter-Gates; die Reihenfolge für ein
+Paar ist stabil, Gates vor World. Bestätigungs-Retries laufen vor einem einzelnen
+Logout-Gate, damit sie sich nicht selbst verriegeln. Ein zurückgestellter Force-
+Save ist kein erfolgreicher Disconnect-Save: neuere RAM-Daten bleiben erhalten.
+Erst der gemeinsame Trade-Drain und die dauerhafte Quittung lösen die
+Persistenzbarriere. Es entsteht kein neues C2S-Protokoll und kein neuer Dienst.
+
 ## 1. Ziel
+
+**Save-Cancellation und Wiederaufnahme:** Ein normaler Save behält seine
+gemeinsame Snapshot-/Revisionsreservierung bis zum RAM-Handoff, auch wenn sein
+Future abgebrochen oder die Datei bereits gedrained wurde. Disconnect löst solche
+Gruppen vor dem einzelnen Logout-Gate auf; ein noch ausstehender Force-Save darf
+keinen neueren RAM-Zustand verwerfen. Unbeteiligte Charaktere werden trotz
+Publikationsfehlern eines anderen Paars weiter gesichert. In einem normalen Batch
+blockiert ein Trade-abhängiger Eintrag keine verarbeitbaren Nachbarn; nach deren
+DB-Bestätigung ist ihre Pending-Revision kein veralteter Loginstand mehr.
+Trade-Wiederholung basiert auf Migration 023 (gemeinsamer DB-Inhaltsnachweis),
+nicht auf bloßer Revisionsgleichheit oder früheren unbewiesenen Datei-Quittungen.
 
 Dieses Dokument beschreibt die grundlegende Architektur für:
 

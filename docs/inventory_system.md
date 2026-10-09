@@ -1,5 +1,35 @@
 # Andora – Inventory-System V1
 
+## Ergänzung zu §18: Übertragung im Zwei-Charakter-Spool-Commit
+
+Eigentumsübertragung ist **keine Vernichtung und kein `Sold`**. Der interne
+Persistenzbaustein in `persist.rs` verwendet instanzgenaue Entnahme/Einsetzung:
+Volltransfer erhält UUID/Eigenschaften, Split erhält Quellrest und neue Teil-UUID,
+Vollverschmelzung meldet `retired_uuid` und erzeugt ausschließlich `Merged`.
+Artefakt und RAM-Vorbereitung prüfen Instanzeigenschaften, beidseitige
+Mengen-/Idia-Erhaltung und eindeutige Platzierungen; Fachfreigaben sind separat.
+
+`item_lifecycle::reconcile_transfer` hebt alte RAM-Pflichten auf, auch bei früheren
+Besitzern. Der gemeinsame DB-Drain prüft UUID-Platzierungen global über
+`character_inventory`, `bag_slots`, `character_equipment`, `inventory_buffer`.
+Existierende Referenzen müssen eindeutig zur bezeugten Quelle gehören; ein neuer
+ungesicherter RAM-/Split-Gegenstand darf noch ohne DB-Platzierung sein. Fremd- oder
+Pufferplatzierung ist Konflikt. Die vorhandenen UUID-Upserts sind kein
+Ownership-Nachweis; die Schema-Indizes erzwingen keine globale Platzierungseindeutigkeit.
+
+Beide Inventare werden in derselben Transaktion geschrieben, **danach** alte
+DB-Pflichten der übertragenen UUIDs gezielt global bereinigt und beide
+Lifecycle-Sichten angewendet. Weiterlebende UUIDs werden nicht finalisiert;
+wirklich verschmolzene UUIDs werden revisionsgebunden geprüft. Erst danach beide
+Revisionen und COMMIT. Ältere Quellsnapshots dürfen diesen Commit nicht überholen
+oder dessen UUID-Upserts erneut ausführen. Offene/quarantänisierte Trades
+verhindern vorzeitige Startup-Finalisierung (Vertrag: `Player_Persistenz.md`,
+„Trade-Ausnahme“). Keine NPC-SellHistory im Artefakt. Migration 023 speichert den
+vollständigen Trade-Nachweis in derselben Transaktion; Revisionsgleichheit allein
+darf weder Skip noch Quittung auslösen. Normale offene Save-Reservierungen müssen
+vor einem neuen Transfer übernommen sein, damit alte globale UUID-Upserts niemals
+dieselbe Trade-Zielrevision mit Vorhandelsinhalt belegen.
+
 ## Status
 
 **Implementiert (Konzept – verbindlicher Stand).**

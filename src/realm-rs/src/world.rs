@@ -195,6 +195,14 @@ pub struct TickStat {
 
 pub struct World {
     pub players: HashMap<String, Player>,
+    /// Prepared economic changes, retained verbatim across an uncertain spool
+    /// publication. Other player fields may continue changing. No C2S API.
+    pub prepared_trades: HashMap<String, crate::persist::PreparedTrade>,
+    /// Runtime receipts prevent a caller retry from allocating a second commit.
+    pub trade_receipts: HashMap<String, crate::persist::TradeCommitRequest>,
+    /// One immutable normal publication shared by all of its participants.
+    /// It survives cancellation, failed sync and drain-before-RAM-handoff.
+    pub normal_publications: HashMap<String, crate::persist::NormalPublication>,
     /// Eigene Runtime-Kennung dieses Realm-Prozesslaufs
     /// (`item_lifecycle::new_runtime_id`): stempelt Lifecycle-Metadaten zur
     /// Zuordnung und wird im Snapshot mitgeführt. Takeover und RAM-Übernahme
@@ -261,6 +269,9 @@ impl World {
     pub fn new() -> Self {
         Self {
             players: HashMap::new(),
+            prepared_trades: HashMap::new(),
+            trade_receipts: HashMap::new(),
+            normal_publications: HashMap::new(),
             runtime_id: crate::item_lifecycle::new_runtime_id(),
             npcs: HashMap::new(),
             item_definitions: HashMap::new(),
@@ -277,6 +288,15 @@ impl World {
             tick: TickStat::default(),
             started: Instant::now(),
         }
+    }
+
+    pub fn economic_mutation_allowed(&self, player_id: &str) -> bool {
+        !self.prepared_trades.values().any(|t| {
+            t.artifact
+                .characters
+                .iter()
+                .any(|c| c.snapshot.player_id == player_id)
+        })
     }
 }
 
@@ -355,6 +375,9 @@ pub fn ensure_takeover_allowed(
     player_id: &str,
     account_id: u32,
 ) -> Result<(), String> {
+    if !world.economic_mutation_allowed(player_id) {
+        return Err("trade commit publication pending".into());
+    }
     // Zwei fail-closed Vorprüfungen. Beide müssen VOR dem ersten DB-Zugriff
     // liegen, weil die Offline-Abrechnung unmittelbar vor `commit_login`
     // läuft (docs/Login_Realm_Architektur.md, „Offline-Abrechnung unmittelbar
@@ -684,6 +707,12 @@ pub fn world_regen_tick(world: &mut World, tick_ms: u64) {
 /// (Forward-Task in net.rs beendet sich dann selbst).
 pub fn disconnect_conn(world: &mut World, conn_id: u64) -> Option<String> {
     let player_id = world.by_conn.get(&conn_id)?.clone();
+    if !world.economic_mutation_allowed(&player_id) {
+        return None;
+    }
+    if world.normal_publications.contains_key(&player_id) {
+        return None;
+    }
     world.by_conn.remove(&conn_id);
     let me = world.players.remove(&player_id)?;
     // Session-Ende: Die Sell-/Buyback-History wird verworfen

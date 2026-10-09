@@ -447,6 +447,8 @@ pub enum PickupResult {
     NotClaimed,
     /// Außerhalb der Pickup-Reichweite.
     OutOfRange,
+    /// A prepared trade owns the economic state until publication confirmation.
+    CommitPending,
 }
 
 /// Server-autoritativer Pickup. Item: zuerst Stacks, dann freie Slots
@@ -461,6 +463,9 @@ pub fn attempt_pickup(
     now: Instant,
     cfg: &LootCfg,
 ) -> PickupResult {
+    if !world.economic_mutation_allowed(actor) {
+        return PickupResult::CommitPending;
+    }
     let Some(l) = world.loot_drops.get(loot_id) else {
         return PickupResult::Missing;
     };
@@ -511,6 +516,12 @@ pub fn attempt_pickup(
         }
         LootKind::Gold => {
             let recipients = gold_recipients(world, groups, &claimed_by, actor);
+            if recipients
+                .iter()
+                .any(|id| !world.economic_mutation_allowed(id))
+            {
+                return PickupResult::CommitPending;
+            }
             let amounts = group::split_exp_equally(count.max(0), recipients.len());
             for (pid, amt) in recipients.iter().zip(&amounts) {
                 if let Some(p) = world.players.get_mut(pid) {
