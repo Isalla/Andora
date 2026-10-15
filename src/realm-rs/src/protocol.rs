@@ -36,6 +36,13 @@ pub mod c2s {
     /// {action, dialog_id?, target_id?, items?, idia?, version?} mit
     /// action = request/accept/decline/offer/confirm/cancel.
     pub const PLAYER_TRADE: i64 = 21;
+    /// Inventaraktionen des Teststands (docs/inventory_system.md §19):
+    /// {action, item_uuid?, target_area?, target_slot?, target_bag?,
+    /// count?, slot?} mit action = move/equip/unequip/use. Der Client sendet
+    /// ausschließlich Absichten (Instanz-UUID, Zielslot, ggf. Menge); alle
+    /// Regeln prüft der Server. Antwort: S2C 25 INVENTORY_RESULT, Erfolg
+    /// pusht zusätzlich S2C 23 INVENTORY.
+    pub const INVENTORY: i64 = 22;
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -43,7 +50,7 @@ pub mod c2s {
 ///
 #[allow(dead_code)]
 pub mod s2c {
-    pub const WELCOME: i64 = 1; // {you:{id,name,x,y}}
+    pub const WELCOME: i64 = 1; // {you:{id,name,x,y,mana,max_mana,level}}
     pub const SPAWN: i64 = 2; // {id, kind, x, y, face}; kind player|npc; npc: extra {status, aggro, claimed, name}
     pub const DESPAWN: i64 = 3; // {id}
     pub const STATE: i64 = 4; // {id, x, y, face}; Spieler + {hp, max_hp}; NPC zusätzlich {kind, status, aggro, claimed}
@@ -71,6 +78,26 @@ pub mod s2c {
     /// event?, reason?, dialog_id?, dialog?, commit_id?, idia?}. `seq` ist
     /// ausschließlich Korrelation und wird zurückgespiegelt.
     pub const PLAYER_TRADE: i64 = 22;
+    /// Eigener Inventarzustand (Eigentümer-Sicht, kein C2S-Gegenstück):
+    /// {ok, idia, base_slots, slots:[{slot, item}], bags:[{bag_id, name,
+    /// slots:[...]}], equipment:{Slot: {...}}, loot_id?, reason?}.
+    /// Server-Push beim Einstieg (nach WELCOME) und nach bestätigten
+    /// Mutationen (Pickup, NPC-Kauf/-Verkauf/-Buyback, Spielerhandel-Commit).
+    /// Pickup antwortet immer (Erfolg oder stabile Ablehnung) und trägt den
+    /// aktuellen Stand. Ausschließlich an den Eigentümer, RAM-only, keine DB.
+    pub const INVENTORY: i64 = 23;
+    /// Eigene Spielerwerte (Mana, max. Mana, Level) aus dem autoritativen
+    /// RAM-Stand. Ausschließlich an den Eigentümer: Initialwerte stehen in
+    /// WELCOME (`you`), danach Push nur bei tatsächlicher Ganzzahl-Änderung
+    /// (Fähigkeitsverbrauch, Regeneration, Stufenaufstieg). HP fließen hier
+    /// bewusst nicht (STATE-Broadcast), Fremdwerte werden nie offengelegt.
+    pub const VITALS: i64 = 24; // {mana, max_mana, level} (nur Eigentümer)
+    /// Ergebnis einer C2S-22-Inventarabsicht (docs/inventory_system.md §19):
+    /// {ok, action?, reason?, item_uuid?, slot?, count?}. Erfolg (ok:true)
+    /// wird danach durch S2C 23 INVENTORY (seq 0, Eigentümer-Sicht)
+    /// bestätigt; Ablehnung (ok:false + stabiler reason) verändert nichts.
+    /// `seq` ist ausschließlich Korrelation und wird zurückgespiegelt.
+    pub const INVENTORY_RESULT: i64 = 25;
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -136,8 +163,12 @@ mod tests {
         assert_eq!(c2s::GROUP_TRANSFER, 19);
         assert_eq!(c2s::SPEND_ATTRIBUTE, 20);
         assert_eq!(c2s::PLAYER_TRADE, 21);
+        assert_eq!(c2s::INVENTORY, 22);
         assert_eq!(s2c::ATTRIBUTE_RESULT, 21);
         assert_eq!(s2c::PLAYER_TRADE, 22);
+        assert_eq!(s2c::INVENTORY, 23);
+        assert_eq!(s2c::VITALS, 24);
+        assert_eq!(s2c::INVENTORY_RESULT, 25);
     }
 
     #[test]

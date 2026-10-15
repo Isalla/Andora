@@ -191,6 +191,95 @@ fn apply_login_settlement(
     (pool, pool != credited)
 }
 
+/// Eine Item-Instanz als Eigentümer-JSON: vollständige Instanzdaten
+/// (UUID, Definition, Menge, Haltbarkeit, Bindung, Modifier) plus
+/// aufgelöster Anzeigename aus den World-Definitionen (Fallback: item_id).
+fn instance_json(world: &World, inst: &crate::item::ItemInstance) -> serde_json::Value {
+    let mut v = serde_json::to_value(inst).unwrap_or(serde_json::Value::Null);
+    let name = world
+        .item_definitions
+        .get(&inst.item_id)
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| inst.item_id.clone());
+    if let serde_json::Value::Object(ref mut m) = v {
+        m.insert("name".to_string(), serde_json::Value::String(name));
+    }
+    v
+}
+
+/// INVENTORY-Zustandspayload (S2C 23, Eigentümer-Sicht): vollständiger eigener
+/// Inventarzustand (Basis-Slots mit Index, Rucksäcke mit Inhalt,
+/// Equipment mit kanonischem Slot-Schlüssel) plus Idia-Stand.
+/// Ausschließlich RAM-Stand, keine DB. Der Sicherheits-Puffer ist kein
+/// Bestandteil (flüchtiger Runtime-State, docs/inventory_system.md §11).
+/// Fehlt der Spieler (Disconnect-Race), kommt ein leerer Stand mit idia 0.
+fn inventory_state_payload(world: &World, pid: &str) -> serde_json::Value {
+    let Some(p) = world.players.get(pid) else {
+        return serde_json::json!({
+            "ok": true, "idia": 0, "base_slots": 0,
+            "slots": [], "bags": [], "equipment": {},
+        });
+    };
+    let slots: Vec<serde_json::Value> = p
+        .inventory
+        .base_slots
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            s.as_ref().map(
+                |inst| serde_json::json!({"slot": i as i64, "item": instance_json(world, inst)}),
+            )
+        })
+        .collect();
+    let base_slots = p.inventory.base_slots.len() as i64;
+    let bags: Vec<serde_json::Value> = p
+        .inventory
+        .bags
+        .iter()
+        .map(|b| {
+            let bs: Vec<serde_json::Value> = b
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    s.as_ref().map(|inst| {
+                        serde_json::json!({"slot": i as i64, "item": instance_json(world, inst)})
+                    })
+                })
+                .collect();
+            serde_json::json!({"bag_id": b.bag_id, "name": b.name, "slot_count": b.slots.len() as i64, "slots": bs})
+        })
+        .collect();
+    let mut equipment = serde_json::Map::new();
+    for (slot, inst) in &p.inventory.equipped {
+        equipment.insert(slot.as_db().to_string(), instance_json(world, inst));
+    }
+    serde_json::json!({
+        "ok": true,
+        "idia": p.idia,
+        "base_slots": base_slots,
+        "slots": slots,
+        "bags": bags,
+        "equipment": equipment,
+    })
+}
+
+/// WELCOME-`you`-Anteil aus dem autoritativen RAM-Player: Kennung, Name,
+/// Position plus eigene Startwerte (Mana, max. Mana, Level). Feldnamen wie
+/// im Player; nur für den Eigentümer bestimmt (WELCOME geht an dessen
+/// Verbindung).
+fn welcome_you(p: &crate::world::Player) -> serde_json::Value {
+    serde_json::json!({
+        "id": p.id,
+        "name": p.name,
+        "x": p.x,
+        "y": p.y,
+        "mana": p.mana,
+        "max_mana": p.max_mana,
+        "level": p.level,
+    })
+}
+
 /// HELLO: Einstieg mit Handoff-Token (Zielkette), Charakter laden,
 /// Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
 ///
@@ -574,20 +663,29 @@ pub async fn handle_hello(
 
     // WELCOME aus dem autoritativen RAM-Zustand (nicht aus dem DB-Kandidaten):
     // beim Takeover ist der RAM-Stand maßgeblich.
-    let (pid, pname, px, py) = {
+    let you = {
         let world = ctx.shared.lock().await;
         let p = world.players.get(&c.id).ok_or("gone".to_string())?;
-        (p.id.clone(), p.name.clone(), p.x, p.y)
+        welcome_you(p)
     };
     tx.send(
         Frame::new(
             seq,
             s2c::WELCOME,
-            serde_json::json!({"you": {"id": pid, "name": pname, "x": px, "y": py}}),
+            serde_json::json!({"you": you}),
         )
         .encode(),
     )
     .map_err(|_| "send failed".to_string())?;
+
+    // INVENTORY-Erststand (S2C 23, Eigentümer-Sicht): vollständiger
+    // Inventarzustand + Idia aus dem autoritativen RAM, direkt nach WELCOME.
+    // Push (seq 0), kein zweiter WELCOME-Antwortframe.
+    {
+        let world = ctx.shared.lock().await;
+        let payload = inventory_state_payload(&world, &c.id);
+        let _ = tx.send(Frame::new(0, s2c::INVENTORY, payload).encode());
+    }
 
     // Gebiets-Kollegen: Spieler spawnen (SPAWN + STATE) und umgekehrt.
     {
@@ -665,6 +763,14 @@ pub async fn handle_move(
         me.y = y;
         me.mark_dirty(crate::persist::PersistComponent::Position);
         me.last_activity = Instant::now();
+        me.send(&Frame::new(
+            0,
+            s2c::STATE,
+            serde_json::json!({
+                "id": me.id, "x": me.x, "y": me.y, "face": me.face,
+                "hp": me.hp, "max_hp": me.max_hp,
+            }),
+        ));
     }
 
     // Cast-Unterbrechung durch Bewegung (Ability-System.md §3;
@@ -1235,7 +1341,17 @@ pub async fn handle_group_transfer(ctx: &Ctx, conn_id: u64, data: &serde_json::V
 
 /// PICKUP {loot_id} (Loot System V1): Boden-Loot-Drop aufnehmen.
 /// Lock-Reihenfolge wie im Tick-Loop: erst World (shared), dann Groups.
-pub async fn handle_pickup(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
+/// PICKUP {loot_id} (Loot System V1): Aufnahmeabsicht serverseitig prüfen
+/// und IMMER beantworten — Erfolg oder stabile Ablehnung, jeweils mit dem
+/// aktuellen Eigentümer-Inventarstand (S2C INVENTORY). Keine stille Aufnahme:
+/// Der Client zeigt ausschließlich bestätigte Serverzustände.
+pub async fn handle_pickup(
+    ctx: &Ctx,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    data: &serde_json::Value,
+) {
     let loot_id = get_str(data, "loot_id");
     if loot_id.is_empty() {
         return;
@@ -1245,7 +1361,7 @@ pub async fn handle_pickup(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
         return;
     };
     let groups = ctx.groups.lock().await;
-    let _ = crate::loot::attempt_pickup(
+    let result = crate::loot::attempt_pickup(
         &mut world,
         &pid,
         &groups,
@@ -1253,6 +1369,23 @@ pub async fn handle_pickup(ctx: &Ctx, conn_id: u64, data: &serde_json::Value) {
         Instant::now(),
         &ctx.cfg.loot,
     );
+    if !world.players.contains_key(&pid) {
+        return;
+    }
+    let mut v = inventory_state_payload(&world, &pid);
+    v["loot_id"] = serde_json::Value::String(loot_id);
+    let (ok, reason): (bool, Option<&str>) = match result {
+        crate::loot::PickupResult::PickedUp => (true, None),
+        crate::loot::PickupResult::Missing => (false, Some("unknown_loot")),
+        crate::loot::PickupResult::NotClaimed => (false, Some("not_claimed")),
+        crate::loot::PickupResult::OutOfRange => (false, Some("out_of_range")),
+        crate::loot::PickupResult::CommitPending => (false, Some("trade_commit_pending")),
+    };
+    v["ok"] = serde_json::Value::Bool(ok);
+    if let Some(r) = reason {
+        v["reason"] = serde_json::Value::String(r.to_string());
+    }
+    let _ = tx.send(Frame::new(seq, s2c::INVENTORY, v).encode());
 }
 
 /// SPEND_ATTRIBUTE {attribute} (Serverautorität V1): einen freien
@@ -1438,6 +1571,13 @@ pub async fn handle_npc_talk(
                 )
                 .encode(),
             );
+            // Mutierende Aktionen (buy/sell/buyback) pushen den neuen
+            // Eigentümer-Stand (S2C INVENTORY, seq 0 als Push);
+            // open verändert nichts und braucht keinen Push.
+            if out.action != crate::trade::TradeAction::Open {
+                let payload = inventory_state_payload(&world, &pid);
+                let _ = tx.send(Frame::new(0, s2c::INVENTORY, payload).encode());
+            }
         }
         Err(reject) => {
             crate::security::log_reject(
@@ -1451,6 +1591,80 @@ pub async fn handle_npc_talk(
                 0,
             );
             send_trade_reject(tx, seq, Some(req.action.as_str()), reject);
+        }
+    }
+}
+
+/// INVENTORY {action, item_uuid?, target_area?, target_slot?, target_bag?,
+/// count?, slot?} (Teststand-Inventar, docs/inventory_system.md §19):
+/// `action` ist `move`, `equip`, `unequip` oder `use`. Der Client sendet
+/// ausschließlich Absichten; Eigentum (aktuelle Ownership), Quell-/Zielslot,
+/// Kapazität, Item-/Ausrüstungsregeln und Handelssperren prüft
+/// `inventory_actions::attempt_inventory_action` unter der World-Sperre.
+/// `seq` ist Korrelation und wird zurückgespiegelt; wiederholte gültige
+/// Absichten sind weitere Operationen (kein Dedup).
+///
+/// Ablauf: Ownership unter der World-Sperre auflösen (verloren → stiller
+/// Rückzug ohne Antwort und ohne Mutation). Erfolg antwortet S2C 25
+/// INVENTORY_RESULT (`ok:true`) und pusht danach den Eigentümer-Stand per
+/// S2C 23 INVENTORY (seq 0); Ablehnung antwortet nur S2C 25 (`ok:false` +
+/// stabiler `reason`, keine Mutation, kein Push nötig — der bestätigte
+/// Stand gilt weiter).
+pub async fn handle_inventory(
+    ctx: &Ctx,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    data: &serde_json::Value,
+) {
+    use crate::inventory_actions::{
+        attempt_inventory_action, parse_request, reject_payload, success_payload,
+    };
+    let req = match parse_request(data) {
+        Ok(req) => req,
+        Err(reject) => {
+            let action = crate::inventory_actions::InventoryAction::parse(&get_str(data, "action"));
+            let _ = tx.send(
+                Frame::new(seq, s2c::INVENTORY_RESULT, reject_payload(action, reject)).encode(),
+            );
+            return;
+        }
+    };
+    let action = req.action;
+    let mut world = ctx.shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    if !world.players.contains_key(&pid) {
+        return;
+    }
+    match attempt_inventory_action(&mut world, &pid, &req) {
+        Ok(out) => {
+            let _ = tx.send(Frame::new(seq, s2c::INVENTORY_RESULT, success_payload(&out)).encode());
+            // Bestätigter Folgestand (Eigentümer-Sicht, seq 0 als Push);
+            // Ablehnungen brauchen keinen Push (nichts geändert).
+            let payload = inventory_state_payload(&world, &pid);
+            let _ = tx.send(Frame::new(0, s2c::INVENTORY, payload).encode());
+        }
+        Err(reject) => {
+            crate::security::log_reject(
+                world.players.get(&pid),
+                conn_id,
+                &crate::security::RejectInfo {
+                    reason: reject.reason().into(),
+                    msg_type: crate::protocol::c2s::INVENTORY,
+                    detail: format!("action={}", action.as_str()),
+                },
+                0,
+            );
+            let _ = tx.send(
+                Frame::new(
+                    seq,
+                    s2c::INVENTORY_RESULT,
+                    reject_payload(Some(action), reject),
+                )
+                .encode(),
+            );
         }
     }
 }
@@ -1624,9 +1838,17 @@ pub async fn handle_player_trade(
                                     });
                                     // Zustellung über die aktuell zuständige
                                     // Verbindung des Charakters (Takeover-
-                                    // sicher, analog zum Partner); `seq`
+                                    // sicher, analog zu Partner-Pushes); `seq`
                                     // bleibt Korrelation der Anfrage.
                                     send_to_current(&world, tx, &party, &pid, seq, payload);
+                                    // INVENTORY-Folgestand je Partei
+                                    // (Eigentümer-Sicht, seq 0 als Push):
+                                    // erst nach bestätigtem Commit, nie bei
+                                    // Pending — Pending ist kein Erfolg.
+                                    let inv = inventory_state_payload(&world, &party);
+                                    if let Some(p) = world.players.get(&party) {
+                                        p.send(&Frame::new(0, s2c::INVENTORY, inv));
+                                    }
                                 }
                             }
                             None => {
@@ -2820,6 +3042,70 @@ mod tests {
         let world = ctx.shared.lock().await;
         assert!(world.players.is_empty(), "kein Player im World-State");
         assert!(world.by_conn.is_empty(), "kein Realm-Commit");
+    }
+
+    /// WELCOME-Initialzustand: `welcome_you` liefert Kennung, Name, Position
+    /// plus Startwerte (Mana, max. Mana, Level) aus dem RAM-Player — dieselben
+    /// Feldnamen wie im Player, keine DB.
+    #[test]
+    fn welcome_you_carries_initial_vitals() {
+        let (ptx, _prx) = mpsc::unbounded_channel();
+        let p = crate::world::Player {
+            id: "1".into(),
+            name: "hero".into(),
+            x: 2.0,
+            y: 3.0,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 90,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 7,
+            session_id: "sess-1".into(),
+            entities: Default::default(),
+            last_activity: std::time::Instant::now(),
+            tx: ptx,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 4,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            armor: 0,
+            weapon_skill: 1,
+            combat: None,
+            last_strike: None,
+            mana: 30,
+            max_mana: 60,
+            effects: Vec::new(),
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: Default::default(),
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 60,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: Default::default(),
+            quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
+            persist_revision: 0,
+        };
+        let v = welcome_you(&p);
+        assert_eq!(v["id"], "1");
+        assert_eq!(v["name"], "hero");
+        assert_eq!(v["x"], 2.0);
+        assert_eq!(v["y"], 3.0);
+        assert_eq!(v["mana"], 30, "Start-Mana aus dem RAM-Stand");
+        assert_eq!(v["max_mana"], 60);
+        assert_eq!(v["level"], 4, "Stufe aus dem RAM-Stand");
     }
 
     #[tokio::test]

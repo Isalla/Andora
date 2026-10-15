@@ -198,6 +198,29 @@ pub struct AddOutcome {
     pub remainder: i64,
 }
 
+/// Exaktes Ziel eines Verschiebevorgangs innerhalb des normalen Inventars
+/// (Grundinventar oder Tascheninhalte). Equipment und Sicherheits-Puffer
+/// sind keine Verschiebeziele.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveTarget {
+    /// Grundinventar (Slot-Index).
+    Base(usize),
+    /// Rucksack (bag_id, Slot-Index).
+    Bag(u64, usize),
+}
+
+/// Ergebnis eines exakten Verschiebevorgangs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveOutcome {
+    /// Verschobene Menge.
+    pub moved: i64,
+    /// UUID des Bestands am Ziel (Vollverschub: Quell-UUID; Split: neue
+    /// Teil-UUID; der Quellrest behält die Quell-UUID).
+    pub placed_uuid: String,
+    /// True bei Vollverschub (Quelle aufgelöst), false bei Split.
+    pub full: bool,
+}
+
 /// Ergebnis einer vollständigen Aufnahme einer vorhandenen Instanz.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceInsertOutcome {
@@ -258,6 +281,9 @@ pub enum InventoryError {
     BagNotEmpty,
     /// Ungültige Definition oder Instanzdaten (einschließlich leerer UUID).
     InvalidInstance,
+    /// Ungültiges Verschiebeziel (unbekannter Bereich, Slot außerhalb des
+    /// Bereichs, unbekannte Tasche oder Ziel gleich Quelle).
+    InvalidTarget,
     /// UUID ist bereits belegt bzw. im Inventar nicht eindeutig.
     UuidCollision,
     /// Eine Mengenrechnung würde den i64-Wertebereich überschreiten.
@@ -903,6 +929,139 @@ impl InventoryState {
         }
         self.equipped.remove(&slot);
         Ok(())
+    }
+
+    /// Exaktes Verschieben innerhalb des normalen Inventars (Grundinventar
+    /// und Tascheninhalte, docs/inventory_system.md §19): Eine eindeutig
+    /// identifizierte Instanz wandert auf einen exakten Zielslot. Equipment,
+    /// Taschencontainer und Sicherheits-Puffer sind weder Quelle noch Ziel.
+    /// `count = None` verschiebt den ganzen Stack (Quelle aufgelöst, UUID am
+    /// Ziel erhalten); `count < Stack` teilt (Rest behält Quell-UUID und alle
+    /// Eigenschaften, der verschobene Teil erhält eine neue UUID aus der
+    /// vorhandenen Erzeugung). Belegtes Ziel (auch stapelkompatibles — kein
+    /// erfundenes Zusammenlegen/Tauschen) und ungültiges Ziel werden ohne
+    /// jede Mutation abgelehnt. Alle Prüfungen laufen vor der ersten
+    /// Mutation; danach sind die Schritte unfehlbar (keine Teilmutation).
+    pub fn try_move_instance(
+        &mut self,
+        uuid: &str,
+        target: MoveTarget,
+        count: Option<i64>,
+    ) -> Result<MoveOutcome, InventoryError> {
+        if uuid.trim().is_empty() {
+            return Err(InventoryError::NotInInventory);
+        }
+        let placed = self.instances().filter(|it| it.item_uuid == uuid).count();
+        if placed == 0 {
+            return Err(InventoryError::NotInInventory);
+        }
+        if placed != 1 {
+            return Err(InventoryError::UuidCollision);
+        }
+        let loc = self.slot_of(uuid).ok_or(InventoryError::NotInInventory)?;
+        if !matches!(loc, ItemLoc::Base(_) | ItemLoc::Bag(_, _)) {
+            return Err(InventoryError::NotInInventory);
+        }
+        let source = self
+            .instance_of(uuid)
+            .ok_or(InventoryError::NotInInventory)?;
+        if source.count <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        let n = count.unwrap_or(source.count);
+        if count.is_some() && n <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        if n <= 0 {
+            return Err(InventoryError::InvalidQuantity);
+        }
+        if n > source.count {
+            return Err(InventoryError::NotEnoughItems);
+        }
+        let target_loc = match target {
+            MoveTarget::Base(i) => {
+                if i >= self.base_slots.len() {
+                    return Err(InventoryError::InvalidTarget);
+                }
+                ItemLoc::Base(i)
+            }
+            MoveTarget::Bag(id, i) => {
+                let Some(b) = self.bags.iter().find(|b| b.bag_id == id) else {
+                    return Err(InventoryError::InvalidTarget);
+                };
+                if i >= b.slots.len() {
+                    return Err(InventoryError::InvalidTarget);
+                }
+                ItemLoc::Bag(id, i)
+            }
+        };
+        if target_loc == loc {
+            return Err(InventoryError::InvalidTarget);
+        }
+        if self.instance_of_target(target_loc).is_some() {
+            return Err(InventoryError::SlotOccupied);
+        }
+        // Ab hier validiert: neue Teil-UUID vorweg erzeugen (Kollision
+        // praktisch ausgeschlossen, dennoch geprüft — noch keine Mutation).
+        let full = n == source.count;
+        let mut placed_inst = source.clone();
+        if !full {
+            placed_inst.item_uuid = new_uuid();
+            if self
+                .instances()
+                .any(|it| it.item_uuid == placed_inst.item_uuid)
+            {
+                return Err(InventoryError::UuidCollision);
+            }
+            placed_inst.count = n;
+        }
+        let placed_uuid = placed_inst.item_uuid.clone();
+        match loc {
+            ItemLoc::Base(i) => {
+                if full {
+                    self.base_slots[i] = None;
+                } else if let Some(rest) = self.base_slots[i].as_mut() {
+                    rest.count -= n;
+                }
+            }
+            ItemLoc::Bag(id, i) => {
+                if let Some(b) = self.bags.iter_mut().find(|b| b.bag_id == id) {
+                    if full {
+                        b.slots[i] = None;
+                    } else if let Some(rest) = b.slots[i].as_mut() {
+                        rest.count -= n;
+                    }
+                }
+            }
+            _ => return Err(InventoryError::NotInInventory),
+        }
+        match target_loc {
+            ItemLoc::Base(i) => self.base_slots[i] = Some(placed_inst),
+            ItemLoc::Bag(id, i) => {
+                if let Some(b) = self.bags.iter_mut().find(|b| b.bag_id == id) {
+                    b.slots[i] = Some(placed_inst);
+                }
+            }
+            _ => return Err(InventoryError::InvalidTarget),
+        }
+        Ok(MoveOutcome {
+            moved: n,
+            placed_uuid,
+            full,
+        })
+    }
+
+    /// Belegung eines exakten Normalslots (nur Base/Bag-Ziele).
+    fn instance_of_target(&self, loc: ItemLoc) -> Option<ItemInstance> {
+        match loc {
+            ItemLoc::Base(i) => self.base_slots.get(i).and_then(|s| s.clone()),
+            ItemLoc::Bag(id, i) => self
+                .bags
+                .iter()
+                .find(|b| b.bag_id == id)
+                .and_then(|b| b.slots.get(i).and_then(|s| s.clone())),
+            _ => None,
+        }
     }
 
     /// Serverseitige Entfernung defekter Equipment-Items (docs §10/§12):

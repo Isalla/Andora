@@ -379,6 +379,7 @@ pub fn is_known_c2s(msg_type: i64) -> bool {
             | GROUP_TRANSFER
             | SPEND_ATTRIBUTE
             | PLAYER_TRADE
+            | INVENTORY
     )
 }
 

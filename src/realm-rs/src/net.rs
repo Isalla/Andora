@@ -970,7 +970,7 @@ async fn dispatch(
         c2s::GROUP_LEAVE => handlers::handle_group_leave(ctx, conn_id, &data).await,
         c2s::GROUP_KICK => handlers::handle_group_kick(ctx, conn_id, &data).await,
         c2s::GROUP_TRANSFER => handlers::handle_group_transfer(ctx, conn_id, &data).await,
-        c2s::PICKUP => handlers::handle_pickup(ctx, conn_id, &data).await,
+        c2s::PICKUP => handlers::handle_pickup(ctx, tx, conn_id, frame.seq, &data).await,
         c2s::SPEND_ATTRIBUTE => {
             handlers::handle_spend_attribute(ctx, tx, conn_id, frame.seq, &data).await
         }
@@ -990,6 +990,7 @@ async fn dispatch(
         c2s::PLAYER_TRADE => {
             handlers::handle_player_trade(ctx, tx, conn_id, frame.seq, &data).await
         }
+        c2s::INVENTORY => handlers::handle_inventory(ctx, tx, conn_id, frame.seq, &data).await,
         // AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
         // Unbekannte Typen werden bereits vor dem Gate verworfen.
         other => log::info!("unknown type {other}"),
@@ -4383,6 +4384,399 @@ mod tests {
         assert_eq!(w.loot_drops[&item].count, 3, "die Menge bleibt unverändert");
     }
 
+    /// INVENTORY-Antwort auf PICKUP: Erfolg trägt loot_id, neues Idia und
+    /// den Eigentümer-Stand — der Client braucht keine lokale Vorwegnahme.
+    #[tokio::test]
+    async fn dispatch_pickup_answers_inventory_ok_with_state() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let gold =
+            spawn_test_drop(&ctx, crate::loot::LootKind::Gold, None, 50, 1.0, 1.0, "a").await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            41,
+            crate::protocol::c2s::PICKUP,
+            serde_json::json!({"loot_id": gold.clone()}),
+        )
+        .await;
+        let answers = inventory_frames(&mut rx);
+        assert_eq!(answers.len(), 1, "genau eine Pickup-Antwort");
+        assert_eq!(answers[0].seq, 41, "seq wird zurückgespiegelt");
+        assert_eq!(answers[0].data["ok"], true);
+        assert_eq!(answers[0].data["loot_id"], serde_json::Value::String(gold));
+        assert_eq!(answers[0].data["idia"], 50);
+    }
+
+    /// Unbekannter Loot wird stabil abgelehnt (ok:false + Grund), ebenfalls
+    /// per INVENTORY mit seq-Echo — keine stille Aufnahme.
+    #[tokio::test]
+    async fn dispatch_pickup_unknown_loot_rejects_with_reason() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            42,
+            crate::protocol::c2s::PICKUP,
+            serde_json::json!({"loot_id": "loot_999"}),
+        )
+        .await;
+        let answers = inventory_frames(&mut rx);
+        assert_eq!(answers.len(), 1, "genau eine Pickup-Antwort");
+        assert_eq!(answers[0].seq, 42);
+        assert_eq!(answers[0].data["ok"], false);
+        assert_eq!(answers[0].data["reason"], "unknown_loot");
+        assert_eq!(answers[0].data["idia"], 0, "keine Gutschrift");
+    }
+
+    /// Außerhalb der Pickup-Reichweite: stabile Ablehnung, Drop bleibt liegen.
+    #[tokio::test]
+    async fn dispatch_pickup_out_of_range_rejects_with_reason() {
+        let ctx = test_ctx().await;
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        let gold =
+            spawn_test_drop(&ctx, crate::loot::LootKind::Gold, None, 50, 50.0, 50.0, "a").await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        c2s_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            43,
+            crate::protocol::c2s::PICKUP,
+            serde_json::json!({"loot_id": gold.clone()}),
+        )
+        .await;
+        let answers = inventory_frames(&mut rx);
+        assert_eq!(answers.len(), 1, "genau eine Pickup-Antwort");
+        assert_eq!(answers[0].data["ok"], false);
+        assert_eq!(answers[0].data["reason"], "out_of_range");
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].idia, 0, "keine Gutschrift");
+        assert!(w.loot_drops.contains_key(&gold), "der Drop bleibt liegen");
+    }
+
+    /// Inventar-Fixture für C2S-22-Nachweise (docs/inventory_system.md §19):
+    /// Spieler "a" (Conn 7) mit bekanntem Bestand (UUID-genau wählbar) plus
+    /// Definitionen. Kein Händler, kein Loot, keine Datenbank.
+    async fn insert_inventory_dispatch_world(ctx: &Arc<Ctx>) {
+        {
+            let mut w = ctx.shared.lock().await;
+            let (ptx, _prx) = mpsc::unbounded_channel();
+            let mut p = crate::world::Player {
+                id: "a".into(),
+                name: "a".into(),
+                x: 0.0,
+                y: 0.0,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp: 100,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 1,
+                session_id: String::new(),
+                entities: Default::default(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 5,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                last_strike: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Default::default(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: Default::default(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: crate::inventory::InventoryState::new(4),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            };
+            let mut potion = crate::item::ItemDefinition::new(
+                "hp_potion",
+                "Heiltrank",
+                crate::item::ItemCategory::Potion,
+            );
+            potion.max_stack = 20;
+            let sword = crate::item::ItemDefinition::new(
+                "eisenschwert",
+                "Eisenschwert",
+                crate::item::ItemCategory::Weapon,
+            );
+            w.item_definitions.insert("hp_potion".into(), potion);
+            w.item_definitions.insert("eisenschwert".into(), sword);
+            let mut pot = crate::item::ItemInstance::new(
+                "u-pot",
+                "hp_potion",
+                crate::item::ItemModifiers::default(),
+            );
+            pot.count = 10;
+            p.inventory.base_slots[0] = Some(pot);
+            p.inventory.base_slots[1] = Some(crate::item::ItemInstance::new(
+                "u-sw",
+                "eisenschwert",
+                crate::item::ItemModifiers::default(),
+            ));
+            w.players.insert("a".into(), p);
+            w.by_conn.insert(7, "a".into());
+        }
+    }
+
+    /// Ein C2S-22-Frame über den echten `dispatch` (identische Absicht,
+    /// wählbare `seq`).
+    async fn inventory_frame(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        seq: i64,
+        data: serde_json::Value,
+    ) {
+        c2s_frame(
+            ctx,
+            guard,
+            sec_cfg,
+            tx,
+            seq,
+            crate::protocol::c2s::INVENTORY,
+            data,
+        )
+        .await;
+    }
+
+    /// Alle Frames aus einem Kanal abholen (ein Durchlauf: jeder Filter
+    /// danach arbeitet auf derselben Abholung, sonst würde der erste Filter
+    /// die Frames des zweiten verwerfen).
+    fn drain_frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<crate::protocol::Frame> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            out.push(serde_json::from_str(&m).expect("Frame lesbar"));
+        }
+        out
+    }
+
+    fn result_frames(frames: &[crate::protocol::Frame]) -> Vec<&crate::protocol::Frame> {
+        frames
+            .iter()
+            .filter(|f| f.msg_type == crate::protocol::s2c::INVENTORY_RESULT)
+            .collect()
+    }
+
+    fn state_pushes(frames: &[crate::protocol::Frame]) -> Vec<&crate::protocol::Frame> {
+        frames
+            .iter()
+            .filter(|f| f.msg_type == crate::protocol::s2c::INVENTORY)
+            .collect()
+    }
+
+    /// C2S 22 `move` über den Empfangspfad: RESULT mit seq-Echo plus
+    /// INVENTORY-Push (seq 0) mit dem bestätigten Folgestand.
+    #[tokio::test]
+    async fn dispatch_inventory_move_answers_result_and_pushes_state() {
+        let ctx = test_ctx().await;
+        insert_inventory_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        inventory_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            51,
+            serde_json::json!({
+                "action": "move", "item_uuid": "u-pot",
+                "target_area": "base", "target_slot": 2,
+            }),
+        )
+        .await;
+        let frames = drain_frames(&mut rx);
+        let answers = result_frames(&frames);
+        assert_eq!(answers.len(), 1, "genau eine RESULT-Antwort");
+        assert_eq!(answers[0].seq, 51, "seq wird zurückgespiegelt");
+        assert_eq!(answers[0].data["ok"], true);
+        assert_eq!(answers[0].data["action"], "move");
+        let pushes = state_pushes(&frames);
+        assert_eq!(pushes.len(), 1, "genau ein INVENTORY-Push nach Erfolg");
+        assert_eq!(pushes[0].seq, 0, "Push ohne seq-Echo");
+        let slots = pushes[0].data["slots"].as_array().expect("slots ist Liste");
+        let moved = slots
+            .iter()
+            .find(|s| s["slot"] == 2)
+            .expect("Zielslot belegt");
+        assert_eq!(moved["item"]["item_uuid"], "u-pot");
+        assert_eq!(moved["item"]["count"], 10);
+        let w = ctx.shared.lock().await;
+        assert!(w.players["a"].inventory.base_slots[0].is_none());
+        assert!(
+            w.players["a"]
+                .dirty
+                .is_dirty(crate::persist::PersistComponent::Inventory),
+            "Erfolg markiert Inventory dirty"
+        );
+    }
+
+    /// C2S 22 `equip`/`unequip` über den Empfangspfad nach vorhandenen
+    /// Regeln: Equipment erscheint im Push, Ablegen räumt es wieder.
+    #[tokio::test]
+    async fn dispatch_inventory_equip_unequip_roundtrip() {
+        let ctx = test_ctx().await;
+        insert_inventory_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        inventory_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            52,
+            serde_json::json!({"action": "equip", "item_uuid": "u-sw", "slot": "main_hand"}),
+        )
+        .await;
+        let frames = drain_frames(&mut rx);
+        let answers = result_frames(&frames);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].seq, 52);
+        assert_eq!(answers[0].data["ok"], true);
+        assert_eq!(answers[0].data["slot"], "main_hand");
+        let pushes = state_pushes(&frames);
+        assert_eq!(pushes.len(), 1);
+        assert_eq!(
+            pushes[0].data["equipment"]["main_hand"]["item_uuid"],
+            "u-sw"
+        );
+        inventory_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            53,
+            serde_json::json!({"action": "unequip", "slot": "main_hand"}),
+        )
+        .await;
+        let frames = drain_frames(&mut rx);
+        let answers = result_frames(&frames);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].seq, 53);
+        assert_eq!(answers[0].data["ok"], true);
+        let pushes = state_pushes(&frames);
+        assert_eq!(pushes.len(), 1);
+        assert!(
+            pushes[0].data["equipment"]
+                .as_object()
+                .expect("equipment ist Objekt")
+                .is_empty(),
+            "Equipment wieder leer"
+        );
+    }
+
+    /// Belegtes/ungültiges Ziel, fremde UUID und `use` werden stabil
+    /// abgelehnt (ok:false + Grund, seq-Echo) — ohne INVENTORY-Push und ohne
+    /// Mutation des bestätigten Stands.
+    #[tokio::test]
+    async fn dispatch_inventory_rejects_without_push_or_mutation() {
+        let ctx = test_ctx().await;
+        insert_inventory_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let cases = [
+            (
+                61,
+                serde_json::json!({
+                    "action": "move", "item_uuid": "u-pot",
+                    "target_area": "base", "target_slot": 1,
+                }),
+                "slot_occupied",
+            ),
+            (
+                62,
+                serde_json::json!({
+                    "action": "move", "item_uuid": "u-pot",
+                    "target_area": "base", "target_slot": 9,
+                }),
+                "invalid_target",
+            ),
+            (
+                63,
+                serde_json::json!({
+                    "action": "move", "item_uuid": "u-fremd",
+                    "target_area": "base", "target_slot": 2,
+                }),
+                "not_in_inventory",
+            ),
+            (
+                64,
+                serde_json::json!({"action": "use", "item_uuid": "u-pot"}),
+                "no_consumable_contract",
+            ),
+            (
+                65,
+                serde_json::json!({"action": "tanzen"}),
+                "unknown_action",
+            ),
+        ];
+        for (seq, payload, reason) in cases {
+            inventory_frame(&ctx, &mut guard, &sec_cfg, &tx, seq, payload).await;
+            let frames = drain_frames(&mut rx);
+            let answers = result_frames(&frames);
+            assert_eq!(answers.len(), 1, "genau eine RESULT-Antwort für seq {seq}");
+            assert_eq!(answers[0].seq, seq, "seq-Echo für {reason}");
+            assert_eq!(answers[0].data["ok"], false);
+            assert_eq!(answers[0].data["reason"], reason);
+            assert!(
+                state_pushes(&frames).is_empty(),
+                "kein INVENTORY-Push bei Ablehnung ({reason})"
+            );
+        }
+        let w = ctx.shared.lock().await;
+        let inv = &w.players["a"].inventory;
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().item_uuid, "u-pot");
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().count, 10);
+        assert_eq!(inv.base_slots[1].as_ref().unwrap().item_uuid, "u-sw");
+        assert_eq!(w.players["a"].hp, 100, "kein Verbrauchseffekt");
+        assert_eq!(w.players["a"].mana, 50, "kein Verbrauchseffekt");
+        assert!(
+            !w.players["a"]
+                .dirty
+                .is_dirty(crate::persist::PersistComponent::Inventory),
+            "Ablehnungen markieren kein Dirty"
+        );
+    }
+
     /// 1b) PICKUP von Gold: die gültige Aufnahme schreibt genau einmal. Das
     /// **identische** Frame (gleiche `seq`) und derselbe Inhalt mit **neuer**
     /// `seq` gutschreiben nicht erneut — `seq` ist Korrelation.
@@ -4692,6 +5086,188 @@ mod tests {
                 "im Cooldown darf kein zweiter Effekt entstehen (seq {seq})"
             );
         }
+    }
+
+    /// Legt dieselben Cadence-Spieler an wie `insert_cadence_players`,
+    /// behält aber die Empfänger (für VITALS-Nachweise): a@(0,0) mit
+    /// conn 7, b@(1,0). Gibt (rx_a, rx_b) zurück.
+    async fn insert_vitals_players(
+        ctx: &Arc<Ctx>,
+    ) -> (
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<String>,
+    ) {
+        let (ptx_a, rx_a) = mpsc::unbounded_channel();
+        let (ptx_b, rx_b) = mpsc::unbounded_channel();
+        {
+            let mut w = ctx.shared.lock().await;
+            for (id, x, y, ptx) in [("a", 0.0, 0.0, ptx_a), ("b", 1.0, 0.0, ptx_b)] {
+                let mut p = crate::world::Player {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    x,
+                    y,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 1,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: std::time::Instant::now(),
+                    tx: ptx,
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    idia: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    last_strike: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: Default::default(),
+                    cooldowns: Default::default(),
+                    active_cast: None,
+                    learned_abilities: Default::default(),
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    sitting: false,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                    persist_revision: 0,
+                };
+                p.last_activity = std::time::Instant::now();
+                w.players.insert(id.to_string(), p);
+            }
+            w.by_conn.insert(7, "a".to_string());
+        }
+        (rx_a, rx_b)
+    }
+
+    fn vitals_frames(
+        rx: &mut mpsc::UnboundedReceiver<String>,
+    ) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(s) = rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if v.get("type") == Some(&serde_json::json!(crate::protocol::s2c::VITALS)) {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// 3a2) ABILITY: der Mana-Verbrauch pusht VITALS genau einmal an den
+    /// Caster (Eigentümer, RAM-Stand); Ziel/Fremde erhalten keine VITALS.
+    /// Wiederholung im Cooldown: kein Verbrauch, kein weiteres VITALS.
+    /// Abgelehnte Absicht: kein VITALS.
+    #[tokio::test]
+    async fn ability_consume_pushes_vitals_once_to_caster_only() {
+        let mut tctx = test_ctx().await;
+        register_ability(&mut tctx, dispatch_ability_def());
+        let ctx = &tctx;
+        let (mut rx_a, mut rx_b) = insert_vitals_players(ctx).await;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .learned_abilities
+            .insert("fire_bolt".into());
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            60,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+        )
+        .await;
+        let va = vitals_frames(&mut rx_a);
+        assert_eq!(va.len(), 1, "genau ein VITALS an den Caster");
+        assert_eq!(va[0]["data"]["mana"], 50 - 8, "verbrauchtes Mana");
+        assert_eq!(va[0]["data"]["max_mana"], 50);
+        assert_eq!(va[0]["data"]["level"], 1);
+        assert!(
+            vitals_frames(&mut rx_b).is_empty(),
+            "keine Fremdwerte am Ziel"
+        );
+        // Cooldown-Wiederholung: kein Verbrauch, kein VITALS.
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            61,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+        )
+        .await;
+        assert!(
+            vitals_frames(&mut rx_a).is_empty(),
+            "ohne Verbrauch kein VITALS"
+        );
+    }
+
+    /// 3a3) ABILITY: fachlich abgelehnt (Reichweite) → kein Verbrauch,
+    /// kein VITALS an niemanden.
+    #[tokio::test]
+    async fn rejected_ability_pushes_no_vitals() {
+        let mut tctx = test_ctx().await;
+        register_ability(&mut tctx, dispatch_ability_def());
+        let ctx = &tctx;
+        let (mut rx_a, mut rx_b) = insert_vitals_players(ctx).await;
+        // Ziel aus der Reichweite schieben (fire_bolt: 12 m).
+        ctx.shared.lock().await.players.get_mut("b").unwrap().x = 50.0;
+        ctx.shared.lock().await.players.get_mut("b").unwrap().y = 50.0;
+        ctx.shared
+            .lock()
+            .await
+            .players
+            .get_mut("a")
+            .unwrap()
+            .learned_abilities
+            .insert("fire_bolt".into());
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        c2s_frame(
+            ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            60,
+            crate::protocol::c2s::ABILITY,
+            serde_json::json!({"ability_id": "fire_bolt", "target_id": "b"}),
+        )
+        .await;
+        assert_eq!(
+            ctx.shared.lock().await.players["a"].mana,
+            50,
+            "kein Verbrauch bei Ablehnung"
+        );
+        assert!(vitals_frames(&mut rx_a).is_empty());
+        assert!(vitals_frames(&mut rx_b).is_empty());
     }
 
     /// 3b) ABILITY: eine fachlich abgelehnte Absicht (Ziel außerhalb der
@@ -5955,6 +6531,19 @@ mod tests {
         out
     }
 
+    /// INVENTORY-Frames (S2C 23, Eigentümer-Sicht) aus einem Kanal filtern;
+    /// andere Typen (z. B. verflochtene PLAYER_TRADE-Pushes) werden ignoriert.
+    fn inventory_frames(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<crate::protocol::Frame> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            let f: crate::protocol::Frame = serde_json::from_str(&m).expect("Frame lesbar");
+            if f.msg_type == crate::protocol::s2c::INVENTORY {
+                out.push(f);
+            }
+        }
+        out
+    }
+
     #[tokio::test]
     async fn dispatch_npc_talk_routes_buy_to_handler() {
         let ctx = test_ctx().await;
@@ -5980,6 +6569,48 @@ mod tests {
         let w = ctx.shared.lock().await;
         assert_eq!(w.players["a"].idia, 480);
         assert_eq!(w.players["a"].inventory.count_of("hp_potion"), 7);
+    }
+
+    /// NPC-Kauf pusht nach NPC_TEXT den neuen Eigentümer-Stand (INVENTORY):
+    /// Idia 480, hp_potion-Stack mit UUID/Name/Menge — UUID-genau wählbar.
+    #[tokio::test]
+    async fn dispatch_npc_buy_pushes_inventory_state() {
+        let ctx = test_ctx().await;
+        insert_trade_dispatch_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        dispatch_npc_talk(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            11,
+            serde_json::json!({
+                "npc_id": "npc_5", "action": "buy", "item_id": "hp_potion", "count": 2
+            }),
+        )
+        .await;
+        let pushes = inventory_frames(&mut rx);
+        assert_eq!(pushes.len(), 1, "genau ein INVENTORY-Push nach Kauf");
+        assert_eq!(pushes[0].seq, 0, "Push ohne seq-Echo");
+        let d = &pushes[0].data;
+        assert_eq!(d["ok"], true);
+        assert_eq!(d["idia"], 480);
+        assert_eq!(d["base_slots"], 8);
+        let slots = d["slots"].as_array().expect("slots ist Liste");
+        let stack = slots
+            .iter()
+            .find(|s| s["item"]["item_id"] == "hp_potion")
+            .expect("gekaufter Stack im Stand");
+        assert_eq!(stack["item"]["count"], 7);
+        assert!(
+            !stack["item"]["item_uuid"].as_str().unwrap_or("").is_empty(),
+            "UUID für UUID-genaue Auswahl"
+        );
+        assert_eq!(stack["item"]["name"], "Heiltrank");
+        assert!(d.get("bags").is_some(), "Rucksackbereich vorhanden");
+        assert!(d.get("equipment").is_some(), "Equipmentbereich vorhanden");
     }
 
     #[tokio::test]
@@ -6158,8 +6789,11 @@ mod tests {
         let mut out = Vec::new();
         while let Ok(m) = rx.try_recv() {
             let f: crate::protocol::Frame = serde_json::from_str(&m).expect("Frame lesbar");
-            assert_eq!(f.msg_type, crate::protocol::s2c::PLAYER_TRADE);
-            out.push(f);
+            // Nur PLAYER_TRADE herausfiltern: INVENTORY-Pushes (S2C 23)
+            // teilen sich die Kanäle und werden separat geprüft.
+            if f.msg_type == crate::protocol::s2c::PLAYER_TRADE {
+                out.push(f);
+            }
         }
         out
     }
@@ -6433,6 +7067,124 @@ mod tests {
         let w = ctx.shared.lock().await;
         assert_eq!(w.players["1"].persist_revision, 1);
         assert_eq!(w.players["1"].inventory.count_of("hp_potion"), 7);
+    }
+
+    /// Spielerhandel-Commit pusht je Partei den neuen Eigentümer-Stand
+    /// (INVENTORY, seq 0): eigene Idia/Slots nach Tausch, keine fremden Daten.
+    /// Pending löst keinen Push aus (Pending ist kein Erfolg) — hier wird der
+    /// klare Commit-Fall über den echten Commit-Pfad belegt.
+    #[tokio::test]
+    async fn dispatch_player_trade_commit_pushes_inventory_to_both_parties() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let (mut rx1, mut rx2) = insert_player_trade_world(&ctx).await;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        let (tx7, mut rx7) = mpsc::unbounded_channel();
+        let (tx8, mut rx8) = mpsc::unbounded_channel();
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            41,
+            serde_json::json!({"action": "request", "target_id": "2"}),
+        )
+        .await;
+        let rep = player_trade_frames(&mut rx7);
+        let dialog_id = rep[0].data["dialog_id"].as_str().unwrap().to_string();
+        let _ = player_trade_frames(&mut rx2);
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            7,
+            serde_json::json!({"action": "accept", "dialog_id": dialog_id}),
+        )
+        .await;
+        let _ = player_trade_frames(&mut rx8);
+        let _ = player_trade_frames(&mut rx1);
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            13,
+            serde_json::json!({
+                "action": "offer", "dialog_id": dialog_id,
+                "items": [{"item_uuid": "pot-1", "count": 3}], "idia": 10,
+            }),
+        )
+        .await;
+        let _ = player_trade_frames(&mut rx7);
+        let _ = player_trade_frames(&mut rx2);
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            14,
+            serde_json::json!({
+                "action": "offer", "dialog_id": dialog_id,
+                "items": [{"item_uuid": "sword-2", "count": 1}], "idia": 0,
+            }),
+        )
+        .await;
+        let _ = player_trade_frames(&mut rx8);
+        let _ = player_trade_frames(&mut rx1);
+        dispatch_player_trade(
+            &ctx,
+            &mut g1,
+            &sec_cfg,
+            &tx7,
+            7,
+            15,
+            serde_json::json!({"action": "confirm", "dialog_id": dialog_id, "version": 2}),
+        )
+        .await;
+        let _ = player_trade_frames(&mut rx7);
+        dispatch_player_trade(
+            &ctx,
+            &mut g2,
+            &sec_cfg,
+            &tx8,
+            8,
+            16,
+            serde_json::json!({"action": "confirm", "dialog_id": dialog_id, "version": 2}),
+        )
+        .await;
+        // Commit-Folgestände laufen über die Spielerkanäle (Takeover-sicher):
+        // je genau ein INVENTORY-Push mit eigenem Stand, seq 0.
+        let inv1 = inventory_frames(&mut rx1);
+        assert_eq!(inv1.len(), 1, "Partei 1 erhält genau einen Stand-Push");
+        assert_eq!(inv1[0].seq, 0);
+        assert_eq!(inv1[0].data["ok"], true);
+        assert_eq!(inv1[0].data["idia"], 90);
+        let slots1 = inv1[0].data["slots"].as_array().expect("slots ist Liste");
+        assert!(
+            slots1
+                .iter()
+                .any(|s| s["item"]["item_id"] == "eisenschwert" && s["item"]["count"] == 1),
+            "Partei 1 hält das getauschte Schwert"
+        );
+        let inv2 = inventory_frames(&mut rx2);
+        assert_eq!(inv2.len(), 1, "Partei 2 erhält genau einen Stand-Push");
+        assert_eq!(inv2[0].seq, 0);
+        assert_eq!(inv2[0].data["ok"], true);
+        assert_eq!(inv2[0].data["idia"], 60);
+        let slots2 = inv2[0].data["slots"].as_array().expect("slots ist Liste");
+        assert!(
+            slots2
+                .iter()
+                .any(|s| s["item"]["item_id"] == "hp_potion" && s["item"]["count"] == 3),
+            "Partei 2 hält die getauschten Tränke"
+        );
     }
 
     /// Stabile Ablehnungen am Dispatch: unbekannte Aktion, Eigenhandel,

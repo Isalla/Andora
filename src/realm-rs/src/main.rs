@@ -15,6 +15,7 @@ mod group;
 mod handlers;
 mod health;
 mod inventory;
+mod inventory_actions;
 mod item;
 mod item_lifecycle;
 mod loot;

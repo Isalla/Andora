@@ -708,15 +708,38 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
     world.tick.avg_ms += (ms - world.tick.avg_ms) / world.tick.count as f64;
 }
 
+/// VITALS-Frame (S2C 24, nur Eigentümer): eigene Spielerwerte (Mana, max.
+/// Mana, Level) aus dem autoritativen RAM-Stand. Feldnamen wie im Player.
+pub fn vitals_frame(mana: i32, max_mana: i32, level: u32) -> Frame {
+    Frame::new(
+        0,
+        s2c::VITALS,
+        serde_json::json!({"mana": mana, "max_mana": max_mana, "level": level}),
+    )
+}
+
+/// Sendet den aktuellen VITALS-Stand an den Eigentümer (dessen `tx`).
+/// Fremde erhalten nichts; fehlender Player → kein Frame.
+pub fn push_vitals(world: &World, pid: &str) {
+    if let Some(p) = world.players.get(pid) {
+        p.send(&vitals_frame(p.mana, p.max_mana, p.level));
+    }
+}
 /// HP-/Mana-Regeneration pro Tick (docs/Attribute_und_Regeneration.md
-/// §§4–8): absolute Raten pro Sekunde × Zustandsmultiplikator
 /// (Kampf 15 %, stehend 100 %, sitzend 125 % — Sitzbonus nie im Kampf),
 /// intern f64 mit Carry je Ressource; gedeckelt auf 0 bzw. max. Tote
 /// (hp == 0) regenerieren nicht (keine Wiederbelebung). Teilt sich die
 /// gemeinsame Kernlogik in crate::regen (HP UND Mana, NPC-fähig).
 pub fn world_regen_tick(world: &mut World, tick_ms: u64) {
     for p in world.players.values_mut() {
+        // VITALS nur bei tatsächlicher Ganzzahl-Änderung (kein Tick-Spam):
+        // Vorher/Nachher-Vergleich ohne neue Felder, Versand an den
+        // Eigentümer via dessen `tx` (Fremde erhalten nichts).
+        let before = (p.mana, p.max_mana, p.level);
         crate::regen::apply_regen(p, tick_ms);
+        if (p.mana, p.max_mana, p.level) != before {
+            p.send(&vitals_frame(p.mana, p.max_mana, p.level));
+        }
     }
 }
 
@@ -1348,5 +1371,42 @@ mod tests {
         let b = World::new();
         assert!(a.runtime_id.starts_with("rt-"));
         assert_ne!(a.runtime_id, b.runtime_id);
+    }
+
+    /// VITALS-Frame (S2C 24, nur Eigentümer): Typ, eigene Werte, kein HP,
+    /// keine Fremd-ID.
+    #[test]
+    fn vitals_frame_shape() {
+        let f = vitals_frame(22, 50, 3);
+        let v: serde_json::Value = serde_json::from_str(&f.encode()).unwrap();
+        assert_eq!(v["type"], crate::protocol::s2c::VITALS);
+        assert_eq!(v["data"]["mana"], 22);
+        assert_eq!(v["data"]["max_mana"], 50);
+        assert_eq!(v["data"]["level"], 3);
+        assert!(v["data"].get("hp").is_none(), "kein HP im VITALS");
+        assert!(v["data"].get("id").is_none(), "keine ID nötig (Eigentümer)");
+    }
+
+    /// Regen-Tick: voller Stand → kein VITALS; angebrochener Stand → genau
+    /// ein VITALS mit gewachsenem Wert an den Eigentümer (Fremde: nichts).
+    #[test]
+    fn regen_tick_pushes_vitals_only_on_change() {
+        let mut w = World::new();
+        let (a, mut ra) = test_player("a", 0.0, 0.0);
+        w.players.insert("a".into(), a);
+        world_regen_tick(&mut w, 1000);
+        assert!(ra.try_recv().is_err(), "voller Stand: kein Push");
+        w.players.get_mut("a").unwrap().mana = 10;
+        world_regen_tick(&mut w, 1000);
+        let f = ra.try_recv().expect("ein VITALS bei Änderung");
+        let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+        assert_eq!(v["type"], crate::protocol::s2c::VITALS);
+        assert!(
+            v["data"]["mana"].as_i64().unwrap() > 10,
+            "Mana ist serverseitig gewachsen"
+        );
+        assert_eq!(v["data"]["max_mana"], 50);
+        assert_eq!(v["data"]["level"], 1);
+        assert!(ra.try_recv().is_err(), "genau ein Frame");
     }
 }

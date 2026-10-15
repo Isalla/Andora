@@ -280,6 +280,13 @@ pub fn start_ability(
         // §6/§39: Mana-Verbrauch ändert persistierbare Ressourcen → die
         // Komponente `Resources` dirty markieren (Stufe B).
         player.mark_dirty(crate::persist::PersistComponent::Resources);
+        // Eigentümer über den aktuellen Stand informieren (VITALS, nur
+        // eigene Verbindung — kein Fremdwert im Area-Broadcast).
+        player.send(&crate::world::vitals_frame(
+            player.mana,
+            player.max_mana,
+            player.level,
+        ));
     }
 
     let caster_x = world.players.get(caster_id).map(|p| p.x).unwrap_or(0.0);
