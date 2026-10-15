@@ -441,4 +441,207 @@ mod tests {
         );
         assert_eq!(world.by_conn.len(), 1);
     }
+
+    // ── Chat-Doppelecho (FIX_SERVER_CHAT_DOUBLE_ECHO) ────────────────────
+    // handle_chat lieferte eigene Nachrichten doppelt (Radius-Broadcast
+    // inklusive Sender plus direktes Echo). Nachweis am echten Handler:
+    // Sender aus dem Broadcast, Echo genau einmal, Rest unveraendert.
+
+    fn chat_test_parental() -> SharedParental {
+        let auth = AuthApi::new(&crate::config::AuthApiConfig {
+            url: String::new(),
+            service_id: String::new(),
+            secret: String::new(),
+        })
+        .expect("authapi client");
+        new_shared(auth)
+    }
+
+    fn chat_mk_player(
+        id: &str,
+        x: f64,
+        y: f64,
+        tx: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> crate::world::Player {
+        crate::world::Player {
+            id: id.into(),
+            name: id.into(),
+            x,
+            y,
+            face: 0.0,
+            ping_ms: 0,
+            zone_id: 0,
+            hp: 100,
+            max_hp: 100,
+            lang: "de".into(),
+            account_id: 7,
+            session_id: "sess-1".into(),
+            entities: Default::default(),
+            last_activity: std::time::Instant::now(),
+            tx,
+            char_class: "Adventurer".into(),
+            class: crate::class::ClassStatus::Adventurer,
+            faction_transition: false,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            armor: 0,
+            weapon_skill: 1,
+            combat: None,
+            last_strike: None,
+            mana: 50,
+            max_mana: 50,
+            effects: Vec::new(),
+            cooldowns: Default::default(),
+            active_cast: None,
+            learned_abilities: Default::default(),
+            attributes: Default::default(),
+            max_hp_base: 100,
+            max_mana_base: 50,
+            sitting: false,
+            hp_regen_bonus: 0.0,
+            mana_regen_bonus: 0.0,
+            hp_regen_carry: 0.0,
+            mana_regen_carry: 0.0,
+            inventory: Default::default(),
+            quests: Default::default(),
+            dirty: Default::default(),
+            persist_generation: 0,
+            persist_revision: 0,
+        }
+    }
+
+    /// a (Sender, conn 7) bei (0,0), b (nah, conn 8) bei (1,0), c (fern,
+    /// conn 9) bei (50,50). Gibt (rx_a, rx_b, rx_c, tx_a) zurueck.
+    async fn chat_world() -> (
+        Shared,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::sync::mpsc::UnboundedSender<String>,
+    ) {
+        let shared = crate::world::new_shared();
+        let (tx_a, rx_a) = mpsc::unbounded_channel();
+        let (tx_b, rx_b) = mpsc::unbounded_channel();
+        let (tx_c, rx_c) = mpsc::unbounded_channel();
+        {
+            let mut world = shared.lock().await;
+            world
+                .players
+                .insert("a".into(), chat_mk_player("a", 0.0, 0.0, tx_a.clone()));
+            world
+                .players
+                .insert("b".into(), chat_mk_player("b", 1.0, 0.0, tx_b));
+            world
+                .players
+                .insert("c".into(), chat_mk_player("c", 50.0, 50.0, tx_c));
+            world.by_conn.insert(7, "a".into());
+            world.by_conn.insert(8, "b".into());
+            world.by_conn.insert(9, "c".into());
+        }
+        (shared, rx_a, rx_b, rx_c, tx_a)
+    }
+
+    fn drain_values(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(s) = rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    fn chat_only(frames: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+        frames
+            .into_iter()
+            .filter(|v| v.get("type") == Some(&serde_json::json!(crate::protocol::s2c::CHAT)))
+            .collect()
+    }
+
+    async fn chat_send(
+        parental: &SharedParental,
+        shared: &Shared,
+        tx_a: &tokio::sync::mpsc::UnboundedSender<String>,
+        text: &str,
+    ) {
+        crate::handlers::handle_chat(
+            parental,
+            shared,
+            tx_a,
+            7,
+            1,
+            &serde_json::json!({"channel": "lokal", "text": text}),
+            20.0,
+        )
+        .await;
+    }
+
+    /// Eine Sendung: Sender genau einmal (Echo), naher Empfaenger genau
+    /// einmal, ferner Empfaenger nichts (Reichweite unveraendert).
+    #[tokio::test]
+    async fn chat_single_send_sender_once_near_once_far_none() {
+        let parental = chat_test_parental();
+        let (shared, mut rx_a, mut rx_b, mut rx_c, tx_a) = chat_world().await;
+        chat_send(&parental, &shared, &tx_a, "hi").await;
+        let a = chat_only(drain_values(&mut rx_a));
+        let b = chat_only(drain_values(&mut rx_b));
+        let c = chat_only(drain_values(&mut rx_c));
+        assert_eq!(a.len(), 1, "Sender erhaelt genau ein Echo");
+        assert_eq!(b.len(), 1, "naher Empfaenger erhaelt genau eine Zustellung");
+        assert!(c.is_empty(), "ferner Empfaenger ausserhalb Reichweite");
+        assert_eq!(a[0]["data"]["from"], "a");
+        assert_eq!(a[0]["data"]["channel"], "lokal");
+        assert_eq!(a[0]["data"]["text"], "hi");
+    }
+
+    /// Zwei gleiche Sendungen: jeweils zwei Zustellungen (kein
+    /// Text-Vergleich, keine Deduplication).
+    #[tokio::test]
+    async fn chat_two_identical_sends_deliver_twice_each() {
+        let parental = chat_test_parental();
+        let (shared, mut rx_a, mut rx_b, _rx_c, tx_a) = chat_world().await;
+        chat_send(&parental, &shared, &tx_a, "hi").await;
+        chat_send(&parental, &shared, &tx_a, "hi").await;
+        assert_eq!(chat_only(drain_values(&mut rx_a)).len(), 2);
+        assert_eq!(chat_only(drain_values(&mut rx_b)).len(), 2);
+    }
+
+    /// Leere Nachricht: keine Chat-Zustellung an niemanden.
+    #[tokio::test]
+    async fn chat_empty_text_delivers_nothing() {
+        let parental = chat_test_parental();
+        let (shared, mut rx_a, mut rx_b, mut rx_c, tx_a) = chat_world().await;
+        chat_send(&parental, &shared, &tx_a, "").await;
+        assert!(chat_only(drain_values(&mut rx_a)).is_empty());
+        assert!(chat_only(drain_values(&mut rx_b)).is_empty());
+        assert!(chat_only(drain_values(&mut rx_c)).is_empty());
+    }
+
+    /// Gesperrter Chat (Parental): keine Chat-Zustellung, nur
+    /// PARENTAL_RESULT am Sender (Chat-/Parental-Pruefung unveraendert).
+    #[tokio::test]
+    async fn chat_locked_delivers_no_chat() {
+        let parental = chat_test_parental();
+        let (shared, mut rx_a, mut rx_b, _rx_c, tx_a) = chat_world().await;
+        let mut st = ParentalPlayerState::fresh(7);
+        st.enabled = true;
+        st.chat_allowed = false;
+        parental
+            .states
+            .lock()
+            .await
+            .insert("a".into(), st);
+        chat_send(&parental, &shared, &tx_a, "hi").await;
+        let all_a = drain_values(&mut rx_a);
+        assert!(chat_only(all_a.clone()).is_empty());
+        assert_eq!(all_a.len(), 1, "genau eine Antwort (Ablehnung)");
+        assert_eq!(all_a[0]["type"], crate::protocol::s2c::PARENTAL_RESULT);
+        assert_eq!(all_a[0]["data"]["reason"], "chat_locked");
+        assert!(chat_only(drain_values(&mut rx_b)).is_empty());
+    }
 }

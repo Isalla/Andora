@@ -1036,6 +1036,13 @@ pub async fn handle_chat(
     )
     .encode();
     for o in world.players.values() {
+        if o.id == pid {
+            // Der Sender ist aus dem Radius-Broadcast ausgeschlossen: er
+            // erhaelt unten das direkte Echo genau einmal (kein Doppel).
+            // Zugehoerigkeit: pid stammt aus der verbindungseigenen
+            // by_conn-Zuordnung (Ownership), nicht aus der Nachricht.
+            continue;
+        }
         if (o.x - me.x).hypot(o.y - me.y) > aofb_radius {
             continue;
         }
