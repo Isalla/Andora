@@ -43,8 +43,8 @@ Sicherheits-Puffer (verfällt beim Logout). Persistierung über Migration 016 un
 persistiert). Anbindung: Laden + serverseitiges Entfernen defekten Equipments beim Einstieg
 (`handle_hello`), Speichern beim Disconnect (`net.rs`); Config in `config.rs`.
 
-Kein Client-UI, keine Protokoll-IDs (folgen mit dem Spiellayer). Loot-/Quest-Aufrufer
-nutzen die Kern-API (`try_add`/`fits`/`capacity_for`) — im V1-Loop noch kein Aufrufer.
+Eigentümer-Sicht S2C 23 `INVENTORY` (eingebaut): `{ok, idia, base_slots, slots:[{slot, item}], bags:[{bag_id, name, slot_count, slots}], equipment:{Slot: item}}`, `item` je Instanz mit `item_uuid`/`item_id`/`name`/`count` plus Eigenschaften; RAM-only, keine DB, nur an den Eigentümer. C2S-Gegenstück ausschließlich für Teststand-Aktionen (C2S 22, Abschnitt 19). Push beim Einstieg (nach `WELCOME`, `seq` 0) und nach bestätigten Mutationen (Pickup-Antwort mit `seq`-Echo inkl. `loot_id`/`reason`, NPC-`buy`/`sell`/`buyback`, Spielerhandel-Commit je Partei, Inventaraktionen; nie bei Pending). Loot-/Quest-Aufrufer
+nutzen die Kern-API (`try_add`/`fits`/`capacity_for`) — im V1-Loop noch kein Aufrufer. `slot_count` je Tasche ist eine additive, rückwärtskompatible Lesegröße (kein Regelinhalt).
 
 Verbindliche Lifecycle-Regeln: Abschnitt 11 legt den Sicherheits-Puffer als
 ausschließlich temporären, nie persistierten Runtime-State fest; Abschnitt 16
@@ -725,3 +725,94 @@ UUIDs; verwaiste Zeilen (Instanz bereits weg) bereinigt die
 Startup-Finalisierung. Charakterweise Pflichten sind per SELECT auf
 `item_instance_finalizations` einsehbar (Operator-Diagnose, kein
 Automatik-Eingriff).
+
+---
+
+## 19. Inventaraktionen des Teststands (C2S 22 / S2C 25, eingebaut)
+
+Der Testclient (`testclient/tc_inventory.gd`, Godot 3.6, Auswahl plus
+eindeutige Buttons, kein Drag-and-drop) sendet ausschließlich Absichten;
+alle Regeln prüft der Server. Es wird keine zweite Inventarimplementierung
+erstellt: Die Ausführung nutzt die vorhandenen Kernoperationen
+(`try_move_instance` neu in `inventory.rs`; `try_equip`/`try_unequip`
+wiederverwendet), der Client zeigt ausschließlich bestätigte Stände.
+
+### Protokoll
+
+C2S 22 `INVENTORY` (`protocol.rs`, `shared/protocol.gd` numerisch
+identisch, Whitelist ergänzt, Klasse `Rare` wie übrige Spezialaktionen;
+`seq` ausschließlich Korrelation mit Echo):
+`{action, item_uuid?, target_area?, target_slot?, target_bag?, count?, slot?}`
+mit `action` = `move`/`equip`/`unequip`/`use`.
+
+S2C 25 `INVENTORY_RESULT`: Erfolg `{ok: true, action, item_uuid, slot?,
+count?}`, danach der bestätigte Folgestand per S2C 23 `INVENTORY` (`seq`
+0, Eigentümer-Sicht). Ablehnung `{ok: false, action?, reason}` mit stabilem
+`reason`, ohne Mutation, ohne Dirty, ohne Push.
+
+### Serverseitige Prüfung (unter der World-Sperre, keine Awaits)
+
+1. Ownership über die aktuelle Verbindung (`by_conn`; verloren → stiller
+   Rückzug wie übrige Handler).
+2. Handelssperre zuerst: `economic_mutation_allowed` — sonst
+   `trade_commit_pending` für alle vier Aktionen (dieselbe Barriere wie
+   Pickup/NPC-/Spielerhandel).
+3. Fachregeln je Aktion, Ablehnung ohne Teilmutation
+   (alle Prüfungen vor der ersten Mutation):
+
+* `move` (`target_area` `base`/`bag`, exakter `target_slot`, optional
+  `target_bag`, optional `count`; fehlend = ganzer Stack): Quelle nur
+  eindeutig im Basis-/Tascheninventar (Equipment/Puffer/Fremd-Fehlend →
+  `not_in_inventory`, mehrdeutig → `uuid_conflict`); Menge `<= 0` →
+  `invalid_quantity`, über Bestand → `not_enough_items`; unbekannter
+  Bereich/Slot, unbekannte Tasche oder Ziel gleich Quelle →
+  `invalid_target`; belegtes Ziel → `slot_occupied` (auch
+  stapelkompatibles: kein erfundenes Zusammenlegen, kein Tausch).
+  Vollverschub erhält UUID/Eigenschaften am Ziel, Split behält den
+  Quellrest (UUID) und vergibt dem Teil eine neue UUID.
+* `equip` (`item_uuid`, `slot` als kanonischer DB-Schlüssel, unbekannt →
+  `unknown_slot`): vorhandene Regeln (`try_equip`: Kategorie
+  Weapon/Armor/Accessory, `min_level`/Klasse aus dem Serverstand,
+  Defekt-Schutz) → `not_equippable`/`cannot_equip`/`broken_item`,
+  belegt → `slot_occupied`.
+* `unequip` (`slot`): leer → `slot_empty`; Zielplatz nach vorhandener
+  Regel (passender Stack, sonst freier Slot), voll → `inventory_full`.
+* `use`: `no_consumable_contract` — es existiert kein verbindlicher
+  Verbrauchsvertrag und kein Effektpfad (`Attribute_und_Regeneration.md`
+  §9: Consumable-Logik folgt separat). Benannte Grenze statt erfundener
+  Wirkung: kein Effekt, keine Mengenänderung, kein Dirty.
+
+Erfolg markiert `PersistComponent::Inventory` (kein Umgehen der
+Dirty-/Persistenzanbindung, kein eigener DB-Pfad, keine Migration, kein
+Seed). Es entsteht kein `retired_uuid`-Fall (kein Zusammenlegen).
+Puffer-, Bindungs-, Quest- und Lifecycle-Regeln bleiben unverändert;
+kein Wegwerfen/Zerstören, keine neue Loot- oder Handelslogik.
+
+### Clientbindung
+
+Dargestellt werden bestätigte Werte (Name, Menge, Bindung, Haltbarkeit;
+Fehlendes als „?"). Auswahl plus Buttons senden nur Absichten; lokale
+Itementfernung, Heilung oder Statänderung vor Bestätigung findet nicht
+statt. Alle stabilen Gründe werden sichtbar abgebildet. Inventar nur
+ingame; Textfokus- und HUD-Regeln bleiben erhalten. Anordnung EQ2-artig:
+Paperdoll mittig mit Equipment-Slots beidseitig, Inventar-Slots unten als
+Raster, roter Hinweis bei bestätigt vollem Bestand (reine Darstellung aus
+bestätigtem Stand, keine Regel).
+
+### Item-Icons (reine Teststand-Darstellung, keine Regel)
+
+Schlitzansicht mit Icon und Menge (anklickbar), leere Slots und aktuelle
+Auswahl deutlich erkennbar, Name und vorhandene Eigenschaften im
+Tooltip/Detailbereich, Equipment-Slots mit Beschriftung plus gedämpfter
+Art-Silhouette; dieselben Icons in Händlerangeboten, Verkauf und Rückkauf.
+UUID-Auswahl, Buttons und Serveraktionen bleiben unverändert.
+
+HERKUNFT/LIZENZ: Das Repository enthält keine verwendbaren Item-Icons
+(nur Projekt-/Addon-Icons) und keine Item-Icon-Zuordnung; der Server
+liefert keine Kategorie mit (keine Server-/DB-/Regeländerung). Die Icons
+sind deshalb eigens für den Teststand zur Laufzeit prozedural erzeugte
+32x32-Platzhalter (`testclient/tc_icons.gd`): exakte Testitems
+(Waffe, Heiltrank, Proviant, Lootmaterialien) plus Token-Fallback und ein
+gemeinsames Ersatzicon für Unbekanntes. Eigenkreation, keine
+lizenzpflichtigen Inhalte. Einmal je Art erzeugt und gecacht
+(Pi-4-Budget: wenige winzige Texturen, keine Kosten pro Frame).

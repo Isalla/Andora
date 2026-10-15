@@ -14,7 +14,7 @@ Unter `references/` befindet sich die lokale technische Referenzbibliothek; Eins
 | Schritt | Datei | Warum |
 |---|---|---|
 | 1. Projektübergreifend | [project_overview.md](./project_overview.md) | Grundidee, Plattformen, Server-Autorität, alle Kernsysteme in übergeordneter Form |
-| 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.5 als Referenzclient, fünf Serverdienste: Go-API/Auth, Login, Realm/Rust, Coordinator, Voice; MariaDB, WebSocket), weitere offizielle Clients langfristig (gemeinsame Realms, identische Inhalte, Darstellung Unterschiede; Godot-First), Zielplattformen (linux-amd64/arm64), Verzeichnis- und exp1_/exp2_-Präfix-Regeln |
+| 2. Technisches Fundament | [architecture.md](./architecture.md) | Stack (Godot 3.6 als Referenzclient, fünf Serverdienste: Go-API/Auth, Login, Realm/Rust, Coordinator, Voice; MariaDB, WebSocket), weitere offizielle Clients langfristig (gemeinsame Realms, identische Inhalte, Darstellung Unterschiede; Godot-First), Zielplattformen (linux-amd64/arm64), Verzeichnis- und exp1_/exp2_-Präfix-Regeln |
 | 3. KI-Grundregel | [ai_system.md](./ai_system.md) | Zentrale KI-Architektur: Server ist Autorität, AI-/Narrative-Context, spezialisierte KI-Systeme, Budget, Fallbacks |
 | 4. Implementierungsstand | [Projekt-Status.md](./Projekt-Status.md) | Sehr kurze Übersicht, welche größeren Funktionen/Systeme bereits umgesetzt sind und welche noch fehlen; technische Details in den Detaildokumenten; Pflicht-Aktualisierung durch die Coding-KI bei jeder Implementierungsänderung |
 

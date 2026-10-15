@@ -805,6 +805,35 @@ Daraus folgen unter anderem:
 
 # 20. Grundlegender Login-Ablauf
 
+## Implementierte Charakterliste (13. Oktober 2026)
+
+Der Login-Service liefert nach Sessionprüfung unter `/realms` zusätzlich je Realm
+`http_url` aus der Betreiberzuordnung `REALM_HTTP_URLS` (`id=http[s]://host:port`,
+kommagetrennt). Die Adresse muss für den Client erreichbar sein; WS- und HTTP-Ports
+werden nicht auseinander abgeleitet. Ohne Zuordnung bleibt `http_url` leer und der
+Client meldet die fehlende Abrufmöglichkeit.
+
+Der ausgewählte Realm liefert über seinen bestehenden `PORT_HTTP` ausschließlich
+`GET /characters?realm_id=<ausgewählter Realm>&session_id=<Login-Session>`:
+
+* Die angefragte Realm-ID muss seiner `REALM_ID` entsprechen.
+* Die vorhandene signierte `/session/validate`-Abfrage bestimmt allein den Account.
+  Eine clientgelieferte `account_id` wird nicht als Berechtigung verwendet.
+* Die eigene RealmDB wird nur lesend abgefragt:
+  `SELECT id, name FROM characters WHERE account_id = ? ORDER BY name, id`.
+* Antwort: `{"characters":[{"id":"<kanonische DB-ID>","name":"<DB-Name>"}]}`;
+  kein Treffer ergibt `[]`. Keine Inventar-, Konto- oder Fremdcharakterdaten.
+* Falscher Realm: 400; fehlende/ungültige Session: 401; fehlende/gestörte Auth oder
+  nicht lesbare Charakterdaten: 503. Keine Tokens oder DB-Rohfehler im Log/Fehlertext.
+
+Der lokale Testclient verwirft bei jeder Realm-Neuauswahl die Liste und Auswahl;
+eine Anfragegeneration verhindert auch bei schneller Neuauswahl oder Logout das
+Übernehmen alter Antworten. Er zeigt Namen, hält IDs intern und erlaubt Verbinden
+erst nach expliziter Auswahl. Handoff und HELLO laufen danach über die vorhandenen
+Pfade; die serverseitige Ownership- und Verfügbarkeitsprüfung beim Einstieg bleibt
+maßgeblich. Dieser Listenpfad implementiert keine Erstellung und keinen zusätzlichen
+Verfügbarkeitsstatus aus Abschnitt 6.
+
 Der spätere grundlegende Ablauf sieht damit folgendermaßen aus:
 
 ```text

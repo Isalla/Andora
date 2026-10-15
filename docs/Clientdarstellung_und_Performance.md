@@ -136,7 +136,7 @@ Eingangs-/Index: `references/README.md` (Kapitelstartseiten und Andora-Relevanz)
 
 | Buch / Referenz | Kapitel / Abschnitt | Andora-Ableitung | Status / Einstufung |
 |---|---|---|---|
-| `godotenginegamedevelopmentprojects` | Ch. 7 „Additional Topics" (PDF p. 254) | Pixel-Snap-Empfehlung für 2D-Pixel-Art; geeignet für die 2D-Grafik des Andora-Client (Godot). | Direkt relevant (Godot-3.0-Referenz; API-Unterschiede zu Godot 3.5 prüfen). |
+| `godotenginegamedevelopmentprojects` | Ch. 7 „Additional Topics" (PDF p. 254) | Pixel-Snap-Empfehlung für 2D-Pixel-Art; geeignet für die 2D-Grafik des Andora-Client (Godot). | Direkt relevant (Godot-3.0-Referenz; API-Unterschiede zu Godot 3.6 prüfen). |
 | `godotenginegamedevelopmentprojects` | Ch. 2 „Coin Dash" (PDF p. 36) | Sprite-/Animationsthemen und delta-basierte Bewegung; Muster für 2D-Sprite-Animation im Client. | Direkt relevant (Godot-3.0-Referenz; API prüfen). |
 | `godotenginegamedevelopmentprojects` | Ch. 3 „Escape the Maze" (PDF p. 74) | TileSet/TileMap-Nutzung; Muster für 2D-Tiling der Welt. | Direkt relevant (Godot-3.0-Referenz; API prüfen). |
 | `godotenginegamedevelopmentprojects` | Ch. 6 „3D Minigolf" (PDF p. 215) | 3D-Performance-Referenz, Normal-Mapping, 2D-fake-3D-Details; Kontext dafür, 3D sparsam einzusetzen bzw. 3D-Details in 2D zu faken. | Konzeptionelle Referenz (3D-Spar-Prinzip). |
@@ -167,7 +167,7 @@ Hinweis zu den Einstufungen: „Direkt relevant" = direkt an den Godot-Client an
 
 ## 8. Verweise
 
-* `architecture.md` – Client-Schutzmechanismen (`RENDER_CAP`, `auto perf_mode`, Chunk-Texture-Batching), Godot 3.5/GLES2, Raspberry Pi 4
+* `architecture.md` – Client-Schutzmechanismen (`RENDER_CAP`, `auto perf_mode`, Chunk-Texture-Batching), Godot 3.6/GLES2, Raspberry Pi 4
 * `project_overview.md` – §5 „Welt" und §23 „Technisches Ziel"
 * `Kampfsystem.md` – Fähigkeiten, Tempo, Effekte
 * `cutscene_system.md` – Szenen, Animationen, Effekte (Client für visuelle Präsentation)

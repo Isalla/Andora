@@ -36,7 +36,7 @@ Die verbindliche Definition steht in `Monetarisierung_und_Donations.md`.
 
 **Name:** Andora
 **Genre:** 2D Fantasy MMORPG
-**Client:** Godot Engine 3.5 (verbindlicher Gameplay-Referenzclient / Godot-First); langfristig mehrere offizielle Clients möglich (Browser, möglicher Unreal-PC-Client, weitere) – gemeinsame Realms, identische Inhalte, Unterschiede nur in Darstellung (Details: `Mehrere_Offizielle_Clients.md`)
+**Client:** Godot Engine 3.6 (verbindlicher Gameplay-Referenzclient / Godot-First); langfristig mehrere offizielle Clients möglich (Browser, möglicher Unreal-PC-Client, weitere) – gemeinsame Realms, identische Inhalte, Unterschiede nur in Darstellung (Details: `Mehrere_Offizielle_Clients.md`)
 **Server:** fünf getrennte Andora-Serverdienste (API/Auth in Go, Login, Realm in Rust, Coordinator, Voice)
 **Datenbank:** MariaDB (auth, realm_state_<realm>; keine zentrale world_data)
 **Zielplattformen:** linux-amd64 und linux-arm64 (Debian/Linux)

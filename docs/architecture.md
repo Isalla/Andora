@@ -1,7 +1,7 @@
 # Architektur: Andora (2D-MMORPG)
 
 ## Aufbau
-- **Client (aktuell)**: Godot 3.5, GLES2, Ziel = Raspberry Pi 4 (4GB/8GB); Godot-/Raspberry-Pi-Client ist der verbindliche Gameplay-Referenzclient (Godot-First); Darstellung = 2D/vorgerenderte Welt, 3D als Akzente & Produktionswerkzeug; bei Fähigkeiten, Zaubern und kurzlebigen Kampfeffekten 2D-/3D-Darstellung spielerseitig in den Grafikoptionen wählbar – rein clientseitig, ohne Gameplay-Auswirkung, Realm für Effekte autoritativ (Details in `Clientdarstellung_und_Performance.md`)
+- **Client (aktuell)**: Godot 3.6, GLES2, Ziel = Raspberry Pi 4 (4GB/8GB); Godot-/Raspberry-Pi-Client ist der verbindliche Gameplay-Referenzclient (Godot-First); Darstellung = 2D/vorgerenderte Welt, 3D als Akzente & Produktionswerkzeug; bei Fähigkeiten, Zaubern und kurzlebigen Kampfeffekten 2D-/3D-Darstellung spielerseitig in den Grafikoptionen wählbar – rein clientseitig, ohne Gameplay-Auswirkung, Realm für Effekte autoritativ (Details in `Clientdarstellung_und_Performance.md`)
 - **Weitere offizielle Clients**: Andora darf langfristig mehrere offizielle Clients besitzen (Browser, möglicher Unreal-Engine-PC-Client, weitere); alle Clients verbinden sich mit denselben normalen Realms (keine PC-/Pi-/Browser-/UE-Realms), bieten identische Inhalte und unterscheiden sich ausschließlich in Darstellung/Präsentation ohne Gameplay-Vorteil; Realm autoritativ; Entwicklungsrichtung Realm → Godot-Referenzclient → weitere Clients; Unreal-Client ist spätere Option, kein aktueller Implementierungsauftrag (verbindliche Entscheidung in `Mehrere_Offizielle_Clients.md`)
 - **Serverdienst (fünf getrennte Andora-Dienste; dezentral auf unterschiedlichen Servern betreibbar):**
   - `API/Auth` – Go-Service, einziger Dienst mit direktem Auth-DB-Zugriff

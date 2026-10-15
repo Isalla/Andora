@@ -1,10 +1,10 @@
 # Andora
 
-Andora ist ein Fantasy-MMORPG. Die dauerhafte Spielwelt wird überwiegend als 2D bzw. vorgerenderte Assets dargestellt (2D trägt die Welt; 3D setzt die Akzente – 3D dient dabei auch als Produktionswerkzeug; Präsentationsstil, z. B. isometrisch, bleibt für die Weltdarstellung offen). Der Client wird mit Godot 3.5 entwickelt und ist von Anfang an auf eine ressourcenschonende Darstellung ausgelegt. Primäre Referenzplattform ist der Raspberry Pi 4 (8 GB) mit einem Performance-Grundsatz von 60 FPS (Ziel) und 30 FPS (Untergrenze unter definierter hoher Last); Details in `docs/Clientdarstellung_und_Performance.md`. Die Serverdienste laufen auf separaten Debian-/Linux-Systemen (Zielarchitekturen mindestens `linux-amd64` und `linux-arm64`).
+Andora ist ein Fantasy-MMORPG. Die dauerhafte Spielwelt wird überwiegend als 2D bzw. vorgerenderte Assets dargestellt (2D trägt die Welt; 3D setzt die Akzente – 3D dient dabei auch als Produktionswerkzeug; Präsentationsstil, z. B. isometrisch, bleibt für die Weltdarstellung offen). Der Client wird mit Godot 3.6 entwickelt und ist von Anfang an auf eine ressourcenschonende Darstellung ausgelegt. Primäre Referenzplattform ist der Raspberry Pi 4 (8 GB) mit einem Performance-Grundsatz von 60 FPS (Ziel) und 30 FPS (Untergrenze unter definierter hoher Last); Details in `docs/Clientdarstellung_und_Performance.md`. Die Serverdienste laufen auf separaten Debian-/Linux-Systemen (Zielarchitekturen mindestens `linux-amd64` und `linux-arm64`).
 
 ## Technik
 
-* **Client:** Godot 3.5 (GLES2), optimiert für den Raspberry Pi; das Projekt liegt im Repository-Root (`project.godot`)
+* **Client:** Godot 3.6 (GLES2), optimiert für den Raspberry Pi; das Projekt liegt im Repository-Root (`project.godot`)
 * **Server:** fünf getrennte Andora-Dienste:
   - `API/Auth` – Go-Service, einziger Dienst mit direktem Auth-DB-Zugriff (`src/api`, implementiert)
   - `Login` – separater Login-Service in Go (`src/login`, implementiert)
