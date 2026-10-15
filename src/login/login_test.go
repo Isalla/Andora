@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -98,6 +100,7 @@ func testServer(t *testing.T, authURL string) *Server {
 	cfg := &Config{
 		Port: 0, AuthAPIURL: authURL, ServiceID: testSvcID, Secret: testSvcPw,
 		RealmWS:        map[int]string{1: "ws://realm1:3001"},
+		RealmHTTP:      map[int]string{1: "http://realm1:3002"},
 		AuthAPITimeout: 2 * time.Second, RateLimitBurst: 100, RateLimitPerMin: 1000,
 	}
 	return newServer(cfg)
@@ -169,6 +172,9 @@ func TestRealms(t *testing.T) {
 	if rec.Code != 200 || len(realms) != 2 {
 		t.Fatalf("realms: code=%d body=%v", rec.Code, out)
 	}
+	if realms[0].(map[string]any)["http_url"] != "http://realm1:3002" || realms[1].(map[string]any)["http_url"] != "" {
+		t.Fatalf("realm HTTP mapping missing or inferred: %v", realms)
+	}
 
 	req = httptest.NewRequest(http.MethodGet, "/realms?session_id=bad", nil)
 	req.RemoteAddr = "127.0.0.1:1"
@@ -213,6 +219,29 @@ func TestParseRealmWS(t *testing.T) {
 	for _, bad := range []string{"abc", "1=", "=x", "0=ws://a", "1=a,1=b", "x=y"} {
 		if _, err := parseRealmWS(bad); err == nil {
 			t.Fatalf("parse %q: want error", bad)
+		}
+	}
+}
+
+func TestRealmHTTPConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "login.env")
+	for _, raw := range []string{"", "1=http://127.0.0.1:3002", "1=https://realm.example/base/"} {
+		body := "AUTHAPI_URL=http://127.0.0.1:8080\nLOGIN_SERVICE_ID=test\nLOGIN_SERVICE_SECRET=test\nREALM_HTTP_URLS=" + raw + "\n"
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadConfig(path)
+		if err != nil || (raw != "" && cfg.RealmHTTP[1] == "") {
+			t.Fatalf("valid HTTP mapping rejected: %v", err)
+		}
+	}
+	for _, raw := range []string{"1=ws://realm:3001", "1=http://user:secret@realm", "1=http://realm?secret=value", "1=http://realm#fragment", "1=http://realm,1=http://other"} {
+		body := "AUTHAPI_URL=http://127.0.0.1:8080\nLOGIN_SERVICE_ID=test\nLOGIN_SERVICE_SECRET=test\nREALM_HTTP_URLS=" + raw + "\n"
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadConfig(path); err == nil {
+			t.Fatal("invalid HTTP mapping accepted")
 		}
 	}
 }

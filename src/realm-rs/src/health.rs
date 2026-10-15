@@ -1,4 +1,5 @@
-// health — HTTP-Status-Server (PORT_HTTP): GET /health, /status, /players.
+// health — HTTP-Server (PORT_HTTP): GET /health, /status, /players sowie
+// sessiongeprüfte eigene Charakterauswahl /characters (id + name).
 // Minimal handgerollt (kein Web-Framework nötig): eine TCP-Verbindung,
 // eine Request-Zeile, JSON-Antwort. Entspricht dem Übergangsstand
 // (health.ts), ergänzt um realm_id und Version.
@@ -10,6 +11,47 @@ use crate::config::Config;
 use crate::spool::PersistRuntime;
 use crate::spool::PersistStatus;
 use crate::world::Shared;
+
+#[derive(Clone)]
+struct CharacterListContext {
+    auth: crate::auth_api::AuthApi,
+    pool: sqlx::Pool<sqlx::MySql>,
+}
+
+// Account binding comes exclusively from Auth, never from a query parameter.
+async fn characters_for(
+    target: &str,
+    realm_id: u32,
+    context: Option<&CharacterListContext>,
+) -> (u16, serde_json::Value) {
+    let error = |status, reason| (status, serde_json::json!({"error": reason}));
+    let Ok(url) = reqwest::Url::parse(&format!("http://realm{target}")) else {
+        return error(400, "invalid request");
+    };
+    let params: Vec<_> = url.query_pairs().collect();
+    let sessions: Vec<_> = params.iter().filter(|(k, _)| k == "session_id").collect();
+    let realms: Vec<_> = params.iter().filter(|(k, _)| k == "realm_id").collect();
+    if realms.len() != 1 || realms[0].1.parse::<u32>().ok() != Some(realm_id) {
+        return error(400, "wrong realm");
+    }
+    if sessions.len() != 1 || sessions[0].1.is_empty() {
+        return error(401, "invalid session");
+    }
+    let Some(context) = context.filter(|c| c.auth.enabled()) else {
+        return error(503, "auth unavailable");
+    };
+    let session = match context.auth.validate_session(&sessions[0].1).await {
+        Ok(session) => session,
+        Err(_) => return error(503, "auth unavailable"),
+    };
+    let Some(account_id) = session.account_id.filter(|id| session.valid && *id > 0) else {
+        return error(401, "invalid session");
+    };
+    match crate::db::list_characters(&context.pool, account_id).await {
+        Ok(characters) => (200, serde_json::json!({"characters": characters})),
+        Err(_) => error(503, "characters unavailable"),
+    }
+}
 
 /// Die beiden **rein lesend** erhobenen Beobachtungswerte der `/status`
 ///-Antwort (`P-30` Quarantäne, `P-23` Persistenzstatus). Sie werden im
@@ -70,8 +112,11 @@ fn response(status: u16, body: &serde_json::Value) -> String {
     let text = serde_json::to_string(body).unwrap_or_else(|_| "{}".into());
     let reason = match status {
         200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     format!(
@@ -80,10 +125,11 @@ fn response(status: u16, body: &serde_json::Value) -> String {
     )
 }
 
-pub async fn serve(
+async fn serve_with_characters(
     cfg: Arc<Config>,
     shared: Shared,
     persist: Arc<PersistRuntime>,
+    characters: Option<CharacterListContext>,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.health_bind_host, cfg.health_port)?;
     let mut listeners = Vec::with_capacity(addrs.len());
@@ -91,10 +137,10 @@ pub async fn serve(
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("health listen {addr}: {e}"))?;
-        log::info!("health on {addr} (/health, /status, /players)");
+        log::info!("health on {addr} (/health, /status, /players, /characters)");
         listeners.push(listener);
     }
-    serve_bound(listeners, cfg, shared, persist).await
+    serve_bound(listeners, cfg, shared, persist, characters).await
 }
 
 /// Kern des Servers: je bereits gebundener Listener der vorhandene
@@ -105,6 +151,7 @@ async fn serve_bound(
     cfg: Arc<Config>,
     shared: Shared,
     persist: Arc<PersistRuntime>,
+    characters: Option<CharacterListContext>,
 ) -> Result<(), String> {
     let mut tasks: Vec<tokio::task::JoinHandle<Result<(), String>>> =
         Vec::with_capacity(listeners.len());
@@ -112,8 +159,9 @@ async fn serve_bound(
         let cfg = cfg.clone();
         let shared = shared.clone();
         let persist = persist.clone();
+        let characters = characters.clone();
         tasks.push(tokio::spawn(async move {
-            accept_loop(listener, cfg, shared, persist).await
+            accept_loop(listener, cfg, shared, persist, characters).await
         }));
     }
     let (res, _, rest) = futures_util::future::select_all(tasks).await;
@@ -138,9 +186,18 @@ pub fn spawn_monitor(
     cfg: Arc<Config>,
     shared: Shared,
     persist: Arc<PersistRuntime>,
+    auth: crate::auth_api::AuthApi,
+    pool: sqlx::Pool<sqlx::MySql>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = serve(cfg, shared, persist).await {
+        if let Err(e) = serve_with_characters(
+            cfg,
+            shared,
+            persist,
+            Some(CharacterListContext { auth, pool }),
+        )
+        .await
+        {
             log::error!("health: {e}");
         }
     })
@@ -158,7 +215,7 @@ pub(crate) fn spawn_monitor_on(
     persist: Arc<PersistRuntime>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = serve_bound(vec![listener], cfg, shared, persist).await {
+        if let Err(e) = serve_bound(vec![listener], cfg, shared, persist, None).await {
             log::error!("health: {e}");
         }
     })
@@ -169,6 +226,7 @@ async fn accept_loop(
     cfg: Arc<Config>,
     shared: Shared,
     persist: Arc<PersistRuntime>,
+    characters: Option<CharacterListContext>,
 ) -> Result<(), String> {
     loop {
         let (mut sock, _) = listener
@@ -178,9 +236,28 @@ async fn accept_loop(
         let cfg = cfg.clone();
         let shared = shared.clone();
         let persist = persist.clone();
+        let characters = characters.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 4096];
-            let Ok(n) = sock.read(&mut buf).await else {
+            // TCP can split the request line. Bound size and time; never log it.
+            let read = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut n = 0;
+                loop {
+                    let count = sock.read(&mut buf[n..]).await.ok()?;
+                    if count == 0 {
+                        return None;
+                    }
+                    n += count;
+                    if buf[..n].windows(2).any(|w| w == b"\r\n") {
+                        return Some(n);
+                    }
+                    if n == buf.len() {
+                        return None;
+                    }
+                }
+            })
+            .await;
+            let Ok(Some(n)) = read else {
                 return;
             };
             let head = String::from_utf8_lossy(&buf[..n]);
@@ -196,6 +273,11 @@ async fn accept_loop(
                         .as_bytes(),
                     )
                     .await;
+                return;
+            }
+            if path.split('?').next() == Some("/characters") {
+                let (status, body) = characters_for(path, cfg.realm_id, characters.as_ref()).await;
+                let _ = sock.write_all(response(status, &body).as_bytes()).await;
                 return;
             }
             let world = shared.lock().await;
@@ -290,6 +372,75 @@ mod tests {
 
     fn cfg() -> Config {
         test_config()
+    }
+
+    #[tokio::test]
+    async fn character_list_rejects_wrong_realm_missing_session_and_disabled_auth() {
+        assert_eq!(
+            characters_for("/characters?realm_id=2&session_id=x", 1, None)
+                .await
+                .0,
+            400
+        );
+        assert_eq!(
+            characters_for("/characters?realm_id=1", 1, None).await.0,
+            401
+        );
+        assert_eq!(
+            characters_for("/characters?realm_id=1&session_id=x&session_id=y", 1, None)
+                .await
+                .0,
+            401
+        );
+        assert_eq!(
+            characters_for("/characters?realm_id=1&session_id=x&account_id=7", 1, None)
+                .await
+                .0,
+            503
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_session_is_rejected_before_any_database_access() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let fake_auth = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let body = r#"{"valid":false,"account_id":7}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let context = CharacterListContext {
+            auth: crate::auth_api::AuthApi::new(&crate::config::AuthApiConfig {
+                url: format!("http://{addr}"),
+                service_id: "test".into(),
+                secret: "test".into(),
+            })
+            .unwrap(),
+            // Lazy unreachable pool: an attempted DB access would fail, not return 401.
+            pool: sqlx::mysql::MySqlPoolOptions::new()
+                .connect_lazy("mysql://test:test@127.0.0.1:1/test")
+                .unwrap(),
+        };
+        let (code, body) = characters_for(
+            "/characters?realm_id=1&session_id=invalid&account_id=7",
+            1,
+            Some(&context),
+        )
+        .await;
+        assert_eq!(code, 401);
+        assert_eq!(body, serde_json::json!({"error": "invalid session"}));
+        fake_auth.await.unwrap();
     }
 
     fn observed(

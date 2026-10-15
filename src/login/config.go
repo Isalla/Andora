@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	urlpkg "net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -35,6 +36,8 @@ type Config struct {
 	// entry get an empty ws_url in handoff answers. IPv6 hosts are
 	// bracketed at load time.
 	RealmWS map[int]string
+	// RealmHTTP is the explicit client-facing HTTP base for character selection.
+	RealmHTTP map[int]string
 	// AuthAPITimeout bounds a single Auth-API call.
 	AuthAPITimeout  time.Duration
 	RateLimitBurst  int
@@ -161,6 +164,21 @@ func loadConfig(path string) (*Config, error) {
 		}
 		realmWS[id] = n
 	}
+	realmHTTP, err := parseRealmWS(get("REALM_HTTP_URLS"))
+	if err != nil {
+		return nil, fmt.Errorf("REALM_HTTP_URLS: %w", err)
+	}
+	for id, raw := range realmHTTP {
+		n, err := normalizeURLHost(strings.TrimRight(raw, "/"))
+		if err != nil {
+			return nil, fmt.Errorf("REALM_HTTP_URLS realm %d: %w", id, err)
+		}
+		u, err := urlpkg.Parse(n)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("REALM_HTTP_URLS realm %d: invalid HTTP base URL", id)
+		}
+		realmHTTP[id] = n
+	}
 	return &Config{
 		Port:            port,
 		BindHost:        bindHost,
@@ -168,6 +186,7 @@ func loadConfig(path string) (*Config, error) {
 		ServiceID:       sid,
 		Secret:          secret,
 		RealmWS:         realmWS,
+		RealmHTTP:       realmHTTP,
 		TrustedProxies:  trusted,
 		AuthAPITimeout:  time.Duration(intEnv(env, "AUTHAPI_TIMEOUT_MS", 5000)) * time.Millisecond,
 		RateLimitBurst:  intEnv(env, "RATE_LIMIT_BURST", 10),

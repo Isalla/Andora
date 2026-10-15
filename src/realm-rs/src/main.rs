@@ -136,8 +136,9 @@ async fn async_main() -> Result<(), String> {
     )?);
 
     // `P-23`: Monitoring **vor** der Recovery starten. Der Health-Server
-    // benötigt ausschließlich Config, Shared und PersistRuntime — beides ist
-    // hier vollständig vorhanden — und ist rein lesend. Damit sind Monitoring
+    // beobachtet ausschließlich Config, Shared und PersistRuntime; der zusätzlich
+    // sessiongeprüfte Charakterlistenpfad verwendet Auth und den RealmDB-Pool.
+    // Alle Abhängigkeiten sind hier vorhanden. Damit sind Monitoring
     // und Administration während RECOVERING erreichbar und der Zustand ist
     // über `/status` (`persistence_status` = `recovering`) beobachtbar
     // (docs/Player_Persistenz.md §27/§28).
@@ -147,7 +148,13 @@ async fn async_main() -> Result<(), String> {
     // (handlers.rs). Handle, Fehlerbehandlung und das Shutdown-`abort()`
     // bleiben unverändert; Ports, Bind-Adressen und Auth werden nicht
     // verändert.
-    let health_task = health::spawn_monitor(cfg.clone(), shared.clone(), persist.clone());
+    let health_task = health::spawn_monitor(
+        cfg.clone(),
+        shared.clone(),
+        persist.clone(),
+        auth.clone(),
+        pool.clone(),
+    );
 
     // Startup-Recovery (§34) NACH den Migrationen und VOR `net::serve`:
     // im Spool liegende Batches (Crash/Wartung) werden auf die DB angewendet.

@@ -335,6 +335,31 @@ pub async fn load_character(
     }))
 }
 
+/// Minimal selection view, read only, in this realm's own database.
+#[derive(Debug, serde::Serialize)]
+pub struct CharacterSelection {
+    pub id: String,
+    pub name: String,
+}
+
+pub async fn list_characters(
+    pool: &Pool<MySql>,
+    account_id: u32,
+) -> Result<Vec<CharacterSelection>, sqlx::Error> {
+    let rows: Vec<(i32, String)> =
+        sqlx::query_as("SELECT id, name FROM characters WHERE account_id = ? ORDER BY name, id")
+            .bind(account_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name)| CharacterSelection {
+            id: id.to_string(),
+            name,
+        })
+        .collect())
+}
+
 /// Level des Waffen-/Kampfskills (docs/Kampfsystem.md §4). Grundsätzlich
 /// verfügbare Skills starten bei 1; kein Eintrag = 1.
 pub async fn load_weapon_skill(pool: &Pool<MySql>, char_id: &str, skill_id: &str) -> u32 {

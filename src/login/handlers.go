@@ -121,7 +121,15 @@ func (s *Server) handleRealms(w http.ResponseWriter, r *http.Request) {
 		authUnavailable(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"realms": realms})
+	type clientRealm struct {
+		Realm
+		HTTPURL string `json:"http_url"`
+	}
+	out := make([]clientRealm, 0, len(realms))
+	for _, realm := range realms {
+		out = append(out, clientRealm{Realm: realm, HTTPURL: s.cfg.RealmHTTP[realm.ID]})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"realms": out})
 }
 
 // --- POST /handoff ---
