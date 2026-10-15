@@ -13,9 +13,9 @@ func _ready():
 	load_table(current)
 
 func _detect_system_lang():
-	var loc = (OS.get_system_language() if OS.has_method("get_system_language") else "de")
-	# Godot 3: OS.get_locale_x11() liefert z.B. "de_DE.UTF-8"
-	var x = OS.get_locale_x11()
+	# Godot 3.6: weder get_system_language noch get_locale_x11 existieren;
+	# OS.get_locale() liefert z.B. "de_DE".
+	var x = OS.get_locale() if OS.has_method("get_locale") else "de"
 	var code = x.get_slice("_", 0).get_slice(".", 0)
 	if code in ["en", "de", "fr", "es", "it"]:
 		if has_table(code):
@@ -34,11 +34,12 @@ func has_table(code):
 
 func load_table(code):
 	var f = File.new()
-	if f.file_exists("res://i18n/" + code + ".json"):
+	if f.open("res://i18n/" + code + ".json", File.READ) == OK:
 		var txt = f.get_as_text()
-		var j = JSON.new()
-		if j.parse(txt) == OK:
-			tables[code] = j.data
+		f.close()
+		var r = JSON.parse(txt)
+		if r.error == OK and typeof(r.result) == TYPE_DICTIONARY:
+			tables[code] = r.result
 
 func set_language(code):
 	if has_table(code):

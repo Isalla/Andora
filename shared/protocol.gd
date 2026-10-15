@@ -8,7 +8,8 @@ const C2S = {
 	"HEARTBEAT": 10, "PARENTAL": 11, "ABILITY": 12,
 	"GROUP_INVITE": 13, "GROUP_INVITE_REACT": 14, "GROUP_SUGGEST": 15,
 	"GROUP_SUGGEST_DECIDE": 16, "GROUP_LEAVE": 17, "GROUP_KICK": 18,
-	"GROUP_TRANSFER": 19, "SPEND_ATTRIBUTE": 20, "PLAYER_TRADE": 21
+	"GROUP_TRANSFER": 19, "SPEND_ATTRIBUTE": 20, "PLAYER_TRADE": 21,
+	"INVENTORY": 22
 }
 # NPC_TALK (6) Händler-Payload (docs/Handelssystem.md §13):
 # {npc_id, action, item_id?, item_uuid?, history_id?, count?} mit
@@ -21,25 +22,48 @@ const S2C = {
 	"PARENTAL_STATUS": 13, "PARENTAL_BLOCKED": 14, "PARENTAL_RESULT": 15,
 	"ABILITY": 16, "EFFECT": 17,
 	"GROUP_INFO": 18, "GROUP_INVITE_S2C": 19, "GROUP_TOAST": 20,
-	"ATTRIBUTE_RESULT": 21, "PLAYER_TRADE": 22
+	"ATTRIBUTE_RESULT": 21, "PLAYER_TRADE": 22, "INVENTORY": 23,
+	"VITALS": 24, "INVENTORY_RESULT": 25
 }
 # NPC_TEXT (8) Händlerantwort (docs/Handelssystem.md §13):
 # Erfolg {ok: true, action, npc_id, merchant_name, idia, history[]} plus je
 # Aktion offers/item_id/item_uuid/count/total_price; Ablehnung
 # {ok: false, action?, reason} mit stabilem reason.
 # PLAYER_TRADE (21) Spielerhandel (docs/Handelssystem.md §15):
+# VITALS (24) eigene Spielerwerte {mana, max_mana, level}, nur Eigentümer:
+# Initialwerte in WELCOME (you), danach Push nur bei tatsächlicher Änderung
+# (Fähigkeitsverbrauch, Regeneration, Stufenaufstieg). Kein HP (STATE),
+# keine Fremdwerte.
 # {action, dialog_id?, target_id?, items?, idia?, version?} mit
 # action = request/accept/decline/offer/confirm/cancel. items ist eine Liste
 # aus {item_uuid, count} (nur eigene Instanz-UUIDs), idia >= 0, version nur
 # bei confirm (muss der aktuellen Angebotsversion entsprechen).
 # PLAYER_TRADE (22) Antwort: {ok, action?, event?, reason?, dialog_id?,
 # dialog?, commit_id?, idia?}; seq wird nur zurückgespiegelt.
+# INVENTORY (23) Eigentümer-Sicht (Server-Push): {ok, idia, base_slots,
+# slots: [{slot, item}], bags: [{bag_id, name, slot_count, slots}],
+# equipment: {Slot: {...}}, loot_id?, reason?}. item je Instanz
+# {item_uuid, item_id, name, count, ...}. Push beim Einstieg (nach WELCOME)
+# und nach bestätigten Mutationen (Pickup, NPC-Kauf/-Verkauf/-Buyback,
+# Spielerhandel-Commit, Inventaraktionen). Pickup antwortet immer (Erfolg
+# oder stabile Ablehnung: unknown_loot/not_claimed/out_of_range/
+# trade_commit_pending).
+# INVENTORY (22) C2S-Absicht (docs/inventory_system.md §19):
+# {action, item_uuid?, target_area?, target_slot?, target_bag?, count?,
+# slot?} mit action = move/equip/unequip/use. Nur Absichten (Instanz-UUID,
+# Zielslot, ggf. Menge); alle Regeln prüft der Server.
+# INVENTORY_RESULT (25) Antwort: {ok, action?, reason?, item_uuid?, slot?,
+# count?} mit stabilem reason; Erfolg pusht danach INVENTORY (seq 0).
 
 static func encode(seq: int, msg_type: int, data) -> String:
-	return JSON.stringify({"seq": seq, "type": msg_type, "data": data})
+	return to_json({"seq": seq, "type": msg_type, "data": data})
 
 static func decode(text: String) -> Dictionary:
-	var j = JSON.new()
-	if j.parse(text) != OK:
+	# Godot 3.6: JSON ist nicht instanziierbar (kein JSON.new());
+	# statisches JSON.parse liefert ein Ergebnisobjekt mit .error/.result.
+	var r = JSON.parse(text)
+	if r.error != OK:
 		return {}
-	return j.data
+	if typeof(r.result) == TYPE_DICTIONARY:
+		return r.result
+	return {}
