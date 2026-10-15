@@ -11,6 +11,9 @@
 --    Spool-/Recovery-Reihenfolge fest (idempotente Wiederanmeldung,
 --    Superseded-/Quarantäne-Logik).
 
-ALTER TABLE characters CHANGE COLUMN gold idia INT NOT NULL DEFAULT 0;
+-- Idempotent: `IF EXISTS` macht die Umbenennung wiederholbar (Runner bricht
+-- sonst ab, wenn `gold` bereits zu `idia` wurde). Auf frischer DB benennt es
+-- `gold` datenbewahrend nach `idia` um; wo `idia` schon existiert, No-op.
+ALTER TABLE characters CHANGE COLUMN IF EXISTS gold idia INT NOT NULL DEFAULT 0;
 
 ALTER TABLE characters ADD COLUMN IF NOT EXISTS persist_revision BIGINT NOT NULL DEFAULT 0;

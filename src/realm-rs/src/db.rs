@@ -1177,9 +1177,11 @@ use crate::combat::ability::AbilityDefRow;
 
 /// Lädt alle Ability-Definitionen (Content-Schicht, Migration 010).
 pub async fn load_ability_definitions(pool: &Pool<MySql>) -> Result<Vec<AbilityDefRow>, String> {
+    // `range` ist ein reserviertes Wort (MariaDB 10.x) und wird quotiert;
+    // der Spaltenname bleibt `range` (keine Schemaänderung).
     let rows = sqlx::query(
         "SELECT id, name, exec_type, semantic_category, mana_cost, cooldown_ms, \
-               cooldown_persistent, cast_time_ms, range, aoe_type, aoe_radius, \
+               cooldown_persistent, cast_time_ms, `range`, aoe_type, aoe_radius, \
                host_effect, effect_kind, effect_value, duration_ms, tick_ms, effect_group \
          FROM ability_definitions",
     )
@@ -1312,8 +1314,10 @@ pub async fn load_item_definitions(
             String,
         ),
     >(
+        // `range` ist ein reserviertes Wort (MariaDB 10.x) und wird quotiert;
+        // der Spaltenname bleibt `range` (keine Schemaänderung).
         "SELECT id, name, description, category, rarity, item_level, base_quality, \
-             max_stack, weight, base_damage, duration_ms, range, weapon_type, armor_value, \
+             max_stack, weight, base_damage, duration_ms, `range`, weapon_type, armor_value, \
              min_level, binding_rule FROM item_definitions",
     )
     .persistent(false)

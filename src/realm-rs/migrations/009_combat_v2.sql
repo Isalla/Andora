@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS monster_definitions (
   name            VARCHAR(120) NOT NULL,
   -- Grundregel: attackable und aggressive sind getrennte Eigenschaften (§18).
   -- kind steuert Kategorie + Default-Respawn (§21).
-  kind            VARCHAR(16)  NOT NULL DEFAULT 'normal',  -- normal|named|boss
+  -- kind: normal|named|boss
+  kind            VARCHAR(16)  NOT NULL DEFAULT 'normal',
   attackable      TINYINT(1)   NOT NULL DEFAULT 1,
   aggressive      TINYINT(1)   NOT NULL DEFAULT 1,
   aggro_range     DOUBLE       NOT NULL DEFAULT 8.0,

@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS item_definitions (
   -- automatischen Grundangriffen (ms), Reichweite.
   base_damage DOUBLE NULL,
   duration_ms INT NULL,
-  range DOUBLE NULL,
+  `range` DOUBLE NULL,
   weapon_type VARCHAR(32) NULL,
   -- Rüstung (nur für Kategorie armor): Basis-Rüstungswert.
   armor_value DOUBLE NULL,

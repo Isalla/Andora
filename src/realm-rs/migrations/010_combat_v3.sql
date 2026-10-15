@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS ability_definitions (
     -- 1 = bleibt über Tod/Logout erhalten
   -- Cast-Parameter (Ability-System.md §1, §3)
   cast_time_ms      INT          NOT NULL DEFAULT 0,
-  range             DOUBLE       NOT NULL DEFAULT 10.0,
+  `range`           DOUBLE       NOT NULL DEFAULT 10.0,
   -- AoE-Typ (Ability-System.md §4)
   aoe_type          VARCHAR(16)  NOT NULL DEFAULT 'single',
     -- single | target_radius | caster_radius | ground
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS character_abilities (
 -- (docs/Kampfsystem.md §§4–7, Exp1-Ausschlussliste).
 -- ──────────────────────────────────────────────────────────────────────
 INSERT INTO ability_definitions
-  (id, name, exec_type, semantic_category, mana_cost, cooldown_ms, cooldown_persistent, cast_time_ms, range, aoe_type, aoe_radius, host_effect, effect_kind, effect_value, duration_ms, tick_ms, effect_group)
+  (id, name, exec_type, semantic_category, mana_cost, cooldown_ms, cooldown_persistent, cast_time_ms, `range`, aoe_type, aoe_radius, host_effect, effect_kind, effect_value, duration_ms, tick_ms, effect_group)
 VALUES
   -- Direkt-Schaden (Instant,_single_target)
   ('fire_bolt',       'Feuerblitz',        'instant', 'single_target_damage',
