@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "body": {
+    "preset": "human",
+    "height": 1.0,
+    "bulk": 1.0,
+    "skin": [0.85, 0.7, 0.55],
+    "cloth": [0.3, 0.35, 0.5],
+    "trim": [0.7, 0.6, 0.3]
+  },
+  "equipment": {
+    "weapon": "none",
+    "shield": false,
+    "helmet": "none",
+    "quiver": false
+  },
+  "anim": {
+    "clip": "walk",
+    "frames": 8
+  }
+}
