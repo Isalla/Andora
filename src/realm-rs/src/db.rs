@@ -1286,6 +1286,24 @@ pub async fn save_character_class(
 // Basiswert (Definition) + Instanz-Modifikation. Die konkrete Nutzung
 // (Inventory/Crafting/Loot) ist NICHT Teil von Item System V1.
 
+/// Maps the two additive consumable-effect columns (Migration 024) into the
+/// `ItemDefinition` effect fields. NULL / 0 / negative → no effect (`None`);
+/// only a strictly positive value becomes `Some`. No positive default is
+/// invented. The uniqueness/positivity rule itself stays in `item.rs`
+/// (`validate`/`consumable_effect`). Pure and testable without any DB run.
+pub(crate) fn consumable_effect_from_db(
+    heal: Option<i32>,
+    mana: Option<i32>,
+) -> (Option<i64>, Option<i64>) {
+    let positive = |v: Option<i32>| -> Option<i64> {
+        match v {
+            Some(x) if x > 0 => Some(i64::from(x)),
+            _ => None,
+        }
+    };
+    (positive(heal), positive(mana))
+}
+
 /// Lädt alle statischen Item-Definitionen inkl. Klassen/Attributen/
 /// Resistenzen (Content-Schicht der Realm-Inhaltsversion).
 pub async fn load_item_definitions(
@@ -1394,7 +1412,24 @@ pub async fn load_item_definitions(
         .bind(&id)
         .fetch_all(pool)
         .await
-        .map_err(|e| format!("Item-Resistenzen laden ({id}): {e}"))?;
+         .map_err(|e| format!("Item-Resistenzen laden ({id}): {e}"))?;
+
+        // Additive Konsumable-Effect (Migration 024): separate small query so
+        // the main 16-column tuple stays within sqlx's FromRow limit. Both
+        // columns are NULLable → decoded as Option<i32>; NULL stays "no
+        // effect" (no positive default is invented).
+        let effect: Option<(Option<i32>, Option<i32>)> = sqlx::query_as(
+            "SELECT heal_amount, mana_amount FROM item_definitions WHERE id = ?",
+        )
+            .bind(&id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Item-Consumable-Effect laden ({id}): {e}"))?;
+        let (heal_raw, mana_raw) = match effect {
+            Some((h, m)) => (h, m),
+            None => (None, None),
+        };
+        let (heal_amount, mana_amount) = consumable_effect_from_db(heal_raw, mana_raw);
 
         let def = ItemDefinition {
             item_id: id,
@@ -1416,6 +1451,8 @@ pub async fn load_item_definitions(
             binding_rule,
             attribute_bonuses: attrs.into_iter().collect(),
             resistances: resists.into_iter().collect(),
+            heal_amount,
+            mana_amount,
         };
         if def.validate().is_err() {
             // Der Validierungsfehler wird NICHT ausgegeben: `ItemError`
@@ -2279,6 +2316,38 @@ pub(crate) async fn write_quest_state(
     Ok(())
 }
 
+/// Sofortpersistenz der Annahme auf dem bestehenden Quest-Persistenzpfad.
+/// Der eindeutige Schlüssel (char_id, quest_id) schützt auch identische
+/// Wiederholungen nach COMMIT-Unklarheit. Kein Überschreiben von Fortschritt.
+/// Das sperrende Lesen wartet auf einen eventuell noch laufenden ersten
+/// INSERT/COMMIT und liefert den tatsächlich gespeicherten Zustand.
+pub(crate) async fn write_quest_acceptance(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    quest_id: &str,
+    data: &str,
+) -> Result<QuestRow, String> {
+    sqlx::query(
+        "INSERT INTO quests (char_id, quest_id, state, data) VALUES (?, ?, 1, ?) \
+         ON DUPLICATE KEY UPDATE quest_id = VALUES(quest_id)",
+    )
+    .bind(char_id)
+    .bind(quest_id)
+    .bind(data)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Questannahme schreiben: {e}"))?;
+    let (state, data) = sqlx::query_as::<_, (i8, Option<String>)>(
+        "SELECT state, data FROM quests WHERE char_id = ? AND quest_id = ? FOR UPDATE",
+    )
+    .bind(char_id)
+    .bind(quest_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| format!("Questannahme bestätigen: {e}"))?;
+    Ok(QuestRow { quest_id: quest_id.to_string(), state, data })
+}
+
 /// Schreibt einen Spieler-Questzustand als Upsert in die Tabelle `quests`
 /// (Spalten state + data, §27.12). Der Aufrufer stellt sicher, dass nur
 /// persistierbare Zustände (ACTIVE/COMPLETED/FAILED) geschrieben werden.
@@ -2332,6 +2401,64 @@ pub(crate) async fn guarded_complete_quest(
     .await
     .map_err(|e| format!("Questabschluss-Guard (char {char_id}, quest {quest_id}): {e}"))?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Locked read of the quest row inside the SAME transaction as the completion
+/// (docs/Quest-Turn-In-Persistenz.md): the ACTIVE→COMPLETED guard and the
+/// revision check must see the identical witnessed row, never a pool-level
+/// pre-read. Returns the current persisted state (0/1/2) and data.
+pub(crate) async fn lock_quest_state(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    char_id: &str,
+    quest_id: &str,
+) -> Result<Option<(i8, Option<String>)>, String> {
+    sqlx::query_as::<_, (i8, Option<String>)>(
+        "SELECT state, data FROM quests WHERE char_id = ? AND quest_id = ? FOR UPDATE",
+    )
+    .bind(char_id)
+    .bind(quest_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("Questabschluss-Zeile sperrend lesen: {e}"))
+}
+
+/// Additive receipt table `character_quest_commits` (Migration 025): the
+/// canonical completion order is the durable identity/content proof, written in
+/// the SAME transaction as the full snapshot and the COMPLETED row. A locked
+/// read inside the transaction decides repetition by CONTENT, never by revision
+/// equality or a COMPLETED row alone.
+pub(crate) async fn load_quest_commit_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    commit_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
+        "SELECT artifact_json FROM character_quest_commits WHERE commit_id = ? FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("quest proof read: {e}"))
+}
+
+pub(crate) async fn write_quest_commit_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    artifact: &crate::persist::QuestCompletionArtifact,
+) -> Result<(), String> {
+    // INSERT only, never overwrite an existing identity with a different order.
+    // The UNIQUE (char_id, quest_id) key makes the pair unique for this
+    // non-repeatable V1 scope; a divergent second completion for the same pair
+    // fails here and the whole transaction is rolled back (conflict).
+    sqlx::query(
+        "INSERT INTO character_quest_commits (commit_id, char_id, quest_id, artifact_json) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&artifact.commit_id)
+    .bind(&artifact.character_id)
+    .bind(&artifact.quest_id)
+    .bind(artifact.commit_payload()?)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("quest proof write: {e}"))?;
+    Ok(())
 }
 
 // ── Tests: DB-Fehlerklassifizierung (Audit 4.5, B3) ─────────────────────
@@ -2581,5 +2708,61 @@ mod db_error_log_tests {
         // abgelehnt — die Zeile entsteht dann gar nicht erst.
         assert!(crate::loot::LootKind::from_db("item").is_some());
         assert!(crate::loot::LootKind::from_db("bogus").is_none());
+    }
+
+    // ── Additive Konsumable-Effect loader (Migration 024, NULL-safe) ──────
+    // Pure conversion test — NO SQL/DB decode is claimed here (no DB run).
+
+    #[test]
+    fn consumable_effect_both_null_means_no_effect() {
+        // A plain/old definition (both columns NULL) → no effect, no default.
+        assert_eq!(consumable_effect_from_db(None, None), (None, None));
+    }
+
+    #[test]
+    fn consumable_effect_heal_value_with_null_mana() {
+        assert_eq!(consumable_effect_from_db(Some(30), None), (Some(30), None));
+    }
+
+    #[test]
+    fn consumable_effect_null_heal_with_mana_value() {
+        assert_eq!(consumable_effect_from_db(None, Some(25)), (None, Some(25)));
+    }
+
+    #[test]
+    fn consumable_effect_invalid_values_are_not_invented() {
+        // 0 / negative are NOT turned into a positive effect (→ None).
+        assert_eq!(consumable_effect_from_db(Some(0), None), (None, None));
+        assert_eq!(consumable_effect_from_db(Some(-5), None), (None, None));
+        assert_eq!(consumable_effect_from_db(None, Some(0)), (None, None));
+        assert_eq!(consumable_effect_from_db(None, Some(-7)), (None, None));
+        // A positive value is carried through unchanged (no clamping).
+        assert_eq!(consumable_effect_from_db(Some(1), None), (Some(1), None));
+    }
+
+    #[test]
+    fn consumable_effect_loader_maps_into_definition_and_validates() {
+        // The loader result feeds ItemDefinition; the positivity/uniqueness
+        // rule stays enforced in item.rs (validate + consumable_effect).
+        let (h, m) = consumable_effect_from_db(Some(30), None);
+        let mut def = crate::item::ItemDefinition::new(
+            "hp_potion",
+            "Heiltrank",
+            crate::item::ItemCategory::Potion,
+        );
+        def.heal_amount = h;
+        def.mana_amount = m;
+        assert!(def.validate().is_ok());
+        assert_eq!(def.consumable_effect(), Some((crate::item::ConsumableKind::Heal, 30)));
+        // Both-NULL → not a consumable.
+        let (h, m) = consumable_effect_from_db(None, None);
+        let mut plain = crate::item::ItemDefinition::new(
+            "hp_potion",
+            "Heiltrank",
+            crate::item::ItemCategory::Potion,
+        );
+        plain.heal_amount = h;
+        plain.mana_amount = m;
+        assert_eq!(plain.consumable_effect(), None);
     }
 }

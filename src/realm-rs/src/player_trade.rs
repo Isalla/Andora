@@ -1457,6 +1457,9 @@ mod tests {
     fn collect_def(target: &str) -> QuestDefinition {
         QuestDefinition {
             id: "q_collect".into(),
+            giver: None,
+            turn_in: None,
+            rewards: crate::quest::RewardBundle { exp: 0, idia: 0 },
             title_key: "t".into(),
             description_key: "d".into(),
             objectives: vec![QuestObjective {

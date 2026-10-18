@@ -350,6 +350,7 @@ pub(crate) fn test_config() -> Config {
             database: String::new(),
         },
         migrations_dir: String::new(),
+        content_root: String::new(),
         allow_destructive: false,
         combat: crate::config::combat_config(&Default::default()),
         npc: crate::config::npc_config(&Default::default()),

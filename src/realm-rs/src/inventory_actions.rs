@@ -17,16 +17,32 @@
 //   vorhandenen Operationen erhalten; Split/Merge folgen deren Regeln
 //   (Vollverschub erhält die UUID, Split vergibt eine neue Teil-UUID).
 //   Kein `retired_uuid`-Fall entsteht hier (kein Zusammenlegen, kein Tausch).
-// - Verbrauchseffekte werden ausschließlich serverseitig angewendet — und es
-//   existiert kein verbindlicher Verbrauchsvertrag und kein Effektpfad
-//   (`Attribute_und_Regeneration.md` §9: Consumable-Logik folgt separat).
-//   `use` wird deshalb kontrolliert mit `no_consumable_contract` abgelehnt
-//   (benannte Grenze, keine erfundene Wirkung, keine Mengenänderung).
+// - Verbrauchseffekte werden ausschließlich serverseitig angewendet. DEVIATION
+//   from the previous open rule (`NoConsumableContract`): a verbindlicher
+//   Consumables-Vertrag now EXISTS for Heil-/Manatränke (docs/Attribute_und_
+//   Regeneration.md §9). `use` is allowed ONLY for explicitly defined
+//   consumables (a Potion/Food/Drink definition carrying exactly one positive
+//   `heal_amount`/`mana_amount`); the magnitude comes from the SERVER-side
+//   ItemDefinition, never the Client. A missing/invalid effect is rejected
+//   WITHOUT mutation (`not_consumable`). Other consumable types (Food/Drink
+//   without effect, buffs, quests, balance systems) remain out of scope.
 // - Kein Wegwerfen/Zerstören, keine neue Loot- oder Handelslogik, kein
 //   Tausch belegter Ziele, kein Zusammenlegen am Ziel (belegt bleibt belegt).
 
 use crate::inventory::{EquipSlot, InventoryError, MoveTarget};
 use crate::world::World;
+use crate::combat::cooldowns;
+use crate::item::ConsumableKind;
+use crate::item_lifecycle::{DetachReason, ItemLifecycle, reconcile_after_take};
+use std::time::SystemTime;
+
+/// Shared Abklingtime (ms) of Heil-/Manatränke (docs/Attribute_und_
+/// Regeneration.md §9): BOTH drink types share EIN cooldown key, so using
+/// one blocks the other for this window. Persisted via the existing P-18
+/// Cooldown-Mechanism (Snapshot-/Loginpfad) → Reconnect/Takeover do NOT
+/// reset it.
+pub const CONSUMABLE_COOLDOWN_KEY: &str = "consumable";
+pub const CONSUMABLE_COOLDOWN_MS: u64 = 30_000;
 
 /// Inventaraktion (C2S 22 `action`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,10 +113,16 @@ pub enum InventoryReject {
     NotEquippable,
     DefinitionUnavailable,
     InventoryFull,
-    /// Kein verbindlicher Verbrauchsvertrag und kein Effektpfad vorhanden
-    /// (`Attribute_und_Regeneration.md` §9 offen) — benannte Grenze statt
-    /// erfundener Wirkung.
-    NoConsumableContract,
+    /// Not an explicitly defined Heil-/Manakonsumable (wrong category or
+    /// missing/invalid effect) — rejected without mutation.
+    NotConsumable,
+    /// Tod: a dead character (hp <= 0) may not use a drink.
+    CharacterDead,
+    /// The corresponding resource (HP/Mana) is already full: no consumption,
+    /// no cooldown start.
+    ResourceFull,
+    /// The shared Heil-/Manatrank cooldown is still running.
+    OnCooldown,
 }
 
 impl InventoryReject {
@@ -122,7 +144,10 @@ impl InventoryReject {
             InventoryReject::NotEquippable => "not_equippable",
             InventoryReject::DefinitionUnavailable => "definition_unavailable",
             InventoryReject::InventoryFull => "inventory_full",
-            InventoryReject::NoConsumableContract => "no_consumable_contract",
+            InventoryReject::NotConsumable => "not_consumable",
+            InventoryReject::CharacterDead => "character_dead",
+            InventoryReject::ResourceFull => "resource_full",
+            InventoryReject::OnCooldown => "on_cooldown",
         }
     }
 }
@@ -256,6 +281,7 @@ pub fn attempt_inventory_action(
     world: &mut World,
     actor: &str,
     req: &InventoryRequest,
+    wall_now: SystemTime,
 ) -> Result<InventoryOutcome, InventoryReject> {
     if !world.economic_mutation_allowed(actor) {
         return Err(InventoryReject::CommitPending);
@@ -339,7 +365,106 @@ pub fn attempt_inventory_action(
                 count: equipped.count,
             })
         }
-        InventoryAction::Use => Err(InventoryReject::NoConsumableContract),
+        InventoryAction::Use => {
+            // Tod: a dead character may not drink (server-authoritative; a
+            // manipulated client cannot revive via a potion).
+            if player.hp <= 0 {
+                return Err(InventoryReject::CharacterDead);
+            }
+            // Own, uniquely placed instance in the normal inventory
+            // (owned_instance excludes equipment/buffer and rejects
+            // ambiguous/fremd UUIDs → NotInInventory).
+            let inst = player
+                .inventory
+                .owned_instance(&req.item_uuid)
+                .ok_or(InventoryReject::NotInInventory)?;
+            let item_uuid = inst.item_uuid.clone();
+            let item_id = inst.item_id.clone();
+            if inst.count < 1 {
+                return Err(InventoryReject::InvalidQuantity);
+            }
+            // Server-side definition; missing → no mutation.
+            let def = world
+                .item_definitions
+                .get(&item_id)
+                .ok_or(InventoryReject::DefinitionUnavailable)?;
+            // Only an explicitly defined Heil-/Manakonsumable (exactly one
+            // positive effect). Missing/invalid effect → reject, no mutation.
+            let (kind, amount) = def.consumable_effect().ok_or(InventoryReject::NotConsumable)?;
+            // Full resource → no consumption, no cooldown.
+            let (cur, max) = match kind {
+                ConsumableKind::Heal => (player.hp, player.max_hp),
+                ConsumableKind::Mana => (player.mana, player.max_mana),
+            };
+            if cur >= max {
+                return Err(InventoryReject::ResourceFull);
+            }
+            // Shared Heil-/Manatrank cooldown still running → reject.
+            if !cooldowns::is_ready(&player.cooldowns, CONSUMABLE_COOLDOWN_KEY, wall_now) {
+                return Err(InventoryReject::OnCooldown);
+            }
+            // ── All checks passed: apply together (same lock, no awaits) ──
+            // 1) Resource gain: checked arithmetic, capped at max (no overflow).
+            let new64 = (cur as i64)
+                .checked_add(amount)
+                .unwrap_or(max as i64)
+                .min(max as i64);
+            let new_val = i32::try_from(new64).unwrap_or(max);
+            match kind {
+                ConsumableKind::Heal => {
+                    player.hp = new_val;
+                    player.mark_dirty(crate::persist::PersistComponent::Resources);
+                }
+                ConsumableKind::Mana => {
+                    player.mana = new_val;
+                    player.mark_dirty(crate::persist::PersistComponent::Resources);
+                }
+            }
+            // 2) Consume exactly one unit via the existing stack operation.
+            //    count > 1: rest keeps the UUID (no detach). count == 1:
+            //    slot cleared, the UUID leaves the placements.
+            let _taken = match player
+                .inventory
+                .try_take_instance(&item_uuid, 1)
+            {
+                Ok(t) => t,
+                Err(_) => return Err(InventoryReject::NotEnoughItems),
+            };
+            // 3) Lifecycle: detach ONLY the original UUID when it is no longer
+            //    placed (last consumed instance, revision-bound via the
+            //    Snapshot-/Drain-Pfad). No direct DB deletion here.
+            let uuids = player.inventory.persistent_uuids();
+            let mut lc = world.item_lifecycle.get(actor).cloned().unwrap_or(ItemLifecycle::new());
+            reconcile_after_take(
+                &mut lc,
+                &uuids,
+                &item_uuid,
+                DetachReason::Consumed,
+                &world.runtime_id,
+                crate::item_lifecycle::now_ms(),
+            );
+            if !lc.is_empty() {
+                world.item_lifecycle.insert(actor.to_string(), lc);
+            }
+            // 4) Shared cooldown start; only a real change is dirty-relevant.
+            let cd_changed = cooldowns::start(
+                &mut player.cooldowns,
+                CONSUMABLE_COOLDOWN_KEY.into(),
+                CONSUMABLE_COOLDOWN_MS,
+                wall_now,
+            );
+            if cd_changed {
+                player.mark_dirty(crate::persist::PersistComponent::Progression);
+            }
+            // 5) Inventory changed (stack consumed) → dirty.
+            player.mark_dirty(crate::persist::PersistComponent::Inventory);
+            Ok(InventoryOutcome {
+                action: req.action,
+                item_uuid,
+                slot: None,
+                count: 1,
+            })
+        }
     }
 }
 
@@ -375,6 +500,18 @@ mod tests {
     use crate::item::{BindingState, ItemCategory, ItemInstance, ItemModifiers};
     use std::collections::{BTreeMap, HashSet};
     use std::time::Instant;
+    use std::time::SystemTime;
+
+    // Deterministic Wall-Clock for the Cooldown-Tests (no real-time dependency).
+    fn wall() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12 * 3600)
+    }
+
+    // Thin wrapper: every existing Inventar-Test uses Actor "p1" and the
+    // fixed Wall-Clock; the real 4-Arg signature stays untouched.
+    fn act(world: &mut World, req: &InventoryRequest) -> Result<InventoryOutcome, InventoryReject> {
+        attempt_inventory_action(world, "p1", req, wall())
+    }
 
     fn potion_def() -> crate::item::ItemDefinition {
         let mut d =
@@ -539,7 +676,7 @@ mod tests {
             count: None,
             slot: None,
         };
-        let out = attempt_inventory_action(&mut world, "p1", &req).expect("Vollverschub");
+        let out = act(&mut world, &req).expect("Vollverschub");
         assert_eq!(out.item_uuid, "u-move");
         assert_eq!(out.count, 5);
         let inv = snapshot(&world);
@@ -566,7 +703,7 @@ mod tests {
             count: Some(4),
             slot: None,
         };
-        let out = attempt_inventory_action(&mut world, "p1", &req).expect("Split");
+        let out = act(&mut world, &req).expect("Split");
         assert_eq!(out.count, 4);
         assert_ne!(out.item_uuid, "u-split", "Teil erhält neue UUID");
         let inv = snapshot(&world);
@@ -599,7 +736,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &occupied),
+            act(&mut world, &occupied),
             Err(InventoryReject::SlotOccupied)
         );
         assert_eq!(snapshot(&world), before, "keine Teilmutation");
@@ -612,7 +749,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &invalid),
+            act(&mut world, &invalid),
             Err(InventoryReject::InvalidTarget)
         );
         assert_eq!(snapshot(&world), before, "keine Teilmutation");
@@ -625,7 +762,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &same),
+            act(&mut world, &same),
             Err(InventoryReject::InvalidTarget)
         );
         assert_eq!(snapshot(&world), before, "keine Teilmutation");
@@ -655,7 +792,7 @@ mod tests {
             count: None,
             slot: None,
         };
-        attempt_inventory_action(&mut world, "p1", &req).expect("Basis → Tasche");
+        act(&mut world, &req).expect("Basis → Tasche");
         let inv = snapshot(&world);
         assert!(inv.base_slots[0].is_none());
         assert_eq!(inv.bags[0].slots[1].as_ref().unwrap().item_uuid, "u-bag");
@@ -667,7 +804,7 @@ mod tests {
             count: None,
             slot: None,
         };
-        attempt_inventory_action(&mut world, "p1", &back).expect("Tasche → Basis");
+        act(&mut world, &back).expect("Tasche → Basis");
         let inv = snapshot(&world);
         assert!(inv.bags[0].slots[1].is_none());
         assert_eq!(inv.base_slots[1].as_ref().unwrap().item_uuid, "u-bag");
@@ -688,7 +825,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &foreign),
+            act(&mut world, &foreign),
             Err(InventoryReject::NotInInventory)
         );
         // Fehlende UUID (leer).
@@ -700,7 +837,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &missing),
+            act(&mut world, &missing),
             Err(InventoryReject::NotInInventory)
         );
         // Inzwischen veränderte UUID: doppelt geführt (Korruptions-/Race-Zustand).
@@ -716,7 +853,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &ambiguous),
+            act(&mut world, &ambiguous),
             Err(InventoryReject::UuidConflict)
         );
         // Ausrüstungs-UUID ist keine Verschiebequelle.
@@ -735,7 +872,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &equipped_src),
+            act(&mut world, &equipped_src),
             Err(InventoryReject::NotInInventory)
         );
         assert_eq!(snapshot(&world).base_slots[0].as_ref().unwrap().count, 2);
@@ -757,7 +894,7 @@ mod tests {
                 slot: None,
             };
             assert_eq!(
-                attempt_inventory_action(&mut world, "p1", &req),
+                act(&mut world, &req),
                 Err(InventoryReject::InvalidQuantity)
             );
         }
@@ -769,7 +906,7 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &too_much),
+            act(&mut world, &too_much),
             Err(InventoryReject::NotEnoughItems)
         );
         assert_eq!(snapshot(&world), before, "keine Teilmutation");
@@ -792,7 +929,7 @@ mod tests {
             slot: Some(EquipSlot::MainHand),
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &bad_cat),
+            act(&mut world, &bad_cat),
             Err(InventoryReject::NotEquippable)
         );
         // Anlegen nach vorhandenen Regeln (Level/Klasse aus Serverstand).
@@ -803,7 +940,7 @@ mod tests {
             count: None,
             slot: Some(EquipSlot::MainHand),
         };
-        let out = attempt_inventory_action(&mut world, "p1", &equip).expect("equip");
+        let out = act(&mut world, &equip).expect("equip");
         assert_eq!(out.slot, Some(EquipSlot::MainHand));
         assert!(snapshot(&world).base_slots[0].is_none());
         assert_eq!(
@@ -823,7 +960,7 @@ mod tests {
             slot: Some(EquipSlot::MainHand),
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &occupied),
+            act(&mut world, &occupied),
             Err(InventoryReject::SlotOccupied)
         );
         // Ablegen nach vorhandenen Regeln (automatischer Zielplatz).
@@ -834,11 +971,11 @@ mod tests {
             count: None,
             slot: Some(EquipSlot::MainHand),
         };
-        attempt_inventory_action(&mut world, "p1", &unequip).expect("unequip");
+        act(&mut world, &unequip).expect("unequip");
         assert!(!snapshot(&world).equipped.contains_key(&EquipSlot::MainHand));
         // Leerer Slot.
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &unequip),
+            act(&mut world, &unequip),
             Err(InventoryReject::SlotEmpty)
         );
     }
@@ -859,7 +996,7 @@ mod tests {
             slot: Some(EquipSlot::MainHand),
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &req),
+            act(&mut world, &req),
             Err(InventoryReject::BrokenItem)
         );
         assert_eq!(snapshot(&world), before, "keine Teilmutation");
@@ -885,7 +1022,7 @@ mod tests {
             slot: Some(EquipSlot::MainHand),
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &req),
+            act(&mut world, &req),
             Err(InventoryReject::InventoryFull)
         );
         assert_eq!(
@@ -900,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn use_has_no_consumable_contract_and_changes_nothing() {
+    fn use_without_defined_effect_rejects_without_mutation() {
         let mut world = world_with_player(2);
         {
             let p = world.players.get_mut("p1").unwrap();
@@ -919,9 +1056,9 @@ mod tests {
             slot: None,
         };
         assert_eq!(
-            attempt_inventory_action(&mut world, "p1", &req),
-            Err(InventoryReject::NoConsumableContract),
-            "kein Effektpfad vorhanden (Attribute_und_Regeneration §9 offen)"
+            act(&mut world, &req),
+            Err(InventoryReject::NotConsumable),
+            "plain Potion ohne explicit effect → not a defined consumable"
         );
         assert_eq!(snapshot(&world), before_inv, "keine Mengenänderung");
         let p = &world.players["p1"];
@@ -978,7 +1115,7 @@ mod tests {
         ];
         for req in &cases {
             assert_eq!(
-                attempt_inventory_action(&mut world, "p1", req),
+                act(&mut world, req),
                 Err(InventoryReject::CommitPending),
                 "Barriere gilt für {:?}",
                 req.action
@@ -1034,12 +1171,295 @@ mod tests {
             InventoryReject::CommitPending.reason(),
             "trade_commit_pending"
         );
-        assert_eq!(
-            InventoryReject::NoConsumableContract.reason(),
-            "no_consumable_contract"
-        );
+        assert_eq!(InventoryReject::NotConsumable.reason(), "not_consumable");
         assert_eq!(InventoryReject::SlotOccupied.reason(), "slot_occupied");
         assert_eq!(InventoryReject::InvalidTarget.reason(), "invalid_target");
         assert_eq!(InventoryReject::UuidConflict.reason(), "uuid_conflict");
+        assert_eq!(InventoryReject::NotConsumable.reason(), "not_consumable");
+        assert_eq!(InventoryReject::CharacterDead.reason(), "character_dead");
+        assert_eq!(InventoryReject::ResourceFull.reason(), "resource_full");
+        assert_eq!(InventoryReject::OnCooldown.reason(), "on_cooldown");
+    }
+
+    // ── Heil-/Manakonsumables (docs/Attribute_und_Regeneration.md §9) ─────
+
+    fn hp_potion_def() -> crate::item::ItemDefinition {
+        let mut d =
+            crate::item::ItemDefinition::new("hp_potion", "Heiltrank", ItemCategory::Potion);
+        d.max_stack = 20;
+        d.heal_amount = Some(30);
+        d
+    }
+
+    fn mp_potion_def() -> crate::item::ItemDefinition {
+        let mut d =
+            crate::item::ItemDefinition::new("mp_potion", "Manatrank", ItemCategory::Potion);
+        d.max_stack = 20;
+        d.mana_amount = Some(25);
+        d
+    }
+
+    // World with a defined Heil- and Manatrank plus a stack of each.
+    fn use_world() -> World {
+        let mut world = World::new();
+        world.item_definitions.insert("hp_potion".into(), hp_potion_def());
+        world.item_definitions.insert("mp_potion".into(), mp_potion_def());
+        world.players.insert("p1".into(), player_with(4));
+        let p = world.players.get_mut("p1").unwrap();
+        p.hp = 50;
+        p.max_hp = 100;
+        p.mana = 10;
+        p.max_mana = 50;
+        p.inventory.base_slots[0] = Some(inst("u-hp", "hp_potion", 5));
+        p.inventory.base_slots[1] = Some(inst("u-mp", "mp_potion", 3));
+        world
+    }
+
+    fn use_req(uuid: &str) -> InventoryRequest {
+        InventoryRequest {
+            action: InventoryAction::Use,
+            item_uuid: uuid.into(),
+            target: None,
+            count: None,
+            slot: None,
+        }
+    }
+
+    #[test]
+    fn use_heal_restores_hp_consumes_one_and_starts_cooldown() {
+        let mut world = use_world();
+        let out = act(&mut world, &use_req("u-hp")).expect("Heiltrank");
+        assert_eq!(out.count, 1);
+        let p = &world.players["p1"];
+        assert_eq!(p.hp, 80, "50 + 30 = 80 (server-side magnitude)");
+        assert_eq!(p.mana, 10, "Mana untouched by a heal drink");
+        let inv = snapshot(&world);
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().count, 4, "genau eine Einheit");
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().item_uuid, "u-hp", "Rest keeps UUID");
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Resources));
+        assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Inventory));
+        assert!(
+            p.cooldowns.contains_key(CONSUMABLE_COOLDOWN_KEY),
+            "shared cooldown started"
+        );
+        assert!(
+            p.dirty.is_dirty(crate::persist::PersistComponent::Progression),
+            "cooldown change is dirty-relevant (P-18)"
+        );
+    }
+
+    #[test]
+    fn use_heal_caps_at_max_and_mana_at_max() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().hp = 90;
+        let out = act(&mut world, &use_req("u-hp")).expect("Heiltrank near max");
+        assert_eq!(out.count, 1);
+        assert_eq!(world.players["p1"].hp, 100, "capped at max_hp, no overshoot");
+        // Mana drink near max caps too (fresh world: cooldown is shared).
+        let mut world2 = use_world();
+        world2.players.get_mut("p1").unwrap().mana = 45;
+        let _ = act(&mut world2, &use_req("u-mp")).expect("Manatrank");
+        assert_eq!(world2.players["p1"].mana, 50, "capped at max_mana");
+    }
+
+    #[test]
+    fn use_mana_restores_mana() {
+        let mut world = use_world();
+        let out = act(&mut world, &use_req("u-mp")).expect("Manatrank");
+        assert_eq!(out.count, 1);
+        assert_eq!(world.players["p1"].mana, 35, "10 + 25");
+        assert_eq!(world.players["p1"].hp, 50, "HP untouched");
+    }
+
+    #[test]
+    fn use_full_resource_no_consumption_no_cooldown() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().hp = 100;
+        let before = snapshot(&world);
+        let r = act(&mut world, &use_req("u-hp"));
+        assert_eq!(r, Err(InventoryReject::ResourceFull));
+        assert_eq!(snapshot(&world), before, "keine Verbrauch");
+        assert!(
+            !world.players["p1"].cooldowns.contains_key(CONSUMABLE_COOLDOWN_KEY),
+            "kein Cooldown started"
+        );
+        assert!(
+            !world.players["p1"].dirty.is_dirty(crate::persist::PersistComponent::Inventory),
+            "kein Dirty"
+        );
+    }
+
+    #[test]
+    fn use_dead_character_rejected_without_mutation() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().hp = 0;
+        let before = snapshot(&world);
+        let r = act(&mut world, &use_req("u-hp"));
+        assert_eq!(r, Err(InventoryReject::CharacterDead));
+        assert_eq!(snapshot(&world), before, "keine Mutation");
+        assert_eq!(world.players["p1"].hp, 0, "stays dead (no revive)");
+    }
+
+    #[test]
+    fn use_shared_cooldown_blocks_both_drinks_until_exact_expiry() {
+        let mut world = use_world();
+        // Heal at wall() → cooldown ready_at = wall + 30s.
+        assert!(act(&mut world, &use_req("u-hp")).is_ok());
+        let ready_at = wall() + std::time::Duration::from_millis(CONSUMABLE_COOLDOWN_MS);
+        // A Mana drink just before the boundary is blocked (shared key).
+        let just_before = ready_at - std::time::Duration::from_millis(1);
+        assert_eq!(
+            attempt_inventory_action(&mut world, "p1", &use_req("u-mp"), just_before),
+            Err(InventoryReject::OnCooldown),
+            "shared cooldown across both drink types"
+        );
+        // Exactly at the boundary the cooldown is ready (>= semantics).
+        let out = attempt_inventory_action(&mut world, "p1", &use_req("u-mp"), ready_at);
+        assert!(out.is_ok(), "exact expiry frees the shared cooldown");
+        assert_eq!(world.players["p1"].mana, 35, "Mana drink applied at boundary");
+    }
+
+    #[test]
+    fn use_last_unit_detaches_uuid_via_lifecycle() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().inventory.base_slots[0] =
+            Some(inst("u-hp", "hp_potion", 1));
+        let out = act(&mut world, &use_req("u-hp")).expect("last unit");
+        assert_eq!(out.count, 1);
+        let inv = snapshot(&world);
+        assert!(inv.base_slots[0].is_none(), "Stack resolved (no direct DB delete here)");
+        let lc = world.item_lifecycle.get("p1").expect("lifecycle recorded");
+        assert!(lc.contains("u-hp"), "last consumed instance detached (revision-bound)");
+        let view = lc.snapshot_view(world.players["p1"].persist_revision + 1, &world.runtime_id);
+        assert_eq!(
+            view.pending.iter().find(|d| d.item_uuid == "u-hp").map(|d| d.reason),
+            Some(DetachReason::Consumed),
+            "reason is Consumed"
+        );
+    }
+
+    #[test]
+    fn use_rest_stack_keeps_uuid_and_no_detach() {
+        let mut world = use_world();
+        let _ = act(&mut world, &use_req("u-hp")).expect("partial consume");
+        let inv = snapshot(&world);
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().item_uuid, "u-hp");
+        assert_eq!(inv.base_slots[0].as_ref().unwrap().count, 4);
+        assert!(
+            world.item_lifecycle.get("p1").map(|l| l.contains("u-hp")).unwrap_or(false) == false,
+            "rest stack is NOT detached"
+        );
+    }
+
+    #[test]
+    fn use_foreign_missing_ambiguous_uuid_rejected() {
+        let mut world = use_world();
+        // Fremde UUID.
+        assert_eq!(
+            act(&mut world, &use_req("u-fremd")),
+            Err(InventoryReject::NotInInventory)
+        );
+        // Leer UUID.
+        assert_eq!(
+            act(&mut world, &use_req("   ")),
+            Err(InventoryReject::NotInInventory)
+        );
+        // Ambiguous: same UUID twice (a corrupted/race placement).
+        world.players.get_mut("p1").unwrap().inventory.base_slots[2] =
+            Some(inst("u-hp", "hp_potion", 2));
+        let before = snapshot(&world);
+        assert_eq!(
+            act(&mut world, &use_req("u-hp")),
+            Err(InventoryReject::NotInInventory),
+            "owned_instance rejects non-unique placement"
+        );
+        assert_eq!(snapshot(&world), before, "keine Mutation");
+    }
+
+    #[test]
+    fn use_equipped_uuid_is_not_a_use_source() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().inventory
+            .equipped
+            .insert(EquipSlot::Drink, inst("u-eq", "hp_potion", 1));
+        let r = act(&mut world, &use_req("u-eq"));
+        assert_eq!(r, Err(InventoryReject::NotInInventory), "equipment is no use source");
+    }
+
+    #[test]
+    fn use_undefined_item_definition_rejected() {
+        let mut world = use_world();
+        world.players.get_mut("p1").unwrap().inventory.base_slots[2] =
+            Some(inst("u-x", "mystery", 1));
+        let r = act(&mut world, &use_req("u-x"));
+        assert_eq!(r, Err(InventoryReject::DefinitionUnavailable));
+        assert_eq!(world.players["p1"].inventory.base_slots[2].as_ref().unwrap().count, 1);
+    }
+
+    #[test]
+    fn use_overflow_guard_caps_without_panic() {
+        let mut world = use_world();
+        let mut def = hp_potion_def();
+        def.heal_amount = Some(i64::MAX);
+        world.item_definitions.insert("hp_potion".into(), def);
+        world.players.get_mut("p1").unwrap().hp = 90;
+        let out = act(&mut world, &use_req("u-hp")).expect("huge heal");
+        assert_eq!(out.count, 1);
+        assert_eq!(world.players["p1"].hp, 100, "checked add + cap, no overflow");
+    }
+
+    #[test]
+    fn use_pending_trade_barrier_blocks_use() {
+        let mut world = use_world();
+        block_economy(&mut world, "p1");
+        let before = snapshot(&world);
+        assert_eq!(
+            act(&mut world, &use_req("u-hp")),
+            Err(InventoryReject::CommitPending)
+        );
+        assert_eq!(snapshot(&world), before, "keine Teilmutation unter Sperre");
+    }
+
+    #[test]
+    fn use_cooldown_survives_snapshot_and_takeover() {
+        // The shared cooldown is persisted via the existing P-18 Snapshot
+        // (absolute ready_at) and preserved across a Takeover (RAM-authoritative).
+        let mut world = use_world();
+        assert!(act(&mut world, &use_req("u-hp")).is_ok());
+        let p = world.players.get("p1").unwrap();
+        let ready_at = p.cooldowns.get(CONSUMABLE_COOLDOWN_KEY).map(|t| *t).expect("cooldown present");
+        // Snapshot carries it as epoch-ms.
+        let snap_ms = crate::combat::cooldowns::to_epoch_ms(ready_at);
+        assert!(snap_ms > 0, "persisted as an absolute expiry point");
+        // Reconnect/Takeover keeps the RAM player (and its cooldowns) — the
+        // existing commit_login path preserves cooldowns (see world.rs).
+        let candidate = player_with(4);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut w2 = World::new();
+        w2.players.insert("p1".into(), world.players.remove("p1").unwrap());
+        w2.by_conn.insert(1, "p1".into());
+        let cf = crate::world::ConnectionFields {
+            tx,
+            session_id: "s2".into(),
+            lang: "de".into(),
+        };
+        let outcome = crate::world::commit_login(&mut w2, 2, candidate, cf);
+        assert_eq!(outcome, Ok(crate::world::CommitOutcome::Takeover { old_conn_id: 1 }));
+        let after = w2.players.get("p1").unwrap();
+        assert_eq!(
+            after.cooldowns.get(CONSUMABLE_COOLDOWN_KEY).map(|t| *t),
+            Some(ready_at),
+            "Takeover does NOT reset the shared cooldown"
+        );
+        // Restored-from-snapshot value still blocks before the expiry.
+        let _restored = crate::combat::cooldowns::from_epoch_ms(snap_ms);
+        assert!(
+            !crate::combat::cooldowns::is_ready(
+                &after.cooldowns,
+                CONSUMABLE_COOLDOWN_KEY,
+                ready_at - std::time::Duration::from_millis(1),
+            ),
+            "still on cooldown one ms before expiry after restore"
+        );
     }
 }

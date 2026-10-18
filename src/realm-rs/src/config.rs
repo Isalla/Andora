@@ -503,6 +503,11 @@ pub struct Config {
     pub realm_db: DbConfig,
     /// Migrationsverzeichnis-Override (sonst <bindir>/migrations).
     pub migrations_dir: String,
+    /// Content-Root for the Lua-Content-Schicht (docs/Lua-Scripting-System.md
+    /// §8 Script-Wurzel; Quest-Definitions from `<root>/quests/*.lua`,
+    /// docs/Quest-System.md §2/§27.9). Leer = no Content-Scripts loaded
+    /// (leer Registry, Kill-Credit fail-closed).
+    pub content_root: String,
     /// Freigabe destruktiver Migrationen (nur nach Backup im Update-Ablauf).
     pub allow_destructive: bool,
     /// Vorläufige Combat-V1-Balancingwerte.
@@ -640,6 +645,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         },
         realm_db,
         migrations_dir: g("REALM_STATE_MIGRATIONS_DIR"),
+        content_root: g("CONTENT_ROOT"),
         allow_destructive: g("ALLOW_DESTRUCTIVE_MIGRATIONS") == "1",
         combat: combat_config(&env),
         npc: npc_config(&env),

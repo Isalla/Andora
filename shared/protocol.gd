@@ -14,6 +14,8 @@ const C2S = {
 # NPC_TALK (6) Händler-Payload (docs/Handelssystem.md §13):
 # {npc_id, action, item_id?, item_uuid?, history_id?, count?} mit
 # action = open/buy/sell/buyback. Buyback nur per history_id (volle Einträge).
+# Zusätzlich Questangebot/-annahme (Quest-System.md §27.27):
+# {npc_id, action: quest_offers/quest_accept, quest_id?}; nur Kennungen/Absicht.
 
 const S2C = {
 	"WELCOME": 1, "SPAWN": 2, "DESPAWN": 3, "STATE": 4, "DAMAGE": 5,
@@ -29,6 +31,13 @@ const S2C = {
 # Erfolg {ok: true, action, npc_id, merchant_name, idia, history[]} plus je
 # Aktion offers/item_id/item_uuid/count/total_price; Ablehnung
 # {ok: false, action?, reason} mit stabilem reason.
+# Questantwort: {ok, action, npc_id, quests?, quest_id?, state?, reason?}.
+# quests: [{quest_id, title_key, description_key, state: AVAILABLE, can_accept}].
+# ACTIVE erst nach bestätigter Persistenz und RAM-Übernahme; seq Korrelation.
+# Abgabe-Vorbereitung: NPC_TALK {npc_id, action: quest_turn_ins/quest_turn_in,
+# quest_id?}. quest_turn_ins liefert ACTIVE-Killquests mit objectives_met,
+# rewards{exp,idia}, can_turn_in:false und reason:quest_turn_in_unavailable.
+# Bis zur Persistenzvertragsfreigabe kein mutierender Abschluss/COMPLETED.
 # PLAYER_TRADE (21) Spielerhandel (docs/Handelssystem.md §15):
 # VITALS (24) eigene Spielerwerte {mana, max_mana, level}, nur Eigentümer:
 # Initialwerte in WELCOME (you), danach Push nur bei tatsächlicher Änderung

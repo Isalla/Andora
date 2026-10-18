@@ -78,6 +78,11 @@ pub struct ContextOverride {
 pub struct Npc {
     pub id: String,
     pub spawn_id: i64,
+    /// Stable Content-/Definitionskennung (`monster_definitions.id`, Migration
+    /// 009). Quest-`kill`-Ziels (`QuestObjective.target`) match THIS ID —
+    /// never the Zufälligen Spawn-ID-Key (`id`) and never the Anzeigename
+    /// (`name`) (docs/Quest-System.md §27.8/§27.16, Kill-Zurechnung).
+    pub content_id: String,
     pub name: String,
     pub kind: String, // normal | named | boss
     pub attackable: bool,
@@ -244,6 +249,7 @@ pub fn build_npcs(
         let mut n = Npc {
             id: npc_id(spawn.id),
             spawn_id: spawn.id,
+            content_id: def.id.clone(),
             name: def.name.clone(),
             kind: def.kind.clone(),
             attackable,
@@ -782,6 +788,7 @@ mod tests {
         Npc {
             id: id.into(),
             spawn_id: 0,
+            content_id: id.into(),
             name: id.into(),
             kind: kind.into(),
             attackable: true,
@@ -855,6 +862,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
             wall(),
@@ -940,6 +948,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(10),
             wall(),
@@ -961,6 +970,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1 + Duration::from_millis(20),
             wall(),

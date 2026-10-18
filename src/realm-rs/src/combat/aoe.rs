@@ -244,6 +244,7 @@ mod tests {
         let n = Npc {
             id: "npc_1".into(),
             spawn_id: 1,
+            content_id: "npc_1".into(),
             name: "Wolf".into(),
             kind: "normal".into(),
             attackable: true,

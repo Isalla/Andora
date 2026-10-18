@@ -145,6 +145,10 @@ pub enum DetachReason {
     Merged,
     /// Verworfenes Puffer-Item am Session-Ende (docs/inventory_system.md §11).
     Discarded,
+    /// Letzt verbrauchte Einheit einer Heil-/Manatrank (docs/Attribute_und_
+    /// Regeneration.md §9): die letzte Instanz des Stack is abgekoppelt; the
+    /// rest stack (count > 1) keeps its UUID and is NOT detached.
+    Consumed,
 }
 
 impl DetachReason {
@@ -154,6 +158,7 @@ impl DetachReason {
             DetachReason::Sold => "sold",
             DetachReason::Merged => "merged",
             DetachReason::Discarded => "discarded",
+            DetachReason::Consumed => "consumed",
         }
     }
 
@@ -164,6 +169,7 @@ impl DetachReason {
             "sold" => Some(DetachReason::Sold),
             "merged" => Some(DetachReason::Merged),
             "discarded" => Some(DetachReason::Discarded),
+            "consumed" => Some(DetachReason::Consumed),
             _ => None,
         }
     }
@@ -880,6 +886,7 @@ mod tests {
             (DetachReason::Sold, "sold"),
             (DetachReason::Merged, "merged"),
             (DetachReason::Discarded, "discarded"),
+            (DetachReason::Consumed, "consumed"),
         ] {
             assert_eq!(reason.as_db(), db);
             assert_eq!(DetachReason::from_db(db), Some(reason));

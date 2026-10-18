@@ -408,6 +408,7 @@ pub(crate) type DisconnectLogout =
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve(
     cfg: Arc<Config>,
     db: Pool<MySql>,
@@ -416,6 +417,7 @@ pub async fn serve(
     parental: SharedParental,
     groups: SharedGroups,
     persist: Arc<crate::spool::PersistRuntime>,
+    quest: Arc<crate::quest::QuestService>,
 ) -> Result<(), String> {
     let addrs = crate::config::bind_addrs(&cfg.ws_bind_host, cfg.ws_port)?;
     // Ability-Registry aus Content-Schicht laden (Migration 010).
@@ -442,7 +444,10 @@ pub async fn serve(
         parental,
         registry,
         groups,
-        quest: crate::quest::QuestService::new(),
+        quest,
+        #[cfg(test)]
+        quest_accept_store: None,
+        quest_io_timeout: crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
         persist,
     });
     let mut listeners = Vec::with_capacity(addrs.len());
@@ -745,6 +750,31 @@ async fn finish_owner(
         .await
     {
         log::error!("disconnect normal publication deferred: {e}");
+    }
+    // FIX: an outstanding quest acceptance for this character is resolved over
+    // the SAME idempotent persist-path BEFORE the logout gate, so Logout never
+    // races a possibly-committed ACTIVE and never releases the Gate unsafely.
+    // Under permanent DB failure it stays pending (registry) and Logout still
+    // proceeds: the `quests`-Table remains the authority on the next Login.
+    if let Err(e) = crate::npc_quest::retry_quest_acceptances(
+        crate::npc_quest::build_accept_store(ctx),
+        &ctx.persist,
+        ctx.shared.clone(),
+        Some(&[player_id.to_string()]),
+        ctx.quest_io_timeout,
+    )
+    .await {
+        log::error!("disconnect quest acceptance deferred: {e}");
+    }
+    // An open quest-completion order for this character is resolved over the
+    // SAME idempotent spool/drain path BEFORE the logout gate, so Logout never
+    // races a possibly-committed COMPLETED and never releases the Gate unsafely.
+    if let Err(e) = crate::npc_quest::retry_quest_completions_for(
+        ctx,
+        Some(&[player_id.to_string()]),
+    )
+    .await {
+        log::error!("disconnect quest completion deferred: {e}");
     }
     // Gate zuerst: verhindert, dass ein Login-/Takeover für dieselbe player_id
     // zwischen Eigentümerprüfung und `logout_at`-Write abschließt.
@@ -1260,6 +1290,7 @@ mod tests {
                 database: "realm_state_test".into(),
             },
             migrations_dir: String::new(),
+            content_root: String::new(),
             allow_destructive: false,
             combat: crate::config::combat_config(&env),
             npc: crate::config::npc_config(&env),
@@ -1289,7 +1320,9 @@ mod tests {
             parental,
             registry: crate::combat::ability::AbilityRegistry::new(),
             groups,
-            quest: crate::quest::QuestService::new(),
+            quest: Arc::new(crate::quest::QuestService::new()),
+            quest_accept_store: None,
+            quest_io_timeout: std::time::Duration::from_millis(20),
             persist,
         });
         TestCtx {
@@ -3850,6 +3883,7 @@ mod tests {
             &ctx.cfg.loot,
             &ctx.cfg.progression,
             &groups,
+            &ctx.quest,
             &mut FixedRoll(0.9),
             now,
             std::time::SystemTime::UNIX_EPOCH,
@@ -4099,6 +4133,132 @@ mod tests {
             1000,
             "Angriff nach Zieltod darf keinen Sofortschlag auslösen"
         );
+    }
+
+    // ── Quest V1 Kill-Credit am echten Produktionspfad ─────────────────────
+    //
+    // End-to-end: C2S ATTACK-Frame → `dispatch` (Whitelist/Gate → `handlers::
+    // handle_attack`) → `combat_tick` (serverbestätigte Monster-Tod) →
+    // `QuestService.add_progress`. The Client only arms an Absicht; the Tick
+    // decides the Schlag and the Tod. This PRODUCTION-path Nachweis is to be
+    // distinguished from the direct Service-Tests (quest.rs) and the Tick-
+    // Tests (combat.rs). Quest-Definition via FIXTURE (the Content-Loader
+    // stays open, §27.9/§27.15 — no hartcodierte Testquest in Realm-Start).
+    #[tokio::test]
+    async fn dispatch_attack_monster_death_credits_active_kill_quest() {
+        let mut ctx = test_ctx().await;
+        // Fixture-Definition registered into the Arc-shared QuestService
+        // (Testkontext only).
+        let svc = {
+            let mut s = crate::quest::QuestService::new();
+            s.register(crate::quest::QuestDefinition {
+                id: "q_wolfcull".into(),
+                giver: None,
+                turn_in: None,
+                rewards: crate::quest::RewardBundle { exp: 0, idia: 0 },
+                title_key: "quest.wolfcull.title".into(),
+                description_key: "quest.wolfcull.description".into(),
+                objectives: vec![crate::quest::QuestObjective {
+                    id: "o_wolves".into(),
+                    kind: crate::quest::ObjectiveType::Kill,
+                    target: "wolf".into(),
+                    required: 5,
+                }],
+                min_level: 1,
+                requires: vec![],
+                repeatable: false,
+            })
+                .unwrap();
+            s
+        };
+        Arc::get_mut(&mut ctx.ctx).expect("eindeutiger Testkontext").quest = Arc::new(svc);
+        insert_cadence_players(&ctx, &[("a", 0.0, 0.0, 100)]).await;
+        {
+            let mut w = ctx.shared.lock().await;
+            w.players.get_mut("a").unwrap().quests.insert(
+                "q_wolfcull".into(),
+                crate::quest::CharacterQuestState {
+                    quest_id: "q_wolfcull".into(),
+                    state: crate::quest::QuestState::Active,
+                    progress: vec![crate::quest::CharacterObjectiveProgress {
+                        objective_id: "o_wolves".into(),
+                        current: 0,
+                    }],
+                    started_at_ms: Some(1),
+                    completed_at_ms: None,
+                },
+            );
+            // Monster: Content-ID "wolf" is the match key — the Zufälligen
+            // Spawn-Key ("npc_9") and the Anzeigename ("Wolfe") are not.
+            w.npcs.insert(
+                "npc_9".into(),
+                crate::npc::Npc {
+                    id: "npc_9".into(),
+                    spawn_id: 9,
+                    content_id: "wolf".into(),
+                    name: "Wolfe".into(),
+                    kind: "normal".into(),
+                    attackable: true,
+                    aggressive: false,
+                    aggro_range: 8.0,
+                    attack_range: 1.5,
+                    attack_duration_ms: 1500,
+                    weapon_damage: 5,
+                    weapon_skill: 1,
+                    armor: 0,
+                    max_hp: 10,
+                    move_speed: 4.0,
+                    respawn_ms: 300_000,
+                    faction: None,
+                    exp_reward: 0,
+                    level: 1,
+                    loot_table_id: None,
+                    pack_id: None,
+                    home_x: 1.0,
+                    home_y: 0.0,
+                    home_radius: 5.0,
+                    leash_radius: 15.0,
+                    status: crate::npc::NpcStatus::Alive,
+                    hp: 10,
+                    x: 1.0,
+                    y: 0.0,
+                    target_id: None,
+                    last_attack: std::time::Instant::now(),
+                    no_link_since: None,
+                    return_started_at: None,
+                    respawn_after: None,
+                    claimed_by: None,
+                    override_ctx: None,
+                    effects: Vec::new(),
+                    cooldowns: std::collections::BTreeMap::new(),
+                    active_cast: None,
+                },
+            );
+        }
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        attack_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            100,
+            serde_json::json!({"target_id": "npc_9"}),
+        )
+            .await;
+        strike_tick(&ctx, std::time::Instant::now()).await;
+        let (hp, status, progress) = {
+            let w = ctx.shared.lock().await;
+            (
+                w.npcs["npc_9"].hp,
+                w.npcs["npc_9"].status,
+                w.players["a"].quests.get("q_wolfcull").unwrap().progress[0].current,
+            )
+        };
+        assert_eq!(hp, 0, "serverbestätigte Tod (HP clamped, never < 0)");
+        assert_eq!(status, crate::npc::NpcStatus::Dead, "Einmaligkeits-Tod-Übergang");
+        assert_eq!(progress, 1, "Realm-bestätigter Kill → +1 via add_progress (§27.8)");
     }
 
     /// `P-4.7` Ungültige Absichten verändern den maßgeblichen Takt nicht: sie
@@ -4741,7 +4901,7 @@ mod tests {
             (
                 64,
                 serde_json::json!({"action": "use", "item_uuid": "u-pot"}),
-                "no_consumable_contract",
+                "not_consumable",
             ),
             (
                 65,
@@ -4777,7 +4937,76 @@ mod tests {
         );
     }
 
-    /// 1b) PICKUP von Gold: die gültige Aufnahme schreibt genau einmal. Das
+    /// Echte Dispatch-Pfad: eine **successful** Heil-/Manatrank use. The
+    /// potion is made an explicitly defined consumable and the character
+    /// injured. The Client learns the result ONLY from server frames:
+    /// S2C 25 (ok:true), S2C 23 INVENTORY (rest stack), S2C 4 STATE (own HP)
+    /// and S2C 24 VITALS (own Mana). No local prediction.
+    #[tokio::test]
+    async fn dispatch_inventory_use_success_pushes_state_vitals_inventory() {
+        let ctx = test_ctx().await;
+        insert_inventory_dispatch_world(&ctx).await;
+        {
+            let mut w = ctx.shared.lock().await;
+            let mut d =
+                crate::item::ItemDefinition::new(
+                    "hp_potion",
+                    "Heiltrank",
+                    crate::item::ItemCategory::Potion,
+                );
+            d.max_stack = 20;
+            d.heal_amount = Some(30);
+            w.item_definitions.insert("hp_potion".into(), d);
+            w.players.get_mut("a").unwrap().hp = 50;
+        }
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        inventory_frame(
+            &ctx,
+            &mut guard,
+            &sec_cfg,
+            &tx,
+            71,
+            serde_json::json!({"action": "use", "item_uuid": "u-pot"}),
+        )
+        .await;
+        let frames = drain_frames(&mut rx);
+        let answers = result_frames(&frames);
+        assert_eq!(answers.len(), 1, "genau eine RESULT-Antwort");
+        assert_eq!(answers[0].seq, 71, "seq-Echo");
+        assert_eq!(answers[0].data["ok"], true);
+        assert_eq!(answers[0].data["action"], "use");
+        assert_eq!(answers[0].data["count"], 1, "genau eine Einheit verbrauch");
+        // Own HP from a STATE frame (server-confirmed, not local).
+        let own_state = frames
+            .iter()
+            .find(|f| f.msg_type == crate::protocol::s2c::STATE
+                && f.data.get("id").map(|v| v.as_str() == Some("a")).unwrap_or(false));
+        assert_eq!(own_state.as_ref().unwrap().data["hp"], 80, "50 + 30 healed via STATE");
+        // Own Mana via VITALS.
+        let vitals: Vec<&crate::protocol::Frame> =
+            frames.iter().filter(|f| f.msg_type == crate::protocol::s2c::VITALS).collect();
+        assert_eq!(vitals.len(), 1, "genau ein VITALS-Push");
+        assert_eq!(vitals[0].data["mana"], 50);
+        // Rest stack via INVENTORY push.
+        let pushes = state_pushes(&frames);
+        assert_eq!(pushes.len(), 1, "genau ein INVENTORY-Push");
+        let slots = pushes[0].data["slots"].as_array().expect("slots");
+        let pot = slots.iter().find(|s| s["slot"] == 0).expect("slot 0");
+        assert_eq!(pot["item"]["item_uuid"], "u-pot");
+        assert_eq!(pot["item"]["count"], 9, "10 - 1 rest stack keeps UUID");
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["a"].hp, 80);
+        assert!(
+            w.players["a"].cooldowns.contains_key("consumable"),
+            "shared cooldown started (persisted via P-18)"
+        );
+        assert!(
+            w.players["a"].dirty.is_dirty(crate::persist::PersistComponent::Inventory),
+            "Inventory dirty"
+        );
+    }
     /// **identische** Frame (gleiche `seq`) und derselbe Inhalt mit **neuer**
     /// `seq` gutschreiben nicht erneut — `seq` ist Korrelation.
     #[tokio::test]
@@ -6452,6 +6681,7 @@ mod tests {
                 crate::npc::Npc {
                     id: "npc_5".into(),
                     spawn_id: 5,
+                    content_id: "npc_5".into(),
                     name: "Borin".into(),
                     kind: "named".into(),
                     attackable: false,
@@ -6716,6 +6946,283 @@ mod tests {
         let w = ctx.shared.lock().await;
         assert_eq!(w.players["a"].idia, 500);
         assert!(!w.players["a"].dirty.any());
+    }
+
+    #[tokio::test]
+    async fn dispatch_npc_quest_offer_accept_and_rejection_keep_seq() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(0, false).await;
+        let sec = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for (seq, action, npc, quest) in [(501, "quest_offers", "npc_5", ""),
+            (502, "quest_accept", "npc_5", "missing"), (503, "quest_accept", "npc_5", "q")]
+        {
+            assert!(!dispatch(&ctx, &tx, 7, &mut guard, &sec,
+                Frame::new(seq, c2s::NPC_TALK, serde_json::json!({"action": action,
+                    "npc_id": npc, "quest_id": quest, "account_id": 999})), &Instant::now).await);
+        }
+        let mut answers = Vec::new();
+        while let Ok(raw) = rx.try_recv() { answers.push(serde_json::from_str::<Frame>(&raw).unwrap()); }
+        assert_eq!(answers.iter().map(|f| f.seq).collect::<Vec<_>>(), vec![501, 502, 503]);
+        assert!(answers.iter().all(|f| f.msg_type == crate::protocol::s2c::NPC_TEXT));
+        assert_eq!(answers[0].data["quests"][0]["quest_id"], "q");
+        assert_eq!(answers[1].data["reason"], "unknown_quest");
+        assert_eq!(answers[2].data["state"], "ACTIVE");
+        assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_quest_turn_in_preview_and_durable_completion() {
+        let (ctx, store) = crate::npc_quest::tests::turn_in_fixture(true).await;
+        let sec = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for (seq, action) in [(601, "quest_turn_ins"), (602, "quest_turn_in")] {
+            assert!(!dispatch(&ctx, &tx, 7, &mut guard, &sec,
+                Frame::new(seq, c2s::NPC_TALK, serde_json::json!({
+                    "action": action, "npc_id": "npc_5", "quest_id": "q",
+                    "account_id": 999, "state": "COMPLETED", "reward_idia": i64::MAX
+                })), &Instant::now).await);
+        }
+        let preview: Frame = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        let result: Frame = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(preview.seq, 601);
+        assert_eq!(preview.data["quests"][0]["rewards"]["idia"], 7);
+        assert_eq!(preview.data["quests"][0]["can_turn_in"], true);
+        assert_eq!(result.seq, 602);
+        assert_eq!(result.data["state"], "COMPLETED");
+        assert_eq!(ctx.shared.lock().await.players["7"].quests["q"].state, crate::quest::QuestState::Completed);
+        // The completion used the spool/drain path (real file), not the accept store.
+        assert_eq!(ctx.persist.spool().count_batches().unwrap(), 1);
+        assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn npc_quest_logout_waits_for_confirmed_acceptance_handoff() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(0, true).await;
+        let c = ctx.clone();
+        let acceptance = tokio::spawn(async move {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            handlers::handle_npc_talk(&c, &tx, 7, 1, &serde_json::json!({
+                "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        });
+        store.entered.notified().await;
+        let c = ctx.clone();
+        let shared = c.shared.clone();
+        let logout = tokio::spawn(async move {
+            let flush: DisconnectFlush = Box::new(move || {
+                let shared = shared.clone();
+                Box::pin(async move {
+                    assert_eq!(shared.lock().await.players["held"].quests["q"].state, crate::quest::QuestState::Active);
+                    Ok(())
+                })
+            });
+            finish_owner(&c, 7, "held", flush, Box::new(|_| Box::pin(async { Ok(()) }))).await
+        });
+        assert!(ctx.persist.player_gate("held").await.try_lock_owned().await.is_none());
+        store.release.add_permits(1);
+        acceptance.await.unwrap();
+        assert!(logout.await.unwrap());
+        assert!(!ctx.shared.lock().await.players.contains_key("held"));
+        assert_eq!(store.rows.lock().unwrap()["held"].state, crate::quest::QuestState::Active);
+    }
+
+    #[tokio::test]
+    async fn npc_quest_real_takeover_adopts_confirmed_ram_not_stale_candidate() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(0, true).await;
+        let (candidate_ctx, _) = crate::npc_quest::tests::fixture(0, false).await;
+        let candidate = candidate_ctx.shared.lock().await.players.remove("held").unwrap();
+        let c = ctx.clone();
+        let acceptance = tokio::spawn(async move {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            handlers::handle_npc_talk(&c, &tx, 7, 1, &serde_json::json!({
+                "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        });
+        store.entered.notified().await;
+        let c = ctx.clone();
+        let takeover = tokio::spawn(async move {
+            let _gate = c.persist.player_gate("held").await.lock_owned().await;
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut world = c.shared.lock().await;
+            let outcome = crate::world::commit_login(&mut world, 8, candidate,
+                crate::world::ConnectionFields { tx, session_id: "new".into(), lang: "de".into() }).unwrap();
+            assert_eq!(outcome, crate::world::CommitOutcome::Takeover { old_conn_id: 7 });
+        });
+        store.release.add_permits(1);
+        acceptance.await.unwrap();
+        takeover.await.unwrap();
+        let w = ctx.shared.lock().await;
+        assert!(!w.by_conn.contains_key(&7));
+        assert_eq!(w.by_conn[&8], "held");
+        assert_eq!(w.players["held"].quests["q"].state, crate::quest::QuestState::Active);
+    }
+
+    /// Logout of a character whose acceptance is still OUTSTANDING (modelled
+    /// Uncertain COMMIT, then permanent DB failure): the retry pass keeps it
+    /// pending, Logout still completes, and NO false ACTIVE is ever asserted.
+    #[tokio::test]
+    async fn npc_quest_logout_of_pending_char_never_falsely_active_stays_pending() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(3, false).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handlers::handle_npc_talk(&ctx, &tx, 7, 1, &serde_json::json!({
+            "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        // modelled COMMIT landed in the row, but RAM has NO false ACTIVE.
+        assert_eq!(store.rows.lock().unwrap().len(), 1);
+        assert!(ctx.shared.lock().await.players["held"].quests.get("q").is_none());
+        let shared = ctx.shared.clone();
+        let flush: DisconnectFlush = Box::new(move || {
+            let shared = shared.clone();
+            Box::pin(async move {
+                // at Logout the acceptance is still not ACTIVE in RAM.
+                assert!(shared.lock().await.players["held"].quests.get("q").is_none());
+                Ok(())
+            })
+        });
+        let write_logout: DisconnectLogout = Box::new(|_| Box::pin(async { Ok(()) }));
+        let removed = finish_owner(&ctx, 7, "held", flush, write_logout).await;
+        assert!(removed);
+        // the open acceptance stays nachvollbar erfasst (not forgotten/active).
+        assert!(ctx.shared.lock().await.pending_quest_acceptances
+            .get("held").iter().flat_map(|v| v.iter()).any(|p| p.quest_id == "q"));
+        // the modelled DB row remains the authority for the next Login.
+        assert_eq!(store.rows.lock().unwrap().len(), 1);
+    }
+
+    /// Takeover of a character whose acceptance is still OUTSTANDING: the new
+    /// connection adopts the current RAM (no false ACTIVE); the pending entry
+    /// is neither clobbered nor falsely resolved (no unsafe Gate release).
+    #[tokio::test]
+    async fn npc_quest_takeover_of_pending_char_adopts_authoritative_not_false_active() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(3, false).await;
+        let (candidate_ctx, _) = crate::npc_quest::tests::fixture(0, false).await;
+        let candidate = candidate_ctx.shared.lock().await.players.remove("held").unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handlers::handle_npc_talk(&ctx, &tx, 7, 1, &serde_json::json!({
+            "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        assert_eq!(store.rows.lock().unwrap().len(), 1);
+        assert!(ctx.shared.lock().await.players["held"].quests.get("q").is_none());
+        let c = ctx.clone();
+        let takeover = tokio::spawn(async move {
+            let _gate = c.persist.player_gate("held").await.lock_owned().await;
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut world = c.shared.lock().await;
+            let outcome = crate::world::commit_login(&mut world, 8, candidate,
+                crate::world::ConnectionFields { tx, session_id: "new".into(), lang: "de".into() }).unwrap();
+            assert_eq!(outcome, crate::world::CommitOutcome::Takeover { old_conn_id: 7 });
+        });
+        takeover.await.unwrap();
+        let w = ctx.shared.lock().await;
+        assert!(!w.by_conn.contains_key(&7));
+        assert_eq!(w.by_conn[&8], "held");
+        // no false ACTIVE adopted; the pending entry survives the takeover.
+        assert!(w.players["held"].quests.get("q").is_none());
+        assert!(w.pending_quest_acceptances
+            .get("held").iter().flat_map(|v| v.iter()).any(|p| p.quest_id == "q"));
+    }
+
+    /// The open acceptance holds NO gate forever: the affected character's own
+    /// Gate is free (its persist/logout can proceed) and an unrelated
+    /// character's Gate is independently acquirable, so other characters remain
+    /// securable while one acceptance is outstanding.
+    #[tokio::test]
+    async fn npc_quest_pending_on_one_char_leaves_other_gates_free() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(3, false).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handlers::handle_npc_talk(&ctx, &tx, 7, 1, &serde_json::json!({
+            "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        assert!(ctx.persist.player_gate("held").await.try_lock_owned().await.is_some());
+        assert!(ctx.persist.player_gate("other").await.try_lock_owned().await.is_some());
+        let resolved = crate::npc_quest::retry_quest_acceptances(
+            crate::npc_quest::build_accept_store(&ctx),
+            &ctx.persist,
+            ctx.shared.clone(),
+            None,
+            crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
+        ).await.unwrap();
+        assert_eq!(resolved, 0);
+        assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Shutdown's WHOLE retry pass is capped by a real Deadline: even a hanging
+    /// attempt (Acquire+SQL+COMMIT never returns) and a blocked per-character
+    /// Gate stay within the budget. Entries remain pending (registered before
+    /// any attempt); no false ACTIVE. The Deadline (not the per-attempt bound)
+    /// is what bounds the pass here.
+    #[tokio::test]
+    async fn npc_quest_shutdown_deadline_bounds_hang_and_blocked_gate() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(4, false).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handlers::handle_npc_talk(&ctx, &tx, 7, 1, &serde_json::json!({
+            "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        let within = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            crate::npc_quest::retry_quest_acceptances(
+                crate::npc_quest::build_accept_store(&ctx),
+                &ctx.persist,
+                ctx.shared.clone(),
+                None,
+                crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
+            ),
+        ).await;
+        // Deadline elapsed (per-attempt bound 2s > 50ms deadline) -> bounded.
+        assert!(within.is_err());
+        // Gate released when the Deadline cancels the retry future.
+        assert!(ctx.persist.player_gate("held").await.try_lock_owned().await.is_some());
+        // entry stays pending, no false ACTIVE.
+        assert!(ctx.shared.lock().await.pending_quest_acceptances
+            .get("held").iter().flat_map(|v| v.iter()).any(|p| p.quest_id == "q"));
+        assert!(ctx.shared.lock().await.players["held"].quests.get("q").is_none());
+    }
+
+    /// Shutdown's bounded resolution pass (the SAME call `async_main` makes):
+    /// under permanent failure it TERMINATES (no hang, no endless task) and
+    /// leaves a nachvollbar open state that yields a defined error count.
+    #[tokio::test]
+    async fn npc_quest_shutdown_open_acceptance_reaches_defined_state_within_budget() {
+        let (ctx, store) = crate::npc_quest::tests::fixture(3, false).await;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        handlers::handle_npc_talk(&ctx, &tx, 7, 1, &serde_json::json!({
+            "action": "quest_accept", "npc_id": "npc_5", "quest_id": "q"})).await;
+        let resolved = crate::npc_quest::retry_quest_acceptances(
+            crate::npc_quest::build_accept_store(&ctx),
+            &ctx.persist,
+            ctx.shared.clone(),
+            None,
+            crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
+        ).await.unwrap();
+        assert_eq!(resolved, 0);
+        let open: usize = ctx.shared.lock().await.pending_quest_acceptances
+            .values().map(|v| v.len()).sum();
+        assert_eq!(open, 1);
+        assert!(ctx.shared.lock().await.players["held"].quests.get("q").is_none());
+        assert_eq!(store.rows.lock().unwrap().len(), 1);
+    }
+
+    /// Crash-before-RAM-handoff model: a retained, immutable completion order
+    /// (prepared entry + durable spool file) is resolved over the SAME idempotent
+    /// path BEFORE the logout gate. Logout converges RAM to COMPLETED and never
+    /// asserts a false COMPLETED while the order is still open.
+    #[tokio::test]
+    async fn npc_quest_logout_resolves_open_completion_before_gate() {
+        let (ctx, _store) = crate::npc_quest::tests::turn_in_fixture(true).await;
+        let req = crate::persist::QuestCompletionRequest {
+            commit_id: crate::persist::quest_commit_id("7", "q", 0),
+            character_id: "7".into(),
+            quest_id: "q".into(),
+            rewards: ctx.quest.find_definition("q").unwrap().rewards.clone(),
+        };
+        {
+            let mut w = ctx.shared.lock().await;
+            let prepared = crate::persist::prepare_quest_completion(
+                &w, &req, &ctx.cfg.progression, &ctx.quest,
+            ).unwrap();
+            w.prepared_quest_completions.insert(req.commit_id, prepared.clone());
+        }
+        crate::npc_quest::retry_quest_completions_for(&ctx, Some(&["7".to_string()])).await.unwrap();
+        let w = ctx.shared.lock().await;
+        assert_eq!(w.players["7"].quests["q"].state, crate::quest::QuestState::Completed);
+        assert!(w.prepared_quest_completions.is_empty());
+        assert_eq!(w.players["7"].persist_revision, 1);
     }
 
     #[tokio::test]

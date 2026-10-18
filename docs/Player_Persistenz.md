@@ -290,6 +290,8 @@ Bei einem ungeplanten Prozess-/Host-Crash kann Quest-Fortschritt seit dem letzte
 
 Im bestehenden Rust-Code sind Quest State/Quest Progress derzeit noch Teil des bisherigen Player-Persistence-Pfads (`PersistComponent::QuestState`, Quest-Daten im bisherigen `PersistSnapshot`, `write_quest_state` im zentralen Stufe-A-Persistence-Pfad). Diese vorhandene Implementierung darf ausdrücklich **nicht** als neue verbindliche Stufe-B-Architektur übernommen werden. Für Stufe B gilt: Quest State/Quest Progress sind aus dem normalen Player-Spool ausgegliedert und werden über den Quest-Persistenzpfad behandelt. Die spätere Bereinigung/Anpassung des vorhandenen Stufe-A-Codes erfolgt in einem separaten Implementierungsauftrag.
 
+> **Bestandskorrektur (Codeprüfung):** Dieser Hinweis beschreibt einen Stufe-A-Pfad mit Quests im Snapshot, der **im aktuellen Repository nicht existiert**. Im Code vorhanden: `PersistComponent = {Position, Progression, Idia, Inventory, Resources}` (`src/realm-rs/src/persist.rs`, **kein** `QuestState`); `PersistSnapshot` **enthält keine** Quests (Kommentar "Questzustände fehlen (atomarer Questabschluss über den DB-Guard)"); `write_snapshot_fields` schreibt **keine** Quests. Quests folgen bereits der **Stufe-B-Zielsetzung** über ihren eigenen direkten Quest-Persistenzpfad: `accept_for_character` (sofortiger ACTIVE-Upsert) und `complete_for_character` (atomar COMPLETED + DB-Schutzprüfung `guarded_complete_quest`), beide in `src/realm-rs/src/quest.rs`. Die in einem separaten Auftrag zu bereinigenden "vorhandenen Stufe-A-Codes" sind somit **bereits nicht vorhanden**; der Hinweis ist veraltet. Dies kennzeichnet eine Bestandsabweichung; es ändert **keine** Regel.
+
 ---
 
 ## 9. Kritische Transaktionen (sofort persistiert)
@@ -310,6 +312,20 @@ Ein erfolgreicher Questabschluss inklusive seiner beteiligten persistenten Ände
 
 ## 10. Questannahme
 
+**Abgabe (Durable Quest-Completion, eingebaut):** Für Questabschluss mit Belohnungen
+ist der Annahmevertrag keine ausreichende Dauerhaftigkeitsgrenze. Der Freigabe
+`Quest-Turn-In-Persistenz.md` ist GRANTED und umgesetzt: das bestehende Spool-/Drain-Pfad
+is extended with a single-character `quest_completion`-order (full resulting
+`PersistSnapshot` incl. Lifecycle + the once-computed Reward, the COMPLETED quest state,
+base/target-Revision, technical commit-ID) and the additive Receipt-Table
+`character_quest_commits` (Migration 025, created + registered, NOT executed). The
+Snapshot, the ACTIVE→COMPLETED row, `persist_revision` and the content receipt are applied
+in EINER DB-Transaktion. Repetition is confirmed only by a matching content receipt
+(revision/COMPLETED alone never AlreadyApplied). Older snapshots never overwrite the
+completion; later saves/trades/completions never uncontrolled overtake an open one.
+An uncertain/failed publication retains the identical order (no false COMPLETED, no
+reward claim, no rollback). No partial Direktwrite with Revisionssprung is introduced.
+
 Die Annahme einer Quest ist ein bedeutender Quest-State-Übergang:
 
 ```text
@@ -321,6 +337,58 @@ Dieser Zustandsübergang soll **unmittelbar** persistent gespeichert werden.
 Normaler Objective-Fortschritt innerhalb ACTIVE wird anschließend im Realm-RAM gehalten und erst bei den relevanten Quest-Checkpoints über den Quest-Persistenzpfad persistiert (Abschnitt 8); er gehört nicht zum normalen Player-Snapshot-/Spool-Pfad (Abschnitt 23).
 
 Aus dieser Regel werden **keine** weiteren Repeatable-/FAILED-/Abort-Regeln abgeleitet (die entsprechenden Semantiken bleiben in `Quest-System.md` offen, vgl. Abschnitte 27.20/27.21).
+
+**NPC-Annahme eingebaut (`Quest-System.md` §27.27):** Der gemeinsame Kern
+`QuestService::persist_acceptance` schreibt über `db::write_quest_acceptance`
+in dieselbe Tabelle `quests` (Migration 004). Einfügen nur ohne vorhandene
+Zeile, ansonsten unveränderten Zustand in derselben Transaktion sperrend
+lesen; keine Überschreibung vorhandenen Fortschritts. Der NPC-Handler prüft
+die bestehenden Annahmebedingungen unter dem gemeinsamen Charakter-Gate und
+der World-Sperre, gibt die World-Sperre vor DB-Ein-/Ausgabe frei und hält das
+Gate nur über der **jeamlig** Vorprüfung und EINE bounded Persistenz-Versuch.
+Logout und Takeover warten am selben Gate nur solange dieses Versuch active.
+
+**BOUND_QUEST_ACCEPTANCE_IO_AND_SHUTDOWN (explicit IO-Timeout + Deadline):**
+The Annahme- und Retry-Persistenzversuch carries an **explicit Zeitgrenze**
+`QUEST_ACCEPT_IO_TIMEOUT` (2 s) around the **whole** attempt (Acquire + SQL-
+Execute + COMMIT) via `tokio::time::timeout` — reusing the existing per-
+operation Timeout-Muster of the Logout `write_timeout` (§11/§16), **NO** global
+Pool-Change (the production Pool keeps its sqlx-default acquire-Timeout of 30 s).
+A **Timeout is treated like an Uncertain COMMIT**: the acceptance stays
+**outstanding** (pending), NO false ACTIVE, NO claimed safe rollback; it is
+distinguished from a pre-COMMIT `Persistence` error (drops the pending entry,
+melds `quest_persistence_failed`). The acceptance is registered in
+`World.pending_quest_acceptances` **BEFORE** the timed attempt, so a
+Cancellation between attempt, registration and RAM-Übernahme can never lose it.
+After the bounded attempt (incl. Timeout) the per-character Gate is released;
+the pending entry and its idempotent Wiederaufnahme remain. `retry_quest_
+acceptances` wraps EACH entry-attempt in the same IO-Timeout and is
+**character-scoped** via `requested`: Logout (`finish_owner`) and Login/Takeover
+(`handle_hello`) pass their own char_id, so they never wait on a foreign
+character's hanging entry; the periodic pass (`main.rs`) acquires **one** Gate
+at a time, so unrelated characters stay securable. **Preserved uncertainty:** the
+pending entry is removed ONLY on a confirmed COMMIT plus correct RAM-Übernahme;
+a pre-COMMIT failure of a LATER retry attempt (e.g. at Pool-Acquire) proves
+NOTHING about the first COMMIT and MUST NOT undo the original uncertainty — it
+stays pending. A first attempt that safely failed pre-COMMIT is still rejected
+normally (`quest_persistence_failed`, no pending).
+
+Shutdown caps the **entire** retry pass by a real Deadline
+(`tokio::time::timeout(SHUTDOWN_LOGOUT_BUDGET, retry_quest_acceptances(...))`),
+so even a hanging attempt and a blocked Gate cannot push Shutdown beyond its
+budget; on Deadline-elapsed the still-outstanding entries stay pending and are
+reported as a defined error state (`shutdown_open_quest_acceptances`,
+PersistStatus Degraded). No SIGKILL as the regular completion path, no weakened
+Save-Guarantee (character Snapshots are secured independently).
+
+**Neustart / DB-Wiederaufnahme:** the `quests`-Table remains the authority
+(§27.26). The next Login re-derives ACTIVE via the existing DB-load path
+(`load_for_character` → `load_quest_rows`) **if** the COMMIT had in fact landed;
+otherwise the player re-accepts. **No automatic Commit-effect on a dropped sqlx
+`Transaction` is behaupted** — the COMMIT outcome after a Timeout/Cancellation
+is explicitly **unknown**, which is why the acceptance is kept pending rather
+than resolved optimistically. No second Spool-/Persistenzpipeline, no Reward-
+Nachweis.
 
 ---
 

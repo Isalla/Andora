@@ -255,7 +255,7 @@ Dadurch können Nahrung, Getränke, Ausrüstung und Buffs auch im Highlevel rele
 
 ## 9. Essen, Getränke und Tränke (konzeptionelle Abgrenzung)
 
-Die eigentliche Implementierung des Consumable-Systems erfolgt **später**. Dieses Dokument legt bereits die konzeptionelle Abgrenzung fest.
+Die **direkten Heil-/Manatränke** (sofort HP/Mana) sind jetzt serverseitig IMPLEMENTIERT (Projekt-Status 15i, `inventory_actions.rs` `use`-Zweig, `docs/inventory_system.md` §19). Die **Dauerwirkung** von Essen/Getränken (Regenerationsboni) bleibt **offen** und folgt separat. Dieses Dokument legt bereits die konzeptionelle Abgrenzung fest.
 
 Es gibt zwei grundlegend unterschiedliche Wirkprinzipien:
 
@@ -278,7 +278,7 @@ Es gibt zwei grundlegend unterschiedliche Wirkprinzipien:
 
 Essen und Tränke/Getränke sollen im Inventarsystem **eigene dafür vorgesehene Item-/Verbrauchsplätze** erhalten und später manuell oder automatisch benutzt werden können.
 
-Die genaue Consumable-Logik wird separat entwickelt und soll jetzt noch nicht implementiert werden.
+Direkte Heil-/Manatränke: IMPLEMENTIERT (15i) — Wirkungsstärke aus der serverseitigen `ItemDefinition` (`heal_amount`/`mana_amount`, additive Migration 024), gemeinsame Abklingzeit von 30 s, Begrenzung auf den Maximalwert, Verbrauch von genau einer Einheit pro Benutzung, bei Tod gesperrt. Die genaue Verbrauchslogik für die **Dauerwirkung** (Essen/Getränke mit Regenerationsboni) wird separat entwickelt und soll jetzt noch nicht implementiert werden.
 
 ---
 

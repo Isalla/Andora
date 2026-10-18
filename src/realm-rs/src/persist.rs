@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::inventory::InventoryState;
 use crate::world::{Player, Shared};
+use crate::quest::{CharacterQuestState, QuestState, RewardBundle};
 
 pub(crate) type NormalPublication = std::sync::Arc<Vec<PersistSnapshot>>;
 
@@ -401,6 +402,148 @@ impl TradeArtifact {
             }
         }
         Ok(())
+    }
+}
+
+/// Internal persistence intent for ONE deliberate quest turn-in (docs/Quest-Turn-In-Persistenz.md).
+/// Not a dialog/offer or an authorization API. The caller (NPC turn-in) validates ownership,
+/// NPC/turn-in binding, ACTIVE state, real objectives and reward overflow BEFORE building this.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestCompletionRequest {
+    pub commit_id: String,
+    pub character_id: String,
+    pub quest_id: String,
+    /// Static, load-validated reward declaration (exp+idia only, V1).
+    pub rewards: RewardBundle,
+}
+
+/// The complete resulting single-character state of a quest completion, retained verbatim
+/// across an uncertain publication so a retry re-attempts IDENTICAL immutable content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestCompletionArtifact {
+    pub kind: String,
+    pub format_version: u16,
+    pub commit_id: String,
+    pub character_id: String,
+    pub quest_id: String,
+    pub base_revision: i64,
+    /// Full resulting PersistSnapshot (position, progression incl. the once-computed reward,
+    /// idia, resources, attributes, inventory with stable item UUIDs, lifecycle, revision=target).
+    pub snapshot: PersistSnapshot,
+    /// Resulting COMPLETED quest state as the canonical DB encoding (carried separately: the
+    /// normal snapshot never holds quests). Stored encoded so the durable order is serde-safe
+    /// without touching the quest-state types.
+    pub completed_data: String,
+}
+
+#[derive(Clone)]
+pub struct PreparedQuestCompletion {
+    pub request: QuestCompletionRequest,
+    pub artifact: QuestCompletionArtifact,
+}
+
+impl QuestCompletionArtifact {
+    pub(crate) fn commit_payload(&self) -> Result<String, String> {
+        self.validate()?;
+        serde_json::to_string(self).map_err(|e| format!("quest proof serialize: {e}"))
+    }
+    pub(crate) fn matches_request(&self, request: &QuestCompletionRequest) -> bool {
+        self.commit_id == request.commit_id
+            && self.character_id == request.character_id
+            && self.quest_id == request.quest_id
+    }
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kind != "character_quest_completion"
+            || self.format_version != 1
+            || self.commit_id.is_empty()
+            || self.commit_id.len() > 64
+            || !self.commit_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("invalid quest completion envelope".into());
+        }
+        crate::db::parse_character_id(&self.character_id)?;
+        if self.quest_id.is_empty()
+            || self.quest_id.len() > 48
+            || !self.quest_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err("invalid quest completion id".into());
+        }
+        if self.base_revision < 0
+            || self.base_revision.checked_add(1) != Some(self.snapshot.persist_revision)
+            || self.snapshot.player_id != self.character_id
+            || self.snapshot.idia < 0
+            || self.snapshot.item_lifecycle.is_none()
+        {
+            return Err("invalid quest completion revision/state".into());
+        }
+        if self.completed_data.trim().is_empty() {
+            return Err("quest completion result not COMPLETED".into());
+        }
+        let decoded = crate::quest::decode_quest_data(
+            &self.quest_id,
+            QuestState::Completed,
+            Some(&self.completed_data),
+        )?;
+        if decoded.quest_id != self.quest_id || decoded.state != QuestState::Completed {
+            return Err("quest completion result not COMPLETED".into());
+        }
+        Ok(())
+    }
+}
+
+/// Deterministic technical commit-ID for one (character, quest, base-revision) intent.
+/// Stable across an in-process retry (the prepared entry is reused) and across a restart
+/// (the durable spool file/receipt carries the same identity); a collision against an
+/// existing open publication is fail-closed by the spool ID-conflict check.
+pub fn quest_commit_id(
+    character_id: &str,
+    quest_id: &str,
+    base_revision: i64,
+) -> String {
+    use sha2::Digest;
+    use sha2::Sha256;
+    let raw = Sha256::digest(
+        format!("qc:{character_id}:{quest_id}:r{base_revision}").as_bytes(),
+    );
+    let bytes: [u8; 32] = raw.into();
+    let hex = hex::encode(&bytes);
+    format!("qc{}", &hex[..40])
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuestCompletionApply {
+    Applied,
+    AlreadyApplied,
+    Waiting,
+    Conflict,
+}
+
+/// Repetition is confirmed ONLY by a matching content receipt; revision equality or a
+/// COMPLETED row alone never yields AlreadyApplied (docs/Quest-Turn-In-Persistenz.md).
+pub(crate) fn quest_completion_revision_action_with_proof(
+    artifact: &QuestCompletionArtifact,
+    current: Option<i64>,
+    committed_payload: Option<&str>,
+) -> QuestCompletionApply {
+    let Some(rev) = current else { return QuestCompletionApply::Conflict };
+    if let Some(payload) = committed_payload {
+        if artifact.commit_payload().as_deref() != Ok(payload) {
+            return QuestCompletionApply::Conflict;
+        }
+        return if rev >= artifact.snapshot.persist_revision {
+            QuestCompletionApply::AlreadyApplied
+        } else {
+            QuestCompletionApply::Conflict
+        };
+    }
+    if rev >= artifact.snapshot.persist_revision {
+        return QuestCompletionApply::Conflict;
+    }
+    if rev == artifact.base_revision {
+        QuestCompletionApply::Applied
+    } else {
+        QuestCompletionApply::Waiting
     }
 }
 
@@ -1271,6 +1414,294 @@ pub(crate) async fn apply_trade_to_db(
         .await
         .map_err(|e| format!("trade commit: {e}"))?;
     Ok(TradeApply::Applied)
+}
+
+pub(crate) async fn apply_quest_completion_to_db(
+    pool: &Pool<MySql>,
+    artifact: &QuestCompletionArtifact,
+    weapon_skill_id: &str,
+) -> Result<QuestCompletionApply, String> {
+    artifact.validate()?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("quest completion begin: {e}"))?;
+    let current = crate::db::lock_persist_revision(&mut tx, &artifact.character_id).await?;
+    // Witness the quest row under the SAME transaction (locked read).
+    let _row = crate::db::lock_quest_state(&mut tx, &artifact.character_id, &artifact.quest_id).await?;
+    let proof = crate::db::load_quest_commit_proof(&mut tx, &artifact.commit_id).await?;
+    let action = quest_completion_revision_action_with_proof(artifact, current, proof.as_deref());
+    if action != QuestCompletionApply::Applied {
+        return Ok(action);
+    }
+    // Full resulting state over the COMMON writer, including Lifecycle and the
+    // once-computed reward (already baked into the snapshot) — same transaction.
+    write_snapshot_fields(&mut tx, &artifact.snapshot, weapon_skill_id).await?;
+    if let Some(lifecycle) = artifact.snapshot.item_lifecycle.as_ref() {
+        crate::db::apply_item_lifecycle(
+            &mut tx,
+            &artifact.character_id,
+            lifecycle,
+            &artifact.snapshot.inventory,
+        )
+        .await?;
+    }
+    // ACTIVE→COMPLETED guard with the resulting quest state; 0 rows means the
+    // row is no longer ACTIVE (a proven/foreign completion) -> no COMMIT.
+    let data = artifact.completed_data.clone();
+    let guard_ok =
+        crate::db::guarded_complete_quest(&mut tx, &artifact.character_id, &artifact.quest_id, &data)
+            .await
+            .map_err(|e| format!("quest completion guard: {e}"))?;
+    if !guard_ok {
+        tx.rollback()
+            .await
+            .map_err(|e| format!("quest completion rollback: {e}"))?;
+        return Ok(QuestCompletionApply::Conflict);
+    }
+    crate::db::write_persist_revision(&mut tx, &artifact.character_id, artifact.snapshot.persist_revision)
+        .await?;
+    crate::db::write_quest_commit_proof(&mut tx, artifact).await?;
+    tx.commit()
+        .await
+        .map_err(|e| format!("quest completion commit: {e}"))?;
+    Ok(QuestCompletionApply::Applied)
+}
+
+/// Build the complete, immutable completion order from the protected server
+/// state. The reward (EXP/Idia/level/free points) is computed EXACTLY once here
+/// via the existing `RewardBundle::prepare`/`Progression::grant_exp` core (no
+/// Rested-Bonus); a retry never recomputes it. Runs under the World lock; NO
+/// file/DB I/O happens here.
+pub(crate) fn prepare_quest_completion(
+    world: &crate::world::World,
+    request: &QuestCompletionRequest,
+    cfg: &crate::progression::ProgressionCfg,
+    service: &crate::quest::QuestService,
+) -> Result<PreparedQuestCompletion, String> {
+    let player = world.players.get(&request.character_id).ok_or("quest completion character unavailable")?;
+    let current = player.quests.get(&request.quest_id).ok_or("quest not active")?;
+    if current.state != QuestState::Active {
+        return Err("quest not active".into());
+    }
+    // Authoritative re-validation under the World lock (race-safe): the
+    // client-facing preflight is only a courtesy; the durable order is built
+    // solely from a server-confirmed ACTIVE quest with met objectives.
+    if !service.objectives_complete(&request.quest_id, current) {
+        return Err("quest objectives not met".into());
+    }
+    if service.find_definition(&request.quest_id).is_none() {
+        return Err("unknown quest".into());
+    }
+    let progression = crate::progression::Progression::new(
+        player.level,
+        player.exp,
+        player.free_attr_points,
+        player.rested_pool,
+        player.class,
+        player.faction_transition,
+    );
+    let (draft, new_idia) = request.rewards.prepare(
+        &progression,
+        player.idia,
+        cfg,
+    ).map_err(|e| e.to_string())?;
+    let lifecycle = world.item_lifecycle
+        .get(&request.character_id)
+        .ok_or("quest completion lifecycle unavailable")?;
+    let mut snapshot = build_snapshot(&player, true, lifecycle, &world.runtime_id)
+        ?
+        .ok_or("quest completion snapshot build")?
+        .clone();
+    // Bake the once-computed reward into the full snapshot (no Player clone
+    // exists; the snapshot is the complete resulting state).
+    snapshot.level = draft.level;
+    snapshot.exp = draft.exp;
+    snapshot.free_attr_points = draft.free_attr_points;
+    snapshot.idia = new_idia;
+    let completed = CharacterQuestState {
+        quest_id: request.quest_id.clone(),
+        state: QuestState::Completed,
+        progress: current.progress.clone(),
+        started_at_ms: current.started_at_ms,
+        completed_at_ms: Some(crate::persist::now_ms()),
+    };
+    let completed_data = crate::quest::encode_state_for_db(&completed)?;
+    let artifact = QuestCompletionArtifact {
+        kind: "character_quest_completion".into(),
+        format_version: 1,
+        commit_id: request.commit_id.clone(),
+        character_id: request.character_id.clone(),
+        quest_id: request.quest_id.clone(),
+        base_revision: player.persist_revision,
+        snapshot: snapshot.clone(),
+        completed_data: completed_data.clone(),
+    };
+    artifact.validate()?;
+    Ok(PreparedQuestCompletion {
+        request: request.clone(),
+        artifact: artifact.clone(),
+    })
+}
+
+/// The only success boundary is confirmed spool durability of the immutable
+/// completion order, then the RAM handoff. A failed/uncertain write retains the
+/// exact prepared data for the same commit-ID; NO false COMPLETED, NO reward
+/// claim, NO claimed rollback (docs/Quest-Turn-In-Persistenz.md).
+pub async fn commit_quest_completion(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: QuestCompletionRequest,
+    cfg: &crate::progression::ProgressionCfg,
+    service: &crate::quest::QuestService,
+) -> Result<(), String> {
+    // Open normal publications of this character must be resolved first: the
+    // base revision may never be skipped from a stale RAM baseline.
+    retry_normal_publications(spool, shared, Some(&[request.character_id.clone()])).await?;
+    let _gate = spool.player_gate(&request.character_id).await.lock_owned().await;
+    finish_quest_completion(spool, shared, request, cfg, service, |artifact| async move {
+        spool.write_quest_completion(&artifact)
+    })
+    .await
+}
+
+/// Gate-ASSUMING core: the caller already holds this character's Gate (NPC
+/// turn-in) or acquires it immediately before (retry path). Performs the
+/// durable publication and the RAM handoff; never acquires the Gate itself.
+pub(crate) async fn finish_quest_completion<W, F>(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    request: QuestCompletionRequest,
+    cfg: &crate::progression::ProgressionCfg,
+    service: &crate::quest::QuestService,
+    publish: W,
+) -> Result<(), String>
+where
+    W: FnOnce(QuestCompletionArtifact) -> F,
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let id = request.character_id.as_str();
+    // Durable spool receipt (cross-restart identity): identical content -> done.
+    if let Some(receipt) = spool.quest_completion_receipt(&request.commit_id)? {
+        return if receipt.matches_request(&request) {
+            Ok(())
+        } else {
+            Err("quest completion ID conflict".into())
+        };
+    }
+    // Retained in-process prepared order (pending retry) is reused verbatim.
+    let retained = {
+        let world = shared.lock().await;
+        if let Some(receipt) = world.quest_completion_receipts.get(&request.commit_id) {
+            return if receipt == &request {
+                Ok(())
+            } else {
+                Err("quest completion ID conflict".into())
+            };
+        }
+        if let Some(prepared) = world.prepared_quest_completions.get(&request.commit_id) {
+            if prepared.request != request {
+                return Err("quest completion ID conflict".into());
+            }
+            Some(prepared.clone())
+        } else {
+            None
+        }
+    };
+    let prepared = match retained {
+        Some(prepared) => prepared,
+        None => {
+            // Filesystem availability checks stay OUTSIDE the World lock.
+            spool.ensure_quest_completion_save_allowed(id)?;
+            spool.ensure_trade_save_allowed(id)?;
+            let mut world = shared.lock().await;
+            if world.normal_publications.contains_key(id) {
+                return Err("normal publication pending".into());
+            }
+            if world.prepared_quest_completions.contains_key(&request.commit_id)
+                || world.quest_completion_receipts.contains_key(&request.commit_id)
+            {
+                return Err("quest completion ID conflict".into());
+            }
+            if world
+                .prepared_quest_completions
+                .values()
+                .any(|p| p.request.character_id == id && p.request.quest_id == request.quest_id)
+            {
+                return Err("quest completion pending".into());
+            }
+            let prepared = prepare_quest_completion(&world, &request, cfg, service)?;
+            world
+                .prepared_quest_completions
+                .insert(request.commit_id.clone(), prepared.clone());
+            spool.hold_quest_completion_publication(&request.commit_id);
+            prepared
+        }
+    };
+    publish(prepared.artifact.clone()).await?;
+    let mut world = shared.lock().await;
+    let snap = &prepared.artifact.snapshot;
+    if !world.players.contains_key(&snap.player_id) {
+        return Err("prepared completion player lost".into());
+    }
+    let unchanged = world.players.get(&snap.player_id).unwrap().persist_generation == snap.generation;
+    let p = world.players.get_mut(&snap.player_id).unwrap();
+    p.x = snap.x;
+    p.y = snap.y;
+    p.level = snap.level;
+    p.exp = snap.exp;
+    p.free_attr_points = snap.free_attr_points;
+    p.idia = snap.idia;
+    p.hp = snap.hp;
+    p.mana = snap.mana;
+    p.attributes = snap.attributes.clone();
+    p.inventory = snap.inventory.clone();
+    let completed = crate::quest::decode_quest_data(
+        &prepared.artifact.quest_id,
+        QuestState::Completed,
+        Some(&prepared.artifact.completed_data),
+    )?;
+    p.quests.insert(prepared.artifact.quest_id.clone(), completed.clone());
+    p.persist_revision = snap.persist_revision;
+    if unchanged {
+        p.dirty.clear_components(snap.dirty);
+    }
+    world.prepared_quest_completions.remove(&request.commit_id);
+    world
+        .quest_completion_receipts
+        .insert(request.commit_id.clone(), request.clone());
+    spool.release_quest_completion_publication(&request.commit_id);
+    Ok(())
+}
+
+/// Resume the retained, identical completion orders independently. Never
+/// recompute the reward; never acquire a gate while another is held.
+pub(crate) async fn retry_quest_completions(
+    spool: &crate::spool::Spool,
+    shared: &Shared,
+    cfg: &crate::progression::ProgressionCfg,
+    service: &crate::quest::QuestService,
+    requested: Option<&[String]>,
+) -> Result<(), String> {
+    let requests: Vec<QuestCompletionRequest> = {
+        let world = shared.lock().await;
+        world.prepared_quest_completions
+            .values()
+            .filter(|p| requested.is_none_or(|ids| ids.contains(&p.request.character_id)))
+            .map(|p| p.request.clone())
+            .collect()
+    };
+    let mut errors: Vec<String> = Vec::new();
+    for request in requests {
+        if let Err(e) = commit_quest_completion(spool, shared, request, cfg, service).await {
+            errors.push(e);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 #[cfg(test)]
@@ -2334,5 +2765,91 @@ mod tests {
             snapshot.item_lifecycle, None,
             "fehlendes Feld bedeutet Altformat, kein leeres neues Format"
         );
+    }
+
+    async fn quest_world() -> (Shared, QuestCompletionRequest, Arc<crate::quest::QuestService>) {
+        let shared = crate::world::new_shared();
+        let (mut p, _) = test_player("7");
+        p.idia = 40;
+        p.exp = 100;
+        p.level = 1;
+        let def = crate::quest::QuestDefinition {
+            id: "q".into(),
+            giver: Some("borin".into()),
+            turn_in: Some("borin".into()),
+            title_key: "q.title".into(),
+            description_key: "q.desc".into(),
+            objectives: vec![crate::quest::QuestObjective {
+                id: "kill".into(),
+                kind: crate::quest::ObjectiveType::Kill,
+                target: "wolf".into(),
+                required: 5,
+            }],
+            min_level: 1,
+            requires: Vec::new(),
+            repeatable: false,
+            rewards: crate::quest::RewardBundle { exp: 11, idia: 7 },
+        };
+        let mut svc = crate::quest::QuestService::new();
+        let rewards = def.rewards.clone();
+        svc.register(def).unwrap();
+        let mut state = svc.accept("q", None, 1, &HashSet::new()).unwrap();
+        svc.add_progress("q", &mut state, "kill", 5).unwrap();
+        let mut w = shared.lock().await;
+        w.players.insert("7".into(), p);
+        w.by_conn.insert(7, "7".into());
+        w.item_lifecycle.insert("7".into(), crate::item_lifecycle::ItemLifecycle::new());
+        w.players.get_mut("7").unwrap().quests.insert("q".into(), state);
+        drop(w);
+        (
+            shared,
+            QuestCompletionRequest {
+                commit_id: quest_commit_id("7", "q", 0),
+                character_id: "7".into(),
+                quest_id: "q".into(),
+                rewards,
+            },
+            Arc::new(svc),
+        )
+    }
+
+    #[tokio::test]
+    async fn quest_completion_failed_publication_keeps_order_and_freezes_mutators() {
+        let (runtime, path) = trade_runtime("qc-fail");
+        let (shared, req, svc) = quest_world().await;
+        let spool = runtime.spool();
+        let cfg = &crate::progression::ProgressionCfg::default();
+        {
+            // Hold the character gate (as the NPC turn-in does), then attempt a
+            // publication that FAILS: the order must stay retained, no RAM change.
+            let _gate = spool.player_gate("7").await.lock_owned().await;
+            assert!(
+                finish_quest_completion(spool, &shared, req.clone(), cfg, &svc, |_| async {
+                    Err("publication failed".into())
+                })
+                .await
+                .is_err()
+            );
+        }
+        {
+            let w = shared.lock().await;
+            assert_eq!(w.players["7"].quests["q"].state, QuestState::Active);
+            assert_eq!(w.players["7"].persist_revision, 0);
+            assert_eq!(w.players["7"].idia, 40);
+            assert!(w.prepared_quest_completions.contains_key(&req.commit_id));
+            assert!(w.quest_completion_pending("7"));
+        }
+        // A retry over the SAME idempotent path reuses the retained identical
+        // order (no reward recompute) and converges.
+        commit_quest_completion(runtime.spool(), &shared, req.clone(), cfg, &svc)
+            .await
+            .unwrap();
+        let w = shared.lock().await;
+        assert_eq!(w.players["7"].quests["q"].state, QuestState::Completed);
+        assert_eq!(w.players["7"].idia, 47);
+        assert_eq!(w.players["7"].persist_revision, 1);
+        assert!(!w.prepared_quest_completions.contains_key(&req.commit_id));
+        assert_eq!(spool.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

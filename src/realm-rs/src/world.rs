@@ -203,6 +203,22 @@ pub struct World {
     /// One immutable normal publication shared by all of its participants.
     /// It survives cancellation, failed sync and drain-before-RAM-handoff.
     pub normal_publications: HashMap<String, crate::persist::NormalPublication>,
+    /// Offene Questannahme-Operations je Charakter (docs/Quest-System.md §27.27
+    /// / FIX_QUEST_ACCEPTANCE_RETRY_AND_SHUTDOWN_BLOCKING). Ein Uncertain-COMMIT
+    /// bleibt hier nachvollbar erfasst, bis `retry_quest_acceptances` zuverlässig
+    /// geklart. Kein RAM-only-ACTIVE, kein falschen ACTIVE und kein behaupteten
+    /// Rücknahme; die Tabelle `quests` bleibt die Autorität (§27.26). char_id →
+    /// noch ausstehende Annahmeversuche (identischer, immutable Inhalt).
+    pub pending_quest_acceptances: HashMap<String, Vec<crate::npc_quest::PendingAcceptance>>,
+    /// Retained, immutable quest-completion orders keyed by technical commit-ID
+    /// (docs/Quest-Turn-In-Persistenz.md). A failed/uncertain publication keeps
+    /// the EXACT prepared content here so a retry re-attempts identical data and
+    /// never recomputes the reward. The per-character Gate is held only over the
+    /// bounded publish+RAM-handoff window; independent characters stay free.
+    pub prepared_quest_completions: HashMap<String, crate::persist::PreparedQuestCompletion>,
+    /// Runtime receipts prevent a caller retry from allocating a second commit
+    /// for an already confirmed completion (mirrors `trade_receipts`).
+    pub quest_completion_receipts: HashMap<String, crate::persist::QuestCompletionRequest>,
     /// Eigene Runtime-Kennung dieses Realm-Prozesslaufs
     /// (`item_lifecycle::new_runtime_id`): stempelt Lifecycle-Metadaten zur
     /// Zuordnung und wird im Snapshot mitgeführt. Takeover und RAM-Übernahme
@@ -281,6 +297,9 @@ impl World {
             prepared_trades: HashMap::new(),
             trade_receipts: HashMap::new(),
             normal_publications: HashMap::new(),
+            pending_quest_acceptances: HashMap::new(),
+            prepared_quest_completions: HashMap::new(),
+            quest_completion_receipts: HashMap::new(),
             runtime_id: crate::item_lifecycle::new_runtime_id(),
             npcs: HashMap::new(),
             item_definitions: HashMap::new(),
@@ -309,6 +328,15 @@ impl World {
                 .iter()
                 .any(|c| c.snapshot.player_id == player_id)
         })
+    }
+
+    /// True while an immutable completion order for this character is still
+    /// open (prepared, not yet RAM-handed-off). Later saves, trades and further
+    /// completions must not uncontrolled overtake it (docs/Quest-Turn-In-Persistenz.md).
+    pub fn quest_completion_pending(&self, player_id: &str) -> bool {
+        self.prepared_quest_completions
+            .values()
+            .any(|p| p.request.character_id == player_id)
     }
 }
 

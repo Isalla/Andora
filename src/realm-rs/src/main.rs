@@ -23,6 +23,7 @@ mod lua;
 mod migrations;
 mod net;
 mod npc;
+mod npc_quest;
 mod progression;
 mod quest;
 mod regen;
@@ -235,24 +236,6 @@ async fn async_main() -> Result<(), String> {
         }
     }
 
-    let ws_task = {
-        let (cfg, shared, parental, groups, persist) = (
-            cfg.clone(),
-            shared.clone(),
-            parental.clone(),
-            groups.clone(),
-            persist.clone(),
-        );
-        tokio::spawn(net::serve(
-            cfg,
-            pool.clone(),
-            auth,
-            shared,
-            parental,
-            groups,
-            persist,
-        ))
-    };
     let poller = parental::start_poller(parental.clone(), shared.clone());
     let tick_shared = shared.clone();
     let tick_groups = groups.clone();
@@ -273,6 +256,12 @@ async fn async_main() -> Result<(), String> {
         npc::build_npcs(&defs, &spawns, &states)
     };
     log::info!("{} NPC-Instanzen geladen", npcs.len());
+    // Content-Index for Quest-Reference-resolvability (the ACTUAL loaded
+    // Monster-/NPC-Content — never a Clientclaim, §27.8).
+    let monster_content_ids: std::collections::HashSet<String> = npcs
+        .values()
+        .map(|n| n.content_id.clone())
+        .collect();
     {
         let mut w = tick_shared.lock().await;
         w.npcs = npcs;
@@ -288,10 +277,62 @@ async fn async_main() -> Result<(), String> {
             .map(|d| (d.item_id.clone(), d))
             .collect();
     log::info!("{} Item-Definitionen geladen", item_definitions.len());
+    let item_definition_ids: std::collections::HashSet<String> = item_definitions
+        .keys()
+        .cloned()
+        .collect();
     {
         let mut w = tick_shared.lock().await;
         w.item_definitions = item_definitions;
     }
+
+    // Quest V1 Content-Loader (docs/Quest-System.md §2 „Lua – statischer
+    // Teil", §27.9 provisional Definitionformat — smallest compatible
+    // proposal, see .tmp/quest-definition-loading/): Questdefinitions are
+    // loaded from the documented Content-Pfad (`<content_root>/quests/*.lua`
+    // via the existing Lua-Sandbox/ScriptManager) and validated COMPLETELY
+    // before registration (unique IDs, supported Objectives, valid
+    // quantities, resolvable Content-References). ALL-OR-NOTHING: a Ladefehler
+    // leaves NO partial Definitionbestand and bremst den Start (kein halber
+    // Realm). KEIN hartcodierte Testquest here. `content_root` leer → leer
+    // Registry (Kill-Credit fail-closed).
+    let quest_service = {
+        let mut svc = crate::quest::QuestService::new();
+        let content = crate::quest::ContentIndex {
+            monsters: monster_content_ids,
+            items: item_definition_ids,
+        };
+        let root = std::path::PathBuf::from(cfg.content_root.clone());
+        match svc.load_quest_definitions(&root, &content) {
+            Ok(n) => log::info!("{} Quest-Definitionen geladen", n),
+            Err(e) => {
+                log::error!("Quest-Definition-Loader: {e} — Realm-Start abgelehnt (kein halber Realm)");
+                return Err(format!("Quest-Definition-Loader: {e}"));
+            }
+        }
+        Arc::new(svc)
+    };
+    let ws_task = {
+        let (cfg, shared, parental, groups, persist) = (
+            cfg.clone(),
+            shared.clone(),
+            parental.clone(),
+            groups.clone(),
+            persist.clone(),
+        );
+        tokio::spawn(net::serve(
+            cfg,
+            pool.clone(),
+            auth,
+            shared,
+            parental,
+            groups,
+            persist,
+            quest_service.clone(),
+        ))
+    };
+    let quest_retry_quest = quest_service.clone();
+    let quest_shutdown_quest = quest_service.clone();
 
     // Loot-Tabellen (Loot System V1, Migration 017): Content-Schicht des
     // Lootsystems. Ein Ladefehler bremst den Start (kein halber Realm).
@@ -341,6 +382,7 @@ async fn async_main() -> Result<(), String> {
                 &loot_cfg,
                 &prog_cfg,
                 &groups_guard,
+                &quest_service,
                 &mut combat_rng,
                 now,
                 wall_now,
@@ -537,6 +579,56 @@ async fn async_main() -> Result<(), String> {
         }
     });
 
+    // FIX_QUEST_ACCEPTANCE_RETRY_AND_SHUTDOWN_BLOCKING: periodische Resolution-
+    // pass for outststanding Questannahme-Operations (docs/Quest-System.md §27.27
+    // / Player_Persistenz.md §10). Bounded per call (ONE attempt per pending
+    // entry); reuses `retry_quest_acceptances` over the SAME idempotent persist-
+    // path. When the DB returns, the identical acceptance converges (RAM-Über-
+    // nahme, no second state). Under permanent failure it keeps the entry pending
+    // and releases the Gate every pass, so Logout/Takeover/Shutdown never hang.
+    let quest_retry_interval = std::time::Duration::from_millis(cfg.persist.drain_interval_ms.max(1));
+    let quest_retry_pool = pool.clone();
+    let quest_retry_persist = persist.clone();
+    let quest_retry_shared = shared.clone();
+    let quest_retry_cfg = cfg.clone();
+    let quest_retry = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(quest_retry_interval);
+        interval.tick().await; // erste Tick überspringen (Start-Reihenfolge)
+        loop {
+            interval.tick().await;
+            let has_pending = {
+                let w = quest_retry_shared.lock().await;
+                w.pending_quest_acceptances.values().any(|v| !v.is_empty())
+                    || !w.prepared_quest_completions.is_empty()
+            };
+            if !has_pending {
+                continue;
+            }
+            match crate::npc_quest::retry_quest_acceptances(
+                crate::npc_quest::production_store(quest_retry_pool.clone()),
+                &quest_retry_persist,
+                quest_retry_shared.clone(),
+                None,
+                crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
+            )
+            .await {
+                Ok(n) if n > 0 => log::info!("quest-acceptance retry: {n} resolved"),
+                Ok(_) => {}
+                Err(e) => log::error!("quest-acceptance retry: {e}"),
+            }
+            if let Err(e) = crate::persist::retry_quest_completions(
+                quest_retry_persist.spool(),
+                &quest_retry_shared,
+                &quest_retry_cfg.progression,
+                &quest_retry_quest,
+                None,
+            )
+            .await {
+                log::error!("quest-completion retry: {e}");
+            }
+        }
+    });
+
     log::info!(
         "realm {} started (tick {tick_ms}ms, AOFB {aofb}m, db {})",
         cfg.realm_id,
@@ -555,6 +647,7 @@ async fn async_main() -> Result<(), String> {
     player_persister.abort();
     drainer.abort();
     health_task.abort();
+    quest_retry.abort();
     // Shutdown-Flush (docs/Player_Persistenz.md §23/§38): alle noch online
     // Spieler final als vollständige Spool-Batches sichern (force) und den
     // Logout-Zeitpunkt direkt setzen; danach ein letzter Drain.
@@ -606,6 +699,79 @@ async fn async_main() -> Result<(), String> {
             logout_report.failed,
             logout_report.skipped,
             logout_report.budget_exhausted
+        );
+    }
+    // FIX: ein geordem Shutdown muss nicht indefinitely verhindert werden durch
+    // een outstanding Questannahme. ONE bounded resolution pass over the SAME
+    // idempotent persist-path (no sleep, no endless task). Still-outstanding
+    // acceptances are reported as a defined error state; the character Snapshots
+    // were already secured above and the `quests`-Table remains the authority on
+    // the next Login (§27.26 / Player_Persistenz §30/§41). No weakened Save-
+    // guarantee, no SIGKILL as the regular completion path.
+    //
+    // The WHOLE retry pass is additionally capped by a real Deadline, so even a
+    // hanging attempt (Acquire+SQL+COMMIT never returns) and a blocked per-
+    // character Gate cannot push Shutdown beyond its budget. On Deadline-
+    // elapsed the still-outstanding entries stay pending (registered before any
+    // attempt) and are reported below.
+    match tokio::time::timeout(
+        crate::net::SHUTDOWN_LOGOUT_BUDGET,
+        crate::npc_quest::retry_quest_acceptances(
+            crate::npc_quest::production_store(pool.clone()),
+            &persist,
+            shared.clone(),
+            None,
+            crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
+        ),
+    )
+    .await {
+        Ok(Ok(resolved)) if resolved > 0 =>
+            log::info!("shutdown: {resolved} open quest acceptances resolved"),
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => log::error!("shutdown quest-acceptance retry: {e}"),
+        Err(_elapsed) =>
+            log::error!("shutdown quest-acceptance retry exceeded deadline (entries stay pending)"),
+    }
+    // The SAME bounded Shutdown pass resolves an open quest-completion order
+    // over the existing spool/drain path. Capped by the real Deadline; a still
+    // open order stays retained (prepared entry + durable spool file) and is
+    // reported below. No false COMPLETED, no claimed rollback.
+    match tokio::time::timeout(
+        crate::net::SHUTDOWN_LOGOUT_BUDGET,
+        crate::persist::retry_quest_completions(
+            persist.spool(),
+            &shared,
+            &cfg.progression,
+            &quest_shutdown_quest,
+            None,
+        ),
+    )
+    .await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("shutdown quest-completion retry: {e}"),
+        Err(_elapsed) =>
+            log::error!("shutdown quest-completion retry exceeded deadline (order stays pending)"),
+    }
+    let open_acceptances: usize = {
+        let w = shared.lock().await;
+        w.pending_quest_acceptances.values().map(|v| v.len()).sum()
+    };
+    if open_acceptances > 0 {
+        persist.set_status(crate::spool::PersistStatus::Degraded);
+        log::error!(
+            "shutdown_open_quest_acceptances={} (quests-Table remains authority; next Login re-derives)",
+            open_acceptances
+        );
+    }
+    let open_completions: usize = {
+        let w = shared.lock().await;
+        w.prepared_quest_completions.len()
+    };
+    if open_completions > 0 {
+        persist.set_status(crate::spool::PersistStatus::Degraded);
+        log::error!(
+            "shutdown_open_quest_completions={} (durable spool order/receipt remains authority; next Login re-derives)",
+            open_completions
         );
     }
     if let Err(e) = persist.drain_one(&pool).await {

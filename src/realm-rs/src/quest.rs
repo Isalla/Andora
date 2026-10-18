@@ -30,12 +30,30 @@
 // in MariaDB dupliziert — MariaDB (Tabelle `quests`) persistiert nur den
 // individuellen Spieler-Questzustand.
 //
+// Bestandskorrection (Quest V1.2b — Kill-Credit): the Kill-Event-Anbindung is
+// NOW embedded on the production path: `combat_tick` (src/realm-rs/src/combat/
+// mod.rs) feeds the Einmaligkeits Alive→Dead Monster-Tod into `add_progress`
+// for the documented Claim-/positionsempfängers (docs/Quest-System.md §27.8
+// KILL, §27.16 positionsrule — identical recipient rule as the EXP award, no
+// new attribution rule), matched by the stable Content-/Definitionskennung
+// (`Npc.content_id`, never the Spawn-Key or the Anzeigename). Still open
+// connections (§27.15): Talk-/Collect-/Deliver-Gameplay-Anbindung, C2S
+// accept/hand-in messages + S2C display, Rewards (no `rewards` field yet),
+// and the Quest-Content-/Definition-Loader (Lua-Format §27.9 — the runtime
+// Registry stays leer until then, Kill-Credit fail-closed).
+//
+// Aktueller Erweiterungsstand: NPC-Angebot und ausdrückliche Annahme sind
+// über npc_quest.rs angebunden (docs/Quest-System.md §27.27), einschließlich
+// optionalem giver, Charakter-Gate und bestätigter DB/RAM-Übernahme. Die
+// historischen V1.1/V1.2b-Grenzen oben beschreiben den jeweiligen Vorlauf.
+//
 // Autorität: Rust (Realm) bleibt autoritativ. Fortschritt darf niemals aus
 // einem ungeprüften Clientwert entstehen (§27.8). Die Fortschritts-Schnitt-
 // stelle (`add_progress`) akzeptiert ausschließlich serverseitig bestätigte
 // Deltas und wird in V1.2 von Combat/NPC-Interaktion/Inventory aufgerufen.
 
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 
 use sqlx::{MySql, Pool};
 
@@ -134,11 +152,51 @@ pub struct QuestObjective {
     pub required: u32,
 }
 
+/// Deklarierte Belohnung für die Vorschau: EXP und Idia gemäß §27.26.
+/// Keine Vergabe vor Freigabe des gemeinsamen Persistenzvertrags.
+/// Weitere Belohnungsfelder werden beim Laden ausdrücklich abgewiesen.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RewardBundle {
+    pub exp: u64,
+    pub idia: u64,
+}
+
+impl RewardBundle {
+    /// Reine Vorberechnung, keine Mutation und keine Persistenz.
+    /// Quest-EXP verwendet den vorhandenen Progressionskern ohne Rested-Bonus.
+    pub fn prepare(
+        &self,
+        progression: &crate::progression::Progression,
+        idia: i64,
+        cfg: &crate::progression::ProgressionCfg,
+    ) -> Result<(crate::progression::Progression, i64), &'static str> {
+        let exp = i64::try_from(self.exp).map_err(|_| "quest_reward_overflow")?;
+        let reward_idia = i64::try_from(self.idia).map_err(|_| "quest_reward_overflow")?;
+        let new_idia = idia.checked_add(reward_idia).ok_or("quest_reward_overflow")?;
+        progression.exp.checked_add(exp).ok_or("quest_reward_overflow")?;
+        let mut draft = progression.clone();
+        // Punkte separat berechnen, damit der bestehende Kern keine vorhandenen
+        // freien Punkte überlaufen lässt. Erst danach geprüft zusammenführen.
+        draft.free_attr_points = 0;
+        draft.grant_exp(cfg, exp);
+        draft.free_attr_points = progression.free_attr_points
+            .checked_add(draft.free_attr_points)
+            .filter(|points| *points <= i32::MAX as u32)
+            .ok_or("quest_reward_overflow")?;
+        Ok((draft, new_idia))
+    }
+}
+
 /// Statische Questdefinition (Quest V1 – minimale interne V1.1-
 /// Repräsentation, KEINE endgültige Content-API).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestDefinition {
     pub id: String,
+    /// Stabile NPC-Content-ID des Questgebers; ohne Zuordnung kein NPC-Angebot.
+    pub giver: Option<String>,
+    /// Stabile NPC-Content-ID des Abgabe-NPC. Ohne explizite Zuordnung keine
+    /// NPC-Abgabe: §27.22 definiert bislang keinen Fallback auf `giver`.
+    pub turn_in: Option<String>,
     /// i18n-Schlüssel (§24).
     pub title_key: String,
     pub description_key: String,
@@ -152,10 +210,22 @@ pub struct QuestDefinition {
     /// erneute Annahme nach COMPLETED (sofern eine Definition dies
     /// ausdrücklich vorsieht, §17-Testliste).
     pub repeatable: bool,
+    /// Dokumentierte Belohnungen (§23/§27.26): nur exp+idia (V1). Item-
+    /// belohnungen remain open and are rejected at load.
+    pub rewards: RewardBundle,
 }
 
 impl QuestDefinition {
     pub fn validate(&self) -> Result<(), QuestError> {
+        if self.giver.as_ref().is_some_and(|id| id.trim().is_empty()) {
+            return Err(QuestError::InvalidDefinition("leerer Questgeber".into()));
+        }
+        if self.turn_in.as_ref().is_some_and(|id| id.trim().is_empty()) {
+            return Err(QuestError::InvalidDefinition("leerer Abgabe-NPC".into()));
+        }
+        if self.rewards.exp > i64::MAX as u64 || self.rewards.idia > i64::MAX as u64 {
+            return Err(QuestError::InvalidDefinition("Belohnung überschreitet i64".into()));
+        }
         if self.id.is_empty() {
             return Err(QuestError::InvalidDefinition("leere Quest-ID".into()));
         }
@@ -300,6 +370,8 @@ impl From<crate::inventory::InventoryError> for QuestCompletionError {
 pub enum QuestAcceptError {
     Quest(QuestError),
     Persistence(String),
+    /// COMMIT wurde versucht; sein Ergebnis ist nicht bestätigt.
+    Uncertain(String),
 }
 
 impl From<QuestError> for QuestAcceptError {
@@ -382,6 +454,89 @@ impl QuestService {
         def.validate()?;
         self.definitions.insert(def.id.clone(), def);
         Ok(())
+    }
+
+    /// Quest V1 Content-Loader (docs/Quest-System.md §2 „Lua – statischer
+    /// Teil", §27.9): loads the Questdefinitions from the documented
+    /// Content-Pfad (the `quests/` Script-Domäne, existing
+    /// `crate::lua::script::scan_script_files` + `ScriptManager` sandbox)
+    /// and provides them to this shared Service.
+    ///
+    /// ALL-OR-NOTHING: any defective Definition aborts the WHOLE load —
+    /// no partially loaded Definitionbestand is ever registered
+    /// („Fehler dürfen keinen unbemerkt teilweise geladenen Definitions-
+    /// bestand hinterlassen"). Reasons are reported structured
+    /// ([`QuestLoadError`]).
+    ///
+    /// Full validation BEFORE registration:
+    ///   * unique, non-empty Quest-IDs (within the batch and against the
+    ///     already registered Definitions),
+    ///   * only supported V1-Objective-types (`kill`/`talk`/`collect`/
+    ///     `deliver`, §27.1 — others rejected, not silently dropped),
+    ///   * valid quantities (`required` integer ≥ 1; existing
+    ///     `QuestDefinition.validate` reused),
+    ///   * actually resolvable Content-References: `kill`/`talk` targets
+    ///     against the loaded Monster-/NPC-Content (`content_id`),
+    ///     `collect`/`deliver` targets against the loaded Item-Definitions,
+    ///     `requires` against Quest-IDs of the batch/Registry.
+    ///
+    /// Abgabevorbereitung (§27.28): `turn_in` referenziert NPC-Content;
+    /// `rewards{exp,idia}` wird für die Vorschau validiert. Andere Rewardfelder
+    /// werden abgewiesen. Vergabe erst nach Persistenzvertragsfreigabe.
+    pub fn load_quest_definitions(
+        &mut self,
+        root: &Path,
+        content: &ContentIndex,
+    ) -> Result<usize, QuestLoadError> {
+        let files = crate::lua::script::scan_script_files(
+            root,
+            crate::lua::domain::ScriptDomain::Quest,
+        )
+            .map_err(|e| QuestLoadError::Script(format!("{e}")))?;
+        if files.is_empty() {
+            return Ok(0);
+        }
+
+        let mut manager = crate::lua::runtime::ScriptManager::new()
+            .map_err(|e| QuestLoadError::Script(format!("{e}")))?;
+        let mut loaded: Vec<QuestDefinition> = Vec::with_capacity(files.len());
+        let mut seen: HashSet<String> = HashSet::new();
+        for file in files {
+            let source = crate::lua::script::ScriptSource::File {
+                name: file.name.clone(),
+                path: file.path.clone(),
+            };
+            let (_, json) = manager
+                .eval_data(crate::lua::domain::ScriptDomain::Quest, source)
+                .map_err(|e| QuestLoadError::Script(format!("{e}")))?;
+            let def = build_quest_definition(&json, content)?;
+            if !seen.insert(def.id.clone()) || self.definitions.contains_key(&def.id) {
+                return Err(QuestLoadError::Duplicate(
+                    format!("Quest-ID {} registered twice", def.id)
+                ));
+            }
+            loaded.push(def);
+        }
+        // `requires` must resolve against the batch or the existing Registry.
+        for def in &loaded {
+            for req in &def.requires {
+                let resolvable = loaded.iter().any(|d| d.id.as_str() == req.as_str())
+                    || self.definitions.contains_key(req);
+                if !resolvable {
+                    return Err(QuestLoadError::UnresolvedRef(
+                        format!("Quest {}: Voraussetzung {} is no known Quest-ID", def.id, req)
+                    ));
+                }
+            }
+        }
+
+        // Only here: the WHOLE batch is complete and valid → register.
+        let count = loaded.len();
+        for def in loaded {
+            self.register(def)
+                .map_err(|e| QuestLoadError::Invalid(format!("{e}")))?;
+        }
+        Ok(count)
     }
 
     /// Findet eine Questdefinition nach ID.
@@ -483,8 +638,8 @@ impl QuestService {
 
     /// Questannahme mit unmittelbarer Persistenz (docs/Player_Persistenz.md
     /// §10): der bedeutende AVAILABLE→ACTIVE-Übergang wird sofort in die
-    /// Tabelle `quests` geschrieben — Upsert über `write_quest_state` in
-    /// einer eigenen Transaktion. Ablauf:
+    /// Tabelle `quests` geschrieben — Einfügen ohne Überschreiben über
+    /// `write_quest_acceptance` in einer eigenen Transaktion. Ablauf:
     ///
     ///   1. unveränderte Annahmevalidierung über `accept` (keine neuen
     ///      Quest-Semantiken, §10: keine Repeatable-/FAILED-/Abort-Ableitungen),
@@ -492,10 +647,11 @@ impl QuestService {
     ///   3. state-Lieferung erst NACH erfolgreichem COMMIT.
     ///
     /// Der RAM-Übergang (Übernahme in `player.quests`) ist Sache des
-    /// Aufrufers und darf ausschließlich nach `Ok` erfolgen: Liefert diese
-    /// Methode `Err`, wurde nichts persistiert und der ACTIVE-Zustand darf
-    /// NICHT in den autoritativen RAM übernommen werden (kein still-
-    /// schweigender RAM-only-ACTIVE). Der normale Objective-Fortschritt
+    /// Aufrufers und darf ausschließlich nach `Ok` erfolgen. `Persistence`
+    /// vor COMMIT erlaubt keinen ACTIVE-Erfolg; `Uncertain` bedeutet dagegen,
+    /// dass COMMIT erfolgt sein kann und unter dem Charakter-Gate mit derselben
+    /// Annahme geklärt werden muss. Kein stillschweigender RAM-only-ACTIVE.
+    /// Der normale Objective-Fortschritt
     /// innerhalb ACTIVE läuft wie dokumentiert über Dirty-State/periodischen
     /// Flush (§8) — ersetzt wird hier nur der AVAILABLE→ACTIVE-Übergang.
     ///
@@ -515,37 +671,46 @@ impl QuestService {
     ) -> Result<CharacterQuestState, QuestAcceptError> {
         // Schritt 1: unveränderte Annahmevalidierung.
         let accepted = self.accept(quest_id, current, character_level, completed_quests)?;
-        // Schritt 2: unmittelbare Persistenz (Upsert ACTIVE) in einer
-        // Transaktion. HIDDEN/AVAILABLE sind abgeleitet und wären hier
-        // ohnehin kein ACTIVE-Ergebnis; `accept` liefert ausschließlich
-        // persistierbare Datenzustände.
-        let data = encode_state_for_db(&accepted).map_err(QuestAcceptError::Persistence)?;
+        Self::persist_acceptance(db, char_id, &accepted).await
+    }
+
+    /// Gemeinsamer Sofortpersistenzkern der Annahme. Vorhandene Zeilen
+    /// werden niemals überschrieben; insbesondere bleibt ACTIVE-Fortschritt
+    /// bei identischer Wiederholung nach unklarem COMMIT erhalten.
+    /// Der NPC-Aufrufer hält das Charakter-Gate bis zur RAM-Übernahme und
+    /// behandelt Uncertain ausdrücklich nicht als bestätigten Rollback.
+    pub async fn persist_acceptance(
+        db: &Pool<MySql>,
+        char_id: &str,
+        accepted: &CharacterQuestState,
+    ) -> Result<CharacterQuestState, QuestAcceptError> {
+        if accepted.state != QuestState::Active {
+            return Err(QuestError::NotAvailable.into());
+        }
+        let data = encode_state_for_db(accepted).map_err(QuestAcceptError::Persistence)?;
         let mut tx = db.begin().await.map_err(|e| {
             QuestAcceptError::Persistence(format!("Annahme-Transaktion beginnen: {e}"))
         })?;
-        crate::db::write_quest_state(
-            &mut tx,
-            char_id,
-            &accepted.quest_id,
-            accepted.state.db_value(),
-            &data,
-        )
-        .await
-        .map_err(QuestAcceptError::Persistence)?;
+        let row = crate::db::write_quest_acceptance(&mut tx, char_id, &accepted.quest_id, &data)
+            .await
+            .map_err(QuestAcceptError::Persistence)?;
+        let state = QuestState::from_db_value(row.state)
+            .ok_or_else(|| QuestAcceptError::Persistence("ungültiger Questzustand".into()))?;
+        let confirmed = decode_quest_data(&row.quest_id, state, row.data.as_deref())
+            .map_err(QuestAcceptError::Persistence)?;
         tx.commit().await.map_err(|e| {
-            QuestAcceptError::Persistence(format!("Annahme-Transaktion commit: {e}"))
+            QuestAcceptError::Uncertain(format!("Annahme-Transaktion commit: {e}"))
         })?;
-        // Schritt 3: erst nach erfolgreichem COMMIT steht der Aufrufer in der
-        // Pflicht, den Zustand zu übernehmen; bei jedem Fehler bleibt die
-        // Quest im RAM wie in der DB AVAILABLE.
-        Ok(accepted)
+        Ok(confirmed)
     }
 
     /// Verwaltet serverseitig bestätigten Fortschritt eines ACTIVE-Zustands
     /// (§11). Akzeptiert ausschließlich serverseitig bestätigte Deltas
     /// (z. B. realm-bestätigter Gegner-Tod); ein ungeprüfter Clientwert ist
-    /// keine gültige Eingabe. Die konkrete Gameplay-Event-Anbindung folgt
-    /// in V1.2 (Combat/NPC-Interaktion/Inventory).
+    /// keine gültige Eingabe. The `kill`-Anbindung is EMBEDDED (V1.2b):
+    /// `combat_tick` calls this ONLY at the Einmaligkeits Alive→Dead
+    /// Monster-Tod for the documented Claim-/positionsempfängers (§27.8/§27.16).
+    /// Talk-/Collect-/Deliver-Gameplay-Anbindung follow in later steps.
     pub fn add_progress(
         &self,
         quest_id: &str,
@@ -888,6 +1053,311 @@ fn prerequisites_met(
     character_level >= def.min_level && def.requires.iter().all(|q| completed_quests.contains(q))
 }
 
+/// The actually loaded Content-Registries (Monster-/NPC-`content_id` from
+/// `monster_definitions` and Item-Definition-IDs) — the reference-resolvability
+/// basis for Quest-Targets. Built at Realm-Start from the REAL registries, never
+/// from a Clientclaim (§27.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentIndex {
+    pub monsters: HashSet<String>,
+    pub items: HashSet<String>,
+}
+
+/// Fehlerkatalog des Content-Loader: strukturiert, brauchable Diagnosegrunds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestLoadError {
+    /// Lua-Load/Syntax/Runtime-/Sandboxerror of a Definition-Script (reason).
+    Script(String),
+    /// Definition invalid (missing field, unsupported Objective-type,
+    /// invalid quantity).
+    Invalid(String),
+    /// Duplicate Quest-ID (within the batch or against the Registry).
+    Duplicate(String),
+    /// Content-Reference not resolvable against the loaded registries.
+    UnresolvedRef(String),
+}
+
+impl std::fmt::Display for QuestLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuestLoadError::Script(m) => write!(f, "Definition-Script: {m}"),
+            QuestLoadError::Invalid(m) => write!(f, "ungültige Questdefinition: {m}"),
+            QuestLoadError::Duplicate(m) => write!(f, "doppelte Quest-ID: {m}"),
+            QuestLoadError::UnresolvedRef(m) => write!(f, "unresolvable Content-Reference: {m}"),
+        }
+    }
+}
+
+/// Builds and FULLY validates one Questdefinition from the JSON a
+/// Definition-Script returned. Follows the documented shape of
+/// docs/quests_stories.md §3 (`id`, `title_key`, `description_key`,
+/// `requirements = { level = N }`, `objectives = { { type=, target=,
+/// required= }, .. }`).
+///
+/// Provisional decisions (the endgültige Lua-Quest-Format stays open, §27.9 —
+/// smallest compatible proposal, see `.tmp/quest-definition-loading/`):
+///   * `requirements.requires = { "quest_id", .. }` carries the documented
+///     „vorherige Quest" (§14) onto the internal `requires`,
+///   * `repeatable` (bool, default false) maps the §17-Testliste flag,
+///   * `rewards` must be missing or an empty Table; a NON-EMPTY rewards
+///     Table is rejected (Rewards stay open, §27.15/§27.26).
+///
+/// Rejections (with reason): missing/empty fields, UNKNOWN fields at any
+/// level (Quest-Lua-Format V1 whitelist — a Typfehler never silently
+/// changes Content), unsupported Objective-types (only V1 `kill`/`talk`/
+/// `collect`/`deliver`), non-integer or < 1 quantities, non-empty `rewards`,
+/// and Content-References that do not resolve against the actually loaded
+/// registries. The existing `QuestDefinition.validate` is reused for
+/// ID-/quantity-invariants.
+fn build_quest_definition(
+    json: &serde_json::Value,
+    content: &ContentIndex,
+) -> Result<QuestDefinition, QuestLoadError> {
+    let Some(obj) = json.as_object() else {
+        return Err(QuestLoadError::Invalid("Definition must be a Table/Object".into()));
+    };
+    // Quest-Lua-Format V1 (explicit contract): unknown fields are REJECTED
+    // with a precise reason — a Typfehler never silently changes Content.
+    let known_top: [&str; 9] = [
+        "id",
+        "giver",
+        "turn_in",
+        "title_key",
+        "description_key",
+        "requirements",
+        "objectives",
+        "repeatable",
+        "rewards",
+    ];
+    for k in obj.keys() {
+        if !known_top.iter().any(|f| *f == k.as_str()) {
+            return Err(QuestLoadError::Invalid(
+                format!(
+                    "unknown field '{}' (Quest-Lua-Format V1 fields: {})",
+                    k,
+                    known_top.iter().map(|f| f.to_string()).collect::<Vec<String>>().join(", ")
+                )
+            ));
+        }
+    }
+    // `rewards` (§23/§27.26): V1 supports ONLY the two documented, inventory-
+    // independent kinds `exp` (Quest-EXP §§8–9) and `idia` (Geld). Missing or
+    // EMPTY is allowed (no reward). Unknown/unsupported keys (e.g. item-,
+    // ausrüstung-, Ruf-, Titel-, Skill-, Achievement-rewards) are REJECTED with
+    // an understandable Ladefehler (no silent ignore, no invented Reward-Semantik,
+    // no invented Preise/EXP-Mengen). Values must be non-negative integers.
+    let rewards = RewardBundle {
+        exp: 0,
+        idia: 0,
+    };
+    let rewards = if let Some(rw) = obj.get("rewards") {
+        let Some(rwo) = rw.as_object() else {
+            return Err(QuestLoadError::Invalid("'rewards' must be a Table".into()));
+        };
+        for k in rwo.keys() {
+            if k != "exp" && k != "idia" {
+                return Err(QuestLoadError::Invalid(format!(
+                    "unsupported reward kind '{}' (V1: exp, idia — item/other rewards remain open, §27.26)",
+                    k
+                )));
+            }
+        }
+        let uint_field = |key: &str| -> Result<u64, QuestLoadError> {
+            match rwo.get(key) {
+                None => Ok(0),
+                Some(v) => match v.as_i64() {
+                    Some(n) if n >= 0 => match u64::try_from(n) {
+                        Ok(m) => Ok(m),
+                        Err(_) => Err(QuestLoadError::Invalid(format!("reward '{key}' too large (got {n})"))),
+                    },
+                    Some(n) => Err(QuestLoadError::Invalid(format!("reward '{key}' must be >= 0 (got {n})"))),
+                    None => Err(QuestLoadError::Invalid(format!("reward '{key}' must be an Integer (got {v})"))),
+                },
+            }
+        };
+        RewardBundle {
+            exp: uint_field("exp")?,
+            idia: uint_field("idia")?,
+        }
+    } else {
+        rewards
+    };
+    let str_field = |key: &str| -> Result<String, QuestLoadError> {
+        match obj.get(key) {
+            None => Err(QuestLoadError::Invalid(format!("field '{key}' missing"))),
+            Some(v) => match v.as_str() {
+                Some(s) if !s.is_empty() => Ok(s.to_string()),
+                Some(_) => Err(QuestLoadError::Invalid(format!("field '{key}' must not be empty"))),
+                None => Err(QuestLoadError::Invalid(format!("field '{key}' must be a String (got {v})"))),
+            },
+        }
+    };
+    let id = str_field("id")?;
+    let title_key = str_field("title_key")?;
+    let description_key = str_field("description_key")?;
+    let giver = if obj.contains_key("giver") {
+        let gid = str_field("giver")?;
+        if !content.monsters.contains(&gid) {
+            return Err(QuestLoadError::UnresolvedRef(format!(
+                "Quest {id}: giver verweist auf keine geladene NPC-Content-ID"
+            )));
+        }
+        Some(gid)
+    } else {
+        None
+    };
+    // Kein dokumentierter Fallback auf giver; die Referenz bleibt optional.
+    let turn_in = if obj.contains_key("turn_in") {
+        let tid = str_field("turn_in")?;
+        if !content.monsters.contains(&tid) {
+            return Err(QuestLoadError::UnresolvedRef(format!(
+                "Quest {id}: turn_in verweist auf keine geladene NPC-Content-ID"
+            )));
+        }
+        Some(tid)
+    } else {
+        None
+    };
+
+    let Some(req) = obj.get("requirements").and_then(|v| v.as_object()) else {
+        return Err(QuestLoadError::Invalid("field 'requirements' missing or not a Table".into()));
+    };
+    for k in req.keys() {
+        if k != "level" && k != "requires" {
+            return Err(QuestLoadError::Invalid(
+                format!("unknown field 'requirements.{}' (V1: level, requires)", k)
+            ));
+        }
+    }
+    let min_level = match req.get("level") {
+        None => 0,
+        Some(v) => match v.as_i64() {
+            Some(n) => match u32::try_from(n) {
+                Ok(m) => m,
+                Err(_) => return Err(QuestLoadError::Invalid(
+                    format!("'requirements.level' must be >= 0 (got {n})")
+                )),
+            },
+            None => return Err(QuestLoadError::Invalid(
+                format!("'requirements.level' must be an Integer (got {v})")
+            )),
+        },
+    };
+    let requires: Vec<String> = match req.get("requires") {
+        None => Vec::new(),
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return Err(QuestLoadError::Invalid("'requirements.requires' must be an Array".into()
+                ));
+            };
+            let mut out = Vec::with_capacity(arr.len());
+            for q in arr {
+                match q.as_str() {
+                    Some(s) if !s.is_empty() => out.push(s.to_string()),
+                    _ => return Err(QuestLoadError::Invalid("'requirements.requires' entries must be non-empty Strings".into()
+                    )),
+                }
+            }
+            out
+        }
+    };
+
+    let repeatable = match obj.get("repeatable") {
+        None => false,
+        Some(v) => match v.as_bool() {
+            Some(b) => b,
+            None => return Err(QuestLoadError::Invalid(
+                format!("'repeatable' must be a Bool (got {v})")
+            )),
+        },
+    };
+
+    let Some(objs) = obj.get("objectives").and_then(|v| v.as_array()) else {
+        return Err(QuestLoadError::Invalid("field 'objectives' missing or not an Array".into()
+        ));
+    };
+    if objs.is_empty() {
+        return Err(QuestLoadError::Invalid("Quest has no Objectives".into()));
+    }
+    let mut objectives = Vec::with_capacity(objs.len());
+    for (idx, o) in objs.iter().enumerate() {
+        let Some(oo) = o.as_object() else {
+            return Err(QuestLoadError::Invalid(format!("Objective {} must be a Table", idx + 1)
+            ));
+        };
+        for k in oo.keys() {
+            if k != "id" && k != "type" && k != "target" && k != "required" {
+                return Err(QuestLoadError::Invalid(
+                    format!("Objective {}: unknown field '{}' (V1: id, type, target, required)", idx + 1, k)
+                ));
+            }
+        }
+        let str_at = |key: &str| -> Result<String, QuestLoadError> {
+            match oo.get(key) {
+                None => Err(QuestLoadError::Invalid(format!("Objective {}: field '{key}' missing", idx + 1))),
+                Some(v) => match v.as_str() {
+                    Some(s) if !s.is_empty() => Ok(s.to_string()),
+                    Some(_) => Err(QuestLoadError::Invalid(format!("Objective {}: field '{key}' must not be empty", idx + 1))),
+                    None => Err(QuestLoadError::Invalid(format!("Objective {}: field '{key}' must be a String (got {v})", idx + 1))),
+                },
+            }
+        };
+        let oid = str_at("id")?;
+        let type_key = str_at("type")?;
+        let kind = ObjectiveType::from_key(&type_key)
+            .ok_or_else(|| QuestLoadError::Invalid(format!(
+                "Objective {}: unsupported type (only kill/talk/collect/deliver)", idx + 1
+            )))?;
+        let target = str_at("target")?;
+        let required = match oo.get("required") {
+            None => return Err(QuestLoadError::Invalid(format!("Objective {}: 'required' missing", idx + 1)
+            )),
+            Some(v) => match v.as_i64() {
+                Some(n) => match u32::try_from(n) {
+                    Ok(m) if m >= 1 => m,
+                    _ => return Err(QuestLoadError::Invalid(
+                        format!("Objective {}: 'required' must be >= 1 (got {n})", idx + 1)
+                    )),
+                },
+                None => return Err(QuestLoadError::Invalid(
+                    format!("Objective {}: 'required' must be an Integer (got {v})", idx + 1)
+                )),
+            },
+        };
+        let resolvable = match kind {
+            ObjectiveType::Kill | ObjectiveType::Talk => content.monsters.contains(&target),
+            ObjectiveType::Collect | ObjectiveType::Deliver => content.items.contains(&target),
+        };
+        if !resolvable {
+            return Err(QuestLoadError::UnresolvedRef(format!(
+                "Objective {}: target '{}' does not resolve against the loaded Content ({})",
+                idx + 1, target, kind.key()
+            )));
+        }
+        objectives.push(QuestObjective {
+            id: oid,
+            kind,
+            target,
+            required,
+        });
+    }
+
+    let def = QuestDefinition {
+        giver,
+        turn_in,
+        id,
+        title_key,
+        description_key,
+        objectives,
+        min_level,
+        requires,
+        repeatable,
+        rewards,
+    };
+    def.validate().map_err(|e| QuestLoadError::Invalid(format!("{e}")))?;
+    Ok(def)
+}
+
 /// Nur Datenzustände (ACTIVE/COMPLETED/FAILED) sind persistierbar; die
 /// abgeleiteten Zustände HIDDEN/AVAILABLE (docs/Quest-System.md §27.5)
 /// werden bewusst ausgeschlossen. Wird vom `encode_state_for_db` und vom
@@ -989,6 +1459,9 @@ mod tests {
     ) -> QuestDefinition {
         QuestDefinition {
             id: id.to_string(),
+            giver: None,
+            turn_in: None,
+            rewards: RewardBundle { exp: 0, idia: 0 },
             title_key: format!("quest.{id}.title"),
             description_key: format!("quest.{id}.description"),
             objectives,
@@ -1900,12 +2373,435 @@ mod tests {
 
     // ── Registrierung / Definitionen ─────────────────────────────────────
 
+    // ── Quest V1 Content-Loader (docs/Quest-System.md §2/§27.9) ───────────
+    //
+    // The Definition-Scripts follow the documented shape of
+    // docs/quests_stories.md §3 (provisional format, §27.9 — smallest
+    // compatible proposal). Tests use temp-Dirs (short-lived, ai_jobs
+    // „Temporäre Dateien"); no DB, no Service-Start.
+
+    use std::fs;
+    use std::path::Path;
+
+    fn tmp_root(tag: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+        let tag_s = tag.as_ref().display().to_string();
+        let base = std::env::temp_dir()
+            .join(format!("pimmo-lua-quest-load-{tag_s}"))
+            .join(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string());
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    /// Writes Definition-Scripts `(name, lua)` into `<root>/quests/`.
+    fn write_scripts(root: &Path, scripts: &[(String, String)]) {
+        let dir = root.join("quests");
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, code) in scripts {
+            std::fs::write(dir.join(format!("{name}.lua")), code).unwrap();
+        }
+    }
+
+    /// Documented-shape Definition-Script (quests_stories.md §3): a
+    /// `kill`-Quest for Content „wolf".
+    const WOLF_QUEST_LUA: &str = r#"
+quest = {
+    id = "q_test_wolves",
+    title_key = "quest.q_test_wolves.title",
+    description_key = "quest.q_test_wolves.description",
+    requirements = { level = 1 },
+    objectives = {
+        { id = "o_wolves", type = "kill", target = "wolf", required = 5 },
+    },
+}
+return quest
+"#;
+
+    fn wolf_content() -> ContentIndex {
+        let mut monsters = HashSet::new();
+        monsters.insert("wolf".into());
+        ContentIndex { monsters, items: HashSet::new() }
+    }
+
+    #[test]
+    fn loader_turn_in_and_rewards_are_explicit_and_validated() {
+        let root = tmp_root("turn-in-valid");
+        let script = WOLF_QUEST_LUA.replace("quest = {",
+            "quest = { giver = 'giver', turn_in = 'recipient', rewards = { exp = 11, idia = 7 },");
+        let mut content = wolf_content();
+        content.monsters.extend(["giver".into(), "recipient".into()]);
+        write_scripts(&root, &[("valid".into(), script)]);
+        let mut svc = QuestService::new();
+        assert_eq!(svc.load_quest_definitions(&root, &content).unwrap(), 1);
+        let def = svc.find_definition("q_test_wolves").unwrap();
+        assert_eq!(def.giver.as_deref(), Some("giver"));
+        assert_eq!(def.turn_in.as_deref(), Some("recipient"));
+        assert_eq!(def.rewards, RewardBundle { exp: 11, idia: 7 });
+
+        let root = tmp_root("turn-in-absent");
+        write_scripts(&root, &[("absent".into(), WOLF_QUEST_LUA.replace(
+            "quest = {", "quest = { giver = 'giver',"))]);
+        let mut svc = QuestService::new();
+        svc.load_quest_definitions(&root, &content).unwrap();
+        let def = svc.find_definition("q_test_wolves").unwrap();
+        assert_eq!(def.turn_in, None, "kein erfundener giver-Fallback");
+        assert_eq!(def.rewards, RewardBundle::default());
+    }
+
+    #[test]
+    fn loader_rejects_invalid_turn_in_and_reward_payloads_atomically() {
+        for field in [
+            "turn_in = ''", "turn_in = 'missing'", "turn_in = 5",
+            "rewards = { exp = -1 }", "rewards = { idia = -1 }",
+            "rewards = { exp = 0.5 }", "rewards = { idia = false }",
+            "rewards = { exp = '11' }", "rewards = false",
+            "rewards = { xp = 11 }", "rewards = { gold = 7 }",
+            "rewards = { items = { 'wolf' } }", "rewards = { choice = 'wolf' }",
+        ] {
+            let root = tmp_root("turn-in-invalid");
+            let bad = WOLF_QUEST_LUA.replace("quest = {", &format!("quest = {{ {field},"));
+            let good = WOLF_QUEST_LUA.replace("q_test_wolves", "q_good");
+            write_scripts(&root, &[("a_good".into(), good), ("z_bad".into(), bad)]);
+            let mut svc = QuestService::new();
+            assert!(svc.load_quest_definitions(&root, &wolf_content()).is_err(), "{field}");
+            assert_eq!(svc.definitions().count(), 0, "keine Teilregistrierung: {field}");
+        }
+    }
+
+    #[test]
+    fn reward_numbers_must_fit_existing_signed_storage() {
+        let valid = serde_json::json!({
+            "id": "q", "title_key": "t", "description_key": "d",
+            "requirements": {}, "objectives": [{"id": "k", "type": "kill", "target": "wolf", "required": 1}],
+            "rewards": {"exp": i64::MAX, "idia": 0}
+        });
+        let def = build_quest_definition(&valid, &wolf_content()).unwrap();
+        assert_eq!(def.rewards.exp, i64::MAX as u64);
+        let mut invalid = valid;
+        invalid["rewards"]["exp"] = serde_json::json!((i64::MAX as u64) + 1);
+        assert!(build_quest_definition(&invalid, &wolf_content()).is_err());
+        let mut invalid_def = def;
+        invalid_def.rewards.exp = u64::MAX;
+        assert!(invalid_def.validate().is_err(), "auch interne Registrierung validieren");
+    }
+
+    #[test]
+    fn turn_in_reward_draft_reuses_progression_without_rested_or_mutation() {
+        let cfg = crate::progression::ProgressionCfg::default();
+        let before = crate::progression::Progression::new(
+            1, 0, 0, 80, crate::class::ClassStatus::Adventurer, false,
+        );
+        let amount = crate::progression::exp_needed(&cfg, 1);
+        let rewards = RewardBundle { exp: amount as u64, idia: 7 };
+        let (draft, new_idia) = rewards.prepare(&before, 10, &cfg).unwrap();
+        assert_eq!(draft.level, 2);
+        assert_eq!(draft.exp, 0);
+        assert_eq!(draft.rested_pool, 80, "Quest-EXP verbraucht kein Rested");
+        assert_eq!(new_idia, 17);
+        assert_eq!(before.level, 1, "Vorbereitung verändert den Eingang nicht");
+        assert_eq!(before.free_attr_points, 0);
+    }
+
+    #[test]
+    fn turn_in_reward_draft_rejects_overflow_without_partial_changes() {
+        let cfg = crate::progression::ProgressionCfg::default();
+        let before = crate::progression::Progression::new(
+            1, 0, 0, 80, crate::class::ClassStatus::Adventurer, false,
+        );
+        let rewards = RewardBundle { exp: 11, idia: 7 };
+        assert_eq!(rewards.prepare(&before, i64::MAX, &cfg), Err("quest_reward_overflow"));
+        let mut exp_overflow = before.clone();
+        exp_overflow.exp = i64::MAX;
+        assert_eq!(rewards.prepare(&exp_overflow, 10, &cfg), Err("quest_reward_overflow"));
+        let mut points_overflow = before.clone();
+        points_overflow.free_attr_points = i32::MAX as u32;
+        let level_up = RewardBundle { exp: crate::progression::exp_needed(&cfg, 1) as u64, idia: 0 };
+        assert_eq!(level_up.prepare(&points_overflow, 10, &cfg), Err("quest_reward_overflow"));
+        assert_eq!(points_overflow.free_attr_points, i32::MAX as u32);
+        assert_eq!(before.exp, 0);
+    }
+
+    #[test]
+    fn loader_giver_with_and_without_reference_remains_compatible() {
+        for giver in [None, Some("wolf")] {
+            let root = tmp_root("giver-valid");
+            let code = match giver {
+                Some(id) => WOLF_QUEST_LUA.replace("quest = {", &format!("quest = {{ giver = \"{id}\",")),
+                None => WOLF_QUEST_LUA.to_owned(),
+            };
+            write_scripts(&root, &[("q".into(), code)]);
+            let mut service = QuestService::new();
+            assert_eq!(service.load_quest_definitions(&root, &wolf_content()).unwrap(), 1);
+            assert_eq!(service.find_definition("q_test_wolves").unwrap().giver.as_deref(), giver);
+        }
+    }
+
+    #[test]
+    fn loader_giver_rejects_unknown_empty_and_non_string_atomically() {
+        for value in ["\"missing\"", "\"\"", "7", "false", "{}"] {
+            let root = tmp_root("giver-invalid");
+            let invalid = WOLF_QUEST_LUA.replace("quest = {", &format!("quest = {{ giver = {value},"));
+            write_scripts(&root, &[("a".into(), WOLF_QUEST_LUA.replace("q_test_wolves", "valid")),
+                ("b".into(), invalid)]);
+            let mut service = QuestService::new();
+            assert!(service.load_quest_definitions(&root, &wolf_content()).is_err());
+            assert_eq!(service.definitions().count(), 0);
+        }
+    }
+
+    #[test]
+    fn loader_loads_valid_definition_into_registry() {
+        let root = tmp_root("valid");
+        write_scripts(&root, &vec![(("q_test_wolves".into(), WOLF_QUEST_LUA.into()))]);
+        let mut svc = QuestService::new();
+        let n = svc.load_quest_definitions(&root, &wolf_content()).unwrap();
+        assert_eq!(n, 1);
+        let def = svc.find_definition("q_test_wolves").unwrap();
+        assert_eq!(def.objectives[0].kind, ObjectiveType::Kill);
+        assert_eq!(def.objectives[0].target, "wolf");
+        assert_eq!(def.objectives[0].required, 5);
+        assert_eq!(def.min_level, 1);
+    }
+
+    #[test]
+    fn loader_rejects_duplicate_quest_ids_without_partial_load() {
+        let root = tmp_root("dup");
+        write_scripts(
+            &root,
+            &vec![(("a".into(), WOLF_QUEST_LUA.into())), (("b".into(), WOLF_QUEST_LUA.into()))],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        assert!(matches!(err, Err(QuestLoadError::Duplicate(_))), "{err:?}");
+        assert!(svc.find_definition("q_test_wolves").is_none(), "kein partial load");
+    }
+
+    #[test]
+    fn loader_rejects_unsupported_objective_type() {
+        let root = tmp_root("badkind");
+        write_scripts(
+            &root,
+            &vec![(
+                "escort".into(),
+                r#"return {
+    id = "q_escort",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "escort", target = "wolf", required = 1 } },
+}"#.into(),
+            )],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        assert!(matches!(err, Err(QuestLoadError::Invalid(_))), "{err:?}");
+        assert!(svc.find_definition("q_escort").is_none());
+    }
+
+    #[test]
+    fn loader_rejects_invalid_quantity_and_missing_fields() {
+        let root = tmp_root("badqty");
+        write_scripts(
+            &root,
+            &vec![(
+                "bad".into(),
+                r#"return {
+    id = "q_bad",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 0 } },
+}"#.into(),
+            )],
+        );
+        let mut svc = QuestService::new();
+        assert!(matches!(
+            svc.load_quest_definitions(&root, &wolf_content()),
+            Err(QuestLoadError::Invalid(_))
+        ));
+        assert!(svc.find_definition("q_bad").is_none());
+    }
+
+    #[test]
+    fn loader_rejects_unresolvable_content_reference() {
+        let root = tmp_root("badref");
+        write_scripts(&root, &vec![("q".into(), WOLF_QUEST_LUA.into())]);
+        // Content-Schicht WITHOUT „wolf" → the Target does not resolve.
+        let empty = ContentIndex { monsters: HashSet::new(), items: HashSet::new() };
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &empty);
+        assert!(matches!(err, Err(QuestLoadError::UnresolvedRef(_))), "{err:?}");
+        assert!(svc.find_definition("q_test_wolves").is_none());
+    }
+
+    #[test]
+    fn loader_reports_lua_syntax_error_with_reason() {
+        let root = tmp_root("syntax");
+        write_scripts(
+            &root,
+            &vec![("broken".into(), "return { id = ((( ".into())],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        match err {
+            Err(QuestLoadError::Script(m)) => assert!(m.contains("SYNTAX_ERROR"), "{m}"),
+            other => panic!("expected Script, got {other:?}"),
+        }
+        assert_eq!(svc.definitions().count(), 0);
+    }
+
+    #[test]
+    fn loader_is_all_or_nothing_on_mixed_batch() {
+        let root = tmp_root("mixed");
+        write_scripts(
+            &root,
+            &vec![(("good".into(), WOLF_QUEST_LUA.into())),
+                (
+                    "bad".into(),
+                    r#"return {
+    id = "q_bad",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "dragon", required = 2 } },
+}"#.into(),
+                ),
+            ],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        assert!(matches!(err, Err(QuestLoadError::UnresolvedRef(_))), "{err:?}");
+        // The VALID Definition is NOT registered behind the defective one.
+        assert!(svc.find_definition("q_test_wolves").is_none());
+    }
+
+    #[test]
+    fn loader_requires_resolve_against_known_quests() {
+        let root = tmp_root("reqchain");
+        write_scripts(
+            &root,
+            &[
+                (
+                    "a".into(),
+                    r#"return {
+    id = "q_a",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 1 } },
+}"#.into(),
+                ),
+                (
+                    "b".into(),
+                    r#"return {
+    id = "q_b",
+    title_key = "t", description_key = "d",
+    requirements = { level = 3, requires = { "q_a" } },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 2 } },
+}"#.into(),
+                ),
+            ],
+        );
+        let mut svc = QuestService::new();
+        let n = svc.load_quest_definitions(&root, &wolf_content()).unwrap();
+        assert_eq!(n, 2);
+        let b = svc.find_definition("q_b").unwrap();
+        assert_eq!(b.requires, vec!["q_a".to_string()]);
+        assert_eq!(b.min_level, 3);
+    }
+
+    #[test]
+    fn loader_rejects_unknown_fields_precisely() {
+        let root = tmp_root("unkfield");
+        write_scripts(
+            &root,
+            &[(
+                "typo".into(),
+                r#"return {
+    id = "q_typo",
+    titel_key = "t",
+    description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 1 } },
+}"#.into(),
+            )],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        match err {
+            Err(QuestLoadError::Invalid(m)) =>
+                assert!(m.contains("unknown field 'titel_key'"), "{m}"),
+            other => panic!("expected Invalid(unknown field), got {other:?}"),
+        }
+        assert!(svc.find_definition("q_typo").is_none());
+    }
+
+    #[test]
+    fn loader_rejects_unsupported_reward_fields() {
+        let root = tmp_root("rewards");
+        write_scripts(
+            &root,
+            &[(
+                "rew".into(),
+                r#"return {
+    id = "q_rew",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 1 } },
+    rewards = { xp = 500 },
+}"#.into(),
+            )],
+        );
+        let mut svc = QuestService::new();
+        let err = svc.load_quest_definitions(&root, &wolf_content());
+        match err {
+            Err(QuestLoadError::Invalid(m)) =>
+                assert!(m.contains("unsupported reward kind 'xp'"), "{m}"),
+            other => panic!("expected Invalid(rewards), got {other:?}"),
+        }
+        assert!(svc.find_definition("q_rew").is_none());
+    }
+
+    #[test]
+    fn loader_allows_missing_or_empty_rewards() {
+        let root = tmp_root("norewards");
+        write_scripts(
+            &root,
+            &[
+                (
+                    "empty".into(),
+                    r#"return {
+    id = "q_empty_rew",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 1 } },
+    rewards = {},
+}"#.into(),
+                ),
+                (
+                    "absent".into(),
+                    r#"return {
+    id = "q_no_rew",
+    title_key = "t", description_key = "d",
+    requirements = { level = 1 },
+    objectives = { { id = "o1", type = "kill", target = "wolf", required = 1 } },
+}"#.into(),
+                ),
+            ],
+        );
+        let mut svc = QuestService::new();
+        let n = svc.load_quest_definitions(&root, &wolf_content()).unwrap();
+        assert_eq!(n, 2, "missing/empty rewards stay zulässig");
+    }
+
     #[test]
     fn invalid_definitions_are_rejected_on_register() {
         let mut svc = QuestService::new();
         assert!(matches!(
             svc.register(QuestDefinition {
                 id: "no_objectives".into(),
+                giver: None,
+                turn_in: None,
+                rewards: RewardBundle { exp: 0, idia: 0 },
                 title_key: "t".into(),
                 description_key: "d".into(),
                 objectives: Vec::new(),

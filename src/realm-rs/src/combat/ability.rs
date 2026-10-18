@@ -1099,6 +1099,7 @@ mod tests {
         Npc {
             id: id.into(),
             spawn_id: 1,
+            content_id: id.into(),
             name: "Wolf".into(),
             kind: "normal".into(),
             attackable: true,

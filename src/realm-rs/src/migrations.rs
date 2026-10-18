@@ -343,11 +343,11 @@ mod tests {
         let nums: Vec<u32> = files.iter().map(|f| f.num).collect();
         assert_eq!(
             nums,
-            (1..=23).collect::<Vec<_>>(),
-            "Migrationen 001–023 lückenlos"
+            (1..=25).collect::<Vec<_>>(),
+            "Migrationen 001–025 lückenlos"
         );
         let last = files.last().expect("mindestens eine Migration");
-        assert_eq!((last.num, last.tag.as_str()), (23, "trade_commit_proof"));
-        assert_eq!(last.file, "023_trade_commit_proof.sql");
+        assert_eq!((last.num, last.tag.as_str()), (25, "character_quest_commits"));
+        assert_eq!(last.file, "025_character_quest_commits.sql");
     }
 }

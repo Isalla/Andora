@@ -804,6 +804,7 @@ mod tests {
         crate::npc::Npc {
             id: crate::npc::npc_id(spawn_id),
             spawn_id,
+            content_id: crate::npc::npc_id(spawn_id),
             name: format!("Händler_{spawn_id}"),
             kind: "named".into(),
             attackable: false,
@@ -952,6 +953,9 @@ mod tests {
     fn quest_def() -> QuestDefinition {
         QuestDefinition {
             id: "q_relic".into(),
+            giver: None,
+            turn_in: None,
+            rewards: crate::quest::RewardBundle { exp: 0, idia: 0 },
             title_key: "t".into(),
             description_key: "d".into(),
             objectives: vec![

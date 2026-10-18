@@ -1058,6 +1058,8 @@ Keine Client-Nachricht wie
 
 darf unmittelbar Questfortschritt erzeugen.
 
+> **Bestandskorrektur (Codeprüfung, Quest V1.2b — Kill-Credit):** Die KILL-Regel ist jetzt im Code **eingebunden und getestet**: `combat_tick` (`src/realm-rs/src/combat/mod.rs`) meldet den **einmaligen Monster-Tod beim Übergang Alive→Dead** (nicht jeden Tick mit hp≤0) an `QuestService.add_progress` für die dokumentierten, anhand von Claim und Position bestimmten Empfänger (Gruppen-Claim `g:<gid>` → aktive Mitglieder im 100-m-Bereich um den Anführer einschließlich gestorbener Mitglieder; nach außerhalb Teleportierte → kein Fortschritt; Spieler-Claim → dieser Spieler; ohne Claim → ersatzweise der tödlich treffende Spieler — identisch zur EXP-Vergabe, §27.16/§27.12, keine neue Zuordnungsregel). Monster werden anhand der **stabilen Content-/Definitionskennung** (`Npc.content_id`, `monster_definitions`) zugeordnet, niemals anhand des zufälligen Spawn-Schlüssels oder des Anzeigenamens. Nur ACTIVE-Quests mit einem passenden `kill`-Ziel erhalten einen Zuwachs von 1 über die bestehende Begrenzungs-/Ziellogik. Reine RAM-Änderung — keine DB-Ein-/Ausgabe unter der World-Sperre (Zwischenfortschritt wird nur an Quest-Prüfpunkten persistiert, `Player_Persistenz.md` §8). Der QuestService wird im Produktionspfad über Arc gemeinsam genutzt (`main.rs` → `net::serve` Ctx + Tick-Schleife). **Weiterhin offen:** die Spielanbindung für TALK/COLLECT/DELIVER, die C2S-Nachrichten für Annahme/Abgabe und die S2C-Anzeige, Belohnungen sowie der Quest-Content-/Definitionsloader (§27.9 — die Laufzeit-Registry bleibt leer, Kill-Credit bleibt ohne passende Definition gesperrt). Dieser Hinweis kennzeichnet eine Bestandsabweichung; er ändert **keine** Regel.
+
 ---
 
 ## 27.9 Lua in Quest V1
@@ -1073,6 +1075,13 @@ Deshalb gilt für Quest V1:
 * KEINE Realm-Lua-Verdrahtung wird in dieser Stufe implementiert.
 
 Quest V1 muss mit der bestehenden Autoritätsregel kompatibel sein und darf Lua niemals autoritativ machen (Abschnitt 27.8).
+
+Bestandskorrektur (Codeprüfung, Quest V1.2c — Definitionsloader): Der Definitionsloader ist im Produktionspfad eingebunden. QuestService::load_quest_definitions (src/realm-rs/src/quest.rs) lädt beim Realm-Start die Script-Domäne quests/ unter CONTENT_ROOT. Dabei werden die vorhandenen Funktionen scan_script_files, die Sandbox des ScriptManager und die neue Daten-Auswertung eval_data verwendet. Die Definitionen werden im gemeinsam genutzten Arc<QuestService> registriert und stehen damit dem Kill-Fortschritt und dem Handler-Pfad zur Verfügung. Lua liefert ausschließlich Definitionsdaten; sämtliche Zustandsänderungen und Berechtigungsentscheidungen bleiben beim autoritativen Realm gemäß §27.8.
+Quest-Lua-Format V1: Ein Definitionsskript gibt eine reine Datentabelle zurück. Zulässig sind id, title_key, description_key, requirements = { level = N, requires = { "quest_id", … } }, objectives = { { id=, type=, target=, required= }, … } sowie optional repeatable als boolescher Wert und giver als stabile NPC-Content-ID (Erweiterung gemäß §27.27). Unbekannte Felder werden auf oberster Ebene sowie innerhalb von requirements und den Objectives mit einer präzisen Fehlermeldung abgewiesen.
+Belohnungen: `rewards` darf fehlen oder leer sein. Die Abgabe-Vorbereitung (§27.28) validiert zusätzlich `exp` und `idia` als nichtnegative Ganzzahlen bis i64::MAX für die serverseitige Vorschau. Unbekannte oder nicht unterstützte Felder werden abgewiesen. Die Belohnungsvergabe bleibt bis zur Freigabe des gemeinsamen Persistenzvertrags gesperrt; ladbare Belohnungsdaten sind kein Nachweis für eine implementierte Vergabe.
+Validierung und Registrierung: Content-Referenzen müssen auflösbar sein: kill und talk verweisen auf geladene Content-IDs aus monster_definitions, collect und deliver auf item_definitions. Auch Questverweise in requires müssen aufgelöst werden können. Die Registrierung erfolgt vollständig oder gar nicht. Fehlerhafte Definitionen verhindern den Realm-Start; ein teilweise registrierter Definitionsbestand wird nicht übernommen.
+Verzeichnisverhalten: Ein fehlendes oder leeres Verzeichnis <CONTENT_ROOT>/quests/ ergibt Ok(0). Der Realm startet dann mit einem leeren Definitionsbestand, da Quests optionaler Content sind. Ohne passende Definition werden weder Questangebote freigegeben noch Kill-Fortschritte zugeordnet. Fehlerhafte vorhandene Skripte führen dagegen zum Startabbruch.
+Dokumentierte Vertragsänderung: Die bisherige Aussage in §27.9, dass kein neues Lua-Quest-Dateiformat festgelegt werde, wird durch das hier ausdrücklich festgelegte minimale Format V1 ersetzt. Die vollständige Lua-API und Orchestrierung bleiben offen. Das Beispiel aus quests_stories.md §3 verwendet die nicht unterstützten Schlüssel `xp`/`gold` und ist nicht unverändert ladbar; die Vorschau-Erweiterung §27.28 verwendet ausdrücklich `exp`/`idia`. Diese Formatfestlegung erfindet keine Belohnungsmengen.
 
 ---
 
@@ -1137,6 +1146,8 @@ Quest V1 benötigt für `deliver` eine autoritative Möglichkeit, eine exakt val
 Eine allgemeine passende remove-/Übergabe-API ist derzeit nicht vorhanden (Ergebnis des Doku-/Code-Audits).
 
 Diese API wird in dieser Dokumentationsstufe **nicht** implementiert; sie ist eine technische Voraussetzung für die spätere `deliver`-Implementierung.
+
+> **Bestandskorrektur (Codeprüfung, Quest V1.2a):** Dieses Prüfergebnis ist gegenüber dem aktuellen Repository **veraltet**. Im Code vorhanden sind `InventoryState.try_remove(item_id, qty)` (`src/realm-rs/src/inventory.rs`, mit Dokumentationsverweisen auf §27.13/§27.26 — exakt validierte Mengenentnahme, keine Teilentnahme, keine negative Menge) und die atomare Übergabe-/Abschluss-Transaktion `QuestService.complete_for_character` (`src/realm-rs/src/quest.rs`) mit der DB-Schutzprüfung `db::guarded_complete_quest` (`UPDATE state=2 … WHERE state=1`, exakt 1 Zeile). Beide sind durch reine Modultests abgedeckt. **Es fehlt nur noch die Spiel-/Protokollanbindung** (C2S-Abgabenachricht, Handler, registrierte Questdefinition), die diesen vorhandenen Kern erreicht — **nicht** die Entnahme-/Übergabe-Grundoperation selbst. Dieser Hinweis kennzeichnet eine Bestandsabweichung; er ändert **keine** Regel.
 
 Dabei muss insbesondere verhindert werden:
 
@@ -1580,6 +1591,8 @@ Die bestehende Regel bleibt verbindlich: Ein Abschluss derselben (nicht wiederho
 
 Die hier beschriebene Reservierungs-/Transaktionsregel unterstützt diesen Schutz, es wird jedoch **keine** konkrete Netzwerk-Idempotency-API festgelegt.
 
+> **Bestandskorrektur (Codeprüfung, Quest V1.2b):** Die implementierte DB-Schutzprüfung (`db::guarded_complete_quest`, `UPDATE state=2 … WHERE state=1`) schützt den **ACTIVE→COMPLETED-Übergang der `quests`-Zeile** (Doppelabschluss, Rollback ohne COMMIT). Sie allein ist **kein Nachweis** für die Atomarität künftiger **Belohnungen**: Belohnungen sind noch nicht Bestandteil der Definition/Transaktion. Bei der späteren Implementierung der Belohnungen müssen der RAM-Zustand (Quest-/Inventar-/Progressionszustand), das Schreiben in die DB und die bestehenden Spool-/Revisionspfade (`Player_Persistenz.md` §15 Generation/Revision, §23 Stufe-B Spool) **gemeinsam** betrachtet werden — eine außerhalb der geschützten Transaktion (oder nur im RAM) geschriebene Belohnung würde deren Schutz nicht übernehmen. Dieser Hinweis kennzeichnet eine Bestandsabweichung; er ändert **keine** Regel.
+
 ### Ausdrücklich nicht implementieren
 
 Mit dieser Festlegung wird **kein** Code erstellt:
@@ -1608,3 +1621,224 @@ Bewusst weiterhin **nicht** festgelegt:
 * Zeitquest-Semantik (Abschnitt 27.10)
 * Quest-Lua-Format/-API (Abschnitt 27.9)
 * Quest-Protokoll-IDs
+
+## 27.27 NPC-Questangebot und ausdrückliche Annahme (eingebaut)
+
+Diese Erweiterung ersetzt die früheren offenen Annahme-/Anzeigegrenzen aus
+§27.8/§27.15: Der Pfad für NPC-Angebote und Annahme ist serverseitig eingebaut.
+Abgabe, Belohnungen, Questlog und weitere Zielanbindungen bleiben offen.
+
+### Questgeber und Definitionsvertrag
+
+Das optionale Feld `giver` ist eine nichtleere Zeichenkette mit der stabilen
+Content-ID aus `monster_definitions`. Der vorhandene Definitionsloader prüft
+die Referenz gegen den tatsächlich geladenen NPC-/Monster-Definitionsbestand,
+bevor er den gesamten Definitionssatz registriert. Ungültiger Typ, leere oder
+unauflösbare Referenz verhindern den Ladevorgang ohne Teilregistrierung.
+Ohne `giver` bleibt eine Definition unverändert ladbar, bietet aber keine
+NPC-Annahme an. `turn_in` und eine Abgabe-NPC-Zuordnung werden nicht eingeführt.
+Die konkrete NPC-Instanz wird über `npc_id` ausgewählt; die fachliche
+Questgeberzuordnung erfolgt ausschließlich über deren `Npc.content_id`,
+nicht über Spawn-Schlüssel oder Anzeigename.
+
+### NPC_TALK / NPC_TEXT
+
+Die vorhandenen IDs C2S 6 / S2C 8 bleiben erhalten. Zusätzlich zu den
+unveränderten Händleraktionen gelten:
+
+* `NPC_TALK {npc_id, action:"quest_offers"}` fragt verfügbare Angebote ab.
+* `NPC_TALK {npc_id, action:"quest_accept", quest_id}` fordert die Annahme an.
+* Angebotsantwort: `{ok:true, action:"quest_offers", npc_id, quests:[{quest_id,
+  title_key, description_key, state:"AVAILABLE", can_accept:true}]}`.
+  Eine leere Liste ist ein erfolgreiches Ergebnis. HIDDEN, ACTIVE, COMPLETED
+  und FAILED erscheinen nicht als annehmbare Angebote. Keine Erweiterung der
+  Wiederannahme-/Repeatable-Regeln.
+* Annahmeerfolg: `{ok:true, action:"quest_accept", npc_id, quest_id,
+  state:"ACTIVE"}` ausschließlich nach bestätigtem DB-COMMIT und RAM-Übernahme.
+* Ablehnung: `{ok:false, action, npc_id, reason}`. Stabile Gründe sind
+  `unknown_npc`, `npc_unavailable`, `character_dead`, `out_of_range`,
+  `unknown_quest`, `wrong_quest_giver`, `quest_not_available`,
+  `quest_already_active`, `quest_already_completed`, `quest_persistence_failed`
+  und `quest_accept_pending`. Bei verlorenem Eigentum erfolgt keine Aktion
+  und keine Antwort an die verdrängte Verbindung.
+
+Der Client liefert nur Aktion und Kennungen. Eigentümer und Charakterzustand
+stammen aus der serverseitigen Verbindungszuordnung; behauptete `account_id`,
+Level oder Questzustände sind wirkungslos. `seq` wird nur zur Korrelation
+zurückgespiegelt und verleiht keine Berechtigung oder Idempotenz.
+
+### Prüfung, Serialisierung und Commit-Grenze
+
+Der Handler löst den Charakter aus `by_conn` auf und prüft nach Erwerb des
+bestehenden `PersistRuntime.player_gate` das aktuelle Eigentum erneut.
+Unter der World-Sperre prüft er NPC-Existenz, lebendigen Charakter/NPC,
+`NpcStatus::Alive`, den bestehenden Interaktionsradius
+`cfg.loot.pickup_radius` (`LOOT_PICKUP_RADIUS`), `giver` und die bestehenden
+QuestService-Voraussetzungen (Level und abgeschlossene Vorgängerquests).
+Nur tatsächlich AVAILABLEe Quests werden zur Annahme vorbereitet.
+
+Die bestehende Sofortpersistenz wird im gemeinsamen Kern
+`QuestService::persist_acceptance` wiederverwendet. In der Tabelle `quests`
+(Migration 004) wird eine fehlende Zeile eingefügt; bei vorhandener Zeile
+bleiben Zustand und Fortschritt unverändert. Das anschließende `SELECT … FOR
+UPDATE` liest den maßgeblichen Zustand in derselben Transaktion. Es wartet
+auch auf einen gegebenenfalls noch laufenden ersten INSERT/COMMIT. So erzeugt
+eine identische technische Wiederholung keinen zweiten Zustand und setzt
+keinen Fortschritt zurück. Ein bereits im RAM aktiver Zustand wird vor jedem
+DB-Aufruf mit `quest_already_active` abgewiesen.
+
+DB-Ein-/Ausgabe erfolgt **ohne World-Sperre**. Das gemeinsame Charakter-Gate
+bleibt geholt nur über die **jeamlig** Vorprüfung und EINE bounded Persistenz-
+Versuch, nicht über een endless Retry. Konkurrierente Annahme, Logout und
+Takeover desselben Charakters warten daran nur solange dieses jeamlig Versuch
+active; es geniet kene detached, unbounded Task, der een geordem Shutdown
+indefinitely verhindern.
+
+**BOUND_QUEST_ACCEPTANCE_IO_AND_SHUTDOWN (explicit IO-Timeout + Deadline):**
+The Annahme- und Retry-Persistenzversuch carries an **explicit Zeitgrenze**
+`QUEST_ACCEPT_IO_TIMEOUT` (2 s) around the **whole** attempt — Acquire + SQL-
+Execute + COMMIT — via `tokio::time::timeout` (reuses the existing per-
+operation Timeout-Muster of the Logout `write_timeout`, `net.rs:190`; **NO**
+global Pool-Change; the production Pool keeps its sqlx-default acquire-
+Timeout of 30 s, `db.rs:162`). A **Timeout is treated like an Uncertain
+COMMIT**: the acceptance stays **outstanding** (pending), NO false ACTIVE,
+NO claimed safe rollback. It is distinguished from a pre-COMMIT `Persistence`
+error (which drops the pending entry and melds `quest_persistence_failed`).
+
+The acceptance is registered in `World.pending_quest_acceptances` **BEFORE**
+the timed attempt, so a Cancellation between attempt, registration and RAM-
+Übernahme can never lose the outstanding state. After the bounded attempt
+(incl. Timeout) the per-character Gate is released; the pending entry and its
+idempotent Wiederaufnahme remain. `retry_quest_acceptances` wraps EACH entry-
+attempt in the same IO-Timeout and is **character-scoped** via `requested`:
+Logout (`finish_owner`) and Login/Takeover (`handle_hello`) pass their own
+char_id, so they never wait on a foreign character's hanging entry. The
+periodic pass (`main.rs`) iterates pending chars acquiring **one** Gate at a
+time (never multiple), so independent characters stay securable. **Preserved
+uncertainty:** in `retry_quest_acceptances` the pending entry is removed ONLY on
+a confirmed COMMIT plus correct RAM-Übernahme; a pre-COMMIT failure of a LATER
+attempt (e.g. at Pool-Acquire) proves NOTHING about the first COMMIT and MUST
+NOT undo the original uncertainty — it stays pending. A first attempt that
+safely failed pre-COMMIT is still rejected normally (`quest_persistence_failed`,
+no pending).
+
+Shutdown caps the **entire** retry pass by a real Deadline
+(`tokio::time::timeout(SHUTDOWN_LOGOUT_BUDGET, retry_quest_acceptances(...))`),
+so even a hanging attempt and a blocked Gate cannot push Shutdown beyond its
+budget; on Deadline-elapsed the still-outstanding entries stay pending and are
+reported as a defined error state (`shutdown_open_quest_acceptances`,
+PersistStatus Degraded). No SIGKILL as the regular completion path, no
+weakened Save-Guarantee (character Snapshots are secured independently).
+
+**Neustart / DB-Wiederaufnahme:** the `quests`-Table remains the authority
+(§27.26). The next Login re-derives ACTIVE via the existing DB-load path
+(`load_for_character` → `load_quest_rows`) **if** the COMMIT had in fact
+landed; otherwise the player re-accepts. **No automatic Commit-effect on a
+dropped sqlx `Transaction` is behaupted** — the COMMIT outcome after a
+Timeout/Cancellation is explicitly **unknown**, which is exactly why the
+acceptance is kept pending rather than resolved optimistically. No second
+Spool-/Persistenzpipeline und kein Reward-Nachweis.
+
+### Testclient und Nachweisgrenzen
+
+`testclient/tc_merchant.gd` erweitert die vorhandene NPC-Auswahl um Questliste,
+Beschreibung, „Annehmen“ und Lade-/Fehler-/Pending-/Erfolgsanzeige. `tc_main.gd`
+leitet die neuen Aktionen und Antworten auf demselben Protokoll weiter.
+Nachrichten werden anhand von `seq`, Aktion und NPC der laufenden Anfrage
+zugeordnet; späte Antworten nach Auswahlwechsel/Logout werden verworfen.
+ACTIVE wird lokal erst nach ausdrücklicher Serverbestätigung angezeigt.
+Bei NPC-Klick werden zunächst Questangebote abgefragt; ohne Angebote folgt
+die bisherige Händleröffnung. Die Händleraktionen selbst bleiben unverändert.
+`testclient/` bleibt von Git ignoriert, Godot-Version 3.6.3.
+
+**BOUND-Tests: Suite 925/925 offline bestanden** (920 Vorlauf + 4 neue
+`npc_quest.rs`-Hang-/Cancellation-Nachweise + 1 neue `net.rs`-Shutdown-
+Deadline-Test); 901 als berichteter Vorlauf anerkannt. Enthalten sind echte
+Handler-/Dispatch-Aufrufe, konkurrierente Annahme, Fehler und COMMIT-
+Antwortverlust, die bounded-Pending-Nachweise (Uncertain-COMMIT then
+PERMANENT failure stays pending, identical resumption after DB returns,
+pending blocks a second accept, offers exclude a pending quest, Logout/Takeover
+of a pending character never falsely active, per-character Gate independence)
+AND die **HANG-Pfad mit einer niemals-zurückkehrenden Store-Future +
+gesteuerter Tokio-Zeit**: first attempt runs off and stays pending
+(`npc_quest_hang_first_attempt_stays_pending_gate_free`), retry runs off then
+DB returns resolves identically without double (`npc_quest_retry_hang_then_db_
+returns_resolves_no_double`), Cancellation around a hang keeps the pending
+entry (`npc_quest_cancellation_around_hang_pending_survives`), a character-
+scoped retry does not wait on a foreign hang (`npc_quest_char_scoped_retry_
+does_not_wait_on_foreign_hang`), and Shutdown's whole pass is bounded by a real
+Deadline even with a hanging attempt and blocked Gate
+(`npc_quest_shutdown_deadline_bounds_hang_and_blocked_gate`). Loader-Nachweise
+mit/ohne/ungültigem `giver` bleiben. Der DB-Adapter ist ausdrücklich ein
+Modell, keine echte SQL-/MariaDB-/Crash-Verifikation. **No bloß immediate
+error is used as a Hang-Nachweis** (mode 4 never returns; the IO-Timeout/
+Deadline fires). Keine Live-DB, Startdaten, Migrationen oder Dienststarts.
+
+Der tatsächliche Quest-Panel-Aufbau und dessen Signal-/Antwortpfad bestehen
+**19/19 Godot-3.6.3-Prüfungen** mit projektlokalem Prüfdisplay. Der vollständige
+Client ist durch vorbestehende Einrückungs-/Parsefehler der uncommitteten
+Elternkontroll-Erweiterung blockiert (`tc_main.gd:108`, `tc_parental.gd:147`);
+diese fremden Arbeitsabschnitte wurden erhalten. Deshalb keine vollständige
+Client-Szenen-, visuelle oder Live-E2E-Abnahme behauptet. Artefakte:
+`.tmp/quest-offer-acceptance/`.
+
+## 27.28 Abgabe und Belohnungen – eingebaut (Durable Quest-Completion)
+
+Der Abgabe-/Belohnungs-Pfad ist **durchgängig umgesetzt** (Productions-Pfad,
+offline-geprüft). Der Freigabe in `Quest-Turn-In-Persistenz.md` ist GRANTED:
+die existing Spool-/Drain-Pfad is extended with a single-character
+`quest_completion`-order and the additive Receipt-Table `character_quest_commits`
+(Migration 025, created + registered, NOT executed against a real DB). A
+deliberate NPC turn-in (`quest_turn_in`) at the bound `turn_in`-NPC completes a
+fulfilled Killquest with the prepared EXP-/Idia rewards.
+
+Embedded production path:
+
+- Optionales `turn_in` als nichtleere, beim Laden auflösbare stabile
+  NPC-Content-ID, getrennt von `giver`. Ohne explizites `turn_in` keine
+  Abgabevorschau. Ein Fallback ist durch §27.22 bislang nicht festgelegt.
+- `rewards = {exp = N, idia = M}`: nichtnegative Ganzzahlen bis i64::MAX,
+  fehlende Felder null. Andere Angaben, auch `xp`, `gold`, `items` und
+  Auswahlbelohnungen, werden ausdrücklich abgewiesen. Keine Balancewerte
+  oder Content-Seeds. Die reine Reward-Vorberechnung verwendet den bestehenden
+  `Progression::grant_exp`-Kern ohne Rested-Bonus, prüft Überläufe und verändert
+keinen Charakter.
+- `NPC_TALK {action:"quest_turn_ins", npc_id}` liefert ACTIVE-Killquests am
+  expliziten Abgabe-NPC mit `objectives_met`, `rewards:{exp,idia}` und
+  **`can_turn_in` = objectives_met** (server-driven).
+- `NPC_TALK {action:"quest_turn_in", npc_id, quest_id}` prüft Eigentum,
+  NPC-/Spielerleben, Reichweite, Definition, Zuordnung, ACTIVE und echte
+  Zielerfüllung. On success it builds ONE immutable `quest_completion`-order
+  (full resulting `PersistSnapshot` incl. Lifecycle + the once-computed Reward,
+  the COMPLETED quest state, base/target-Revision, technical commit-ID), publishes
+  it durably over the existing Spool-/Drain-Pfad and performs the RAM handoff;
+  it answers `NPC_TEXT {ok:true, state:"COMPLETED", rewards:{exp,idia}}`. An
+  uncertain/failed publication keeps the identical order pending
+  (`quest_turn_in_pending`/`quest_turn_in_busy`), NO false COMPLETED, NO reward
+  claim, NO rollback. `seq` stays correlation. The Gate acquisition is bounded
+  (2-s pattern).
+- The additive Receipt-Table `character_quest_commits` (Migration 025) carries the
+  canonical order in the SAME transaction as the full snapshot, the ACTIVE→COMPLETED
+  row and `persist_revision`. Repetition is confirmed ONLY by a matching content
+  receipt; revision equality or a COMPLETED row alone never yields AlreadyApplied.
+- The ignorierte Godot-3.6-Testclient shows the reward preview, enables „Abgeben“
+  only on server `can_turn_in`, and displays pending/success(COMPLETED)/rejection
+  reasons. It never awards EXP/Idia locally.
+
+**Prüfungen dieses Stand:** 935 Tests als berichteter Vorlauf anerkannt;
+**947/947 Realm-Tests offline bestanden** (12 zusätzliche `quest_completion`-Tests:
+drain applies snapshot+COMPLETED+receipt, older snapshot never overwrites, normal
+publication waits while open, DB-error keeps order pending, divergent/missing
+receipt = conflict, attribution survives unreadable payload, filename routing,
+sync-failure confirms identical content only, failed publication retains order +
+retry reuses identical content, overflow rejects without mutation, logout resolves
+open order before gate, shutdown retry deadline-bounded). Godot 3.6.3: **13/13**
+Panel-/Signal-/Vorschau-/COMPLETED-Prüfungen. Clippy `--all-targets`: only the
+pre-existing `health.rs:411` deny-error (`unused_io_amount`), no new error.
+`git diff --check` clean. No live DB/SQL/Crash proof. Protokolle: `.tmp/quest-turn-in/`.
+
+**Offen (not in scope):** Itembelohnungen (no real inventory/UUID re-adoption proof),
+further objective bindings, Repeatable-extensions, Questlog, new balance. No live
+DB access, seeds, migration execution, service starts or installation.
+nicht unterstützt; Inventarvoll-/stabile UUID-/Crash-Nachweise für eine echte
+Vergabe werden nicht behauptet. Prüfartefakte: `.tmp/quest-turn-in/`.

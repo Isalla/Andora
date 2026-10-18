@@ -266,6 +266,46 @@ impl ScriptManager {
         results
     }
 
+    /// Content-/Definitionspfad (docs/Lua-Scripting-System.md §6/§10): Lädt
+    /// and runs a **pure-Data-Script** — the Top-Level-Chunk must return a
+    /// data-Table; the value crosses to the Host only as JSON-capable data
+    /// (functions/UserData/Threads rejected by the converter, Depth limited).
+    /// The returned JSON is handed to the Rust-Side Validator/Loader — the
+    /// Script never touches Realm-State (Realm remains autoritativ).
+    pub fn eval_data(
+        &mut self,
+        domain: ScriptDomain,
+        source: ScriptSource,
+    ) -> Result<(ScriptId, serde_json::Value), LuaError> {
+        let id = self.load_script(domain, source)?;
+        let script = self.script(&id)?.clone();
+        let collector = RequestCollector::new();
+        let env = self.build_env(&collector)?;
+        let ctx_table = convert::context_to_lua(&self.lua, &ScriptContext::default())?;
+
+        let chunk = self
+            .lua
+            .load(&script.source)
+            .set_name(id.full_id())
+            .set_environment(env);
+        let top: Value = chunk
+            .call(ctx_table.clone())
+            .map_err(|e| map_runtime_error(&id, e))?;
+
+        if !matches!(top, Value::Table(_)) {
+            return Err(LuaError::InvalidScript {
+                domain,
+                name: id.name.clone(),
+                message: "Data-Script must return a Table".into(),
+            });
+        }
+        let json = convert::lua_value_to_json(&top, 1)
+            .map_err(|e| LuaError::SandboxViolation {
+                message: e.into_payload_message(),
+            })?;
+        Ok((id, json))
+    }
+
     /// Baut eine frische Script-Env mit __index -> Surface und andora-Host.
     fn build_env(&self, collector: &RequestCollector) -> Result<Table, LuaError> {
         let env = self

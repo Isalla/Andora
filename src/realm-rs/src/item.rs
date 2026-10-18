@@ -132,6 +132,26 @@ impl Rarity {
     }
 }
 
+/// Sofortwirkung-Art einer explizit definierten Konsumable-Definition
+/// (Heil-/Manatrank). Additive Schemaerweiterung (docs/Attribute_und_
+/// Regeneration.md §9, Migration 024): die Wirkungsmagnitude lievert der
+/// server-seitige Definition (`heal_amount`/`mana_amount`), never the Client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumableKind {
+    Heal,
+    Mana,
+}
+
+impl ConsumableKind {
+    /// Kanonischer Grund-String (Diagnose/Log; nicht ein DB-Enum).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConsumableKind::Heal => "heal",
+            ConsumableKind::Mana => "mana",
+        }
+    }
+}
+
 /// Bindungsregel einer DEFINITION.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BindingRule {
@@ -233,6 +253,16 @@ pub struct ItemDefinition {
     pub attribute_bonuses: BTreeMap<String, f64>,
     /// Basis-Resistenzen (erweiterbar, z. B. fire/frost/poison).
     pub resistances: BTreeMap<String, f64>,
+    // --- Konsumable-Sofortwirkung (Heil-/Manatrank, additive Schema) ---
+    /// HP-Gain je verbrauchte Einheit (Some(>0) → Heiltrank). `None`/0 =
+    /// kein Wirkung. Additive Spalte (Migration 024 `heal_amount`); serde-
+    /// Default `None` → altdateien ohne Feld remain lesbar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal_amount: Option<i64>,
+    /// Mana-Gain je verbrauchte Einheit (Some(>0) → Manatrank). `None`/0 =
+    /// kein Wirkung. Additive Spalte (Migration 024 `mana_amount`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mana_amount: Option<i64>,
 }
 
 impl Default for ItemDefinition {
@@ -263,6 +293,8 @@ impl ItemDefinition {
             binding_rule: BindingRule::Tradeable,
             attribute_bonuses: BTreeMap::new(),
             resistances: BTreeMap::new(),
+            heal_amount: None,
+            mana_amount: None,
         }
     }
 
@@ -327,6 +359,33 @@ impl ItemDefinition {
         if !self.resistances.keys().all(|k| is_valid_resistance(k)) {
             errors.push("unbekannte Resistenz (key ungültig)".to_string());
         }
+        // Konsumable-Sofortwirkung: eine Wirkungsmagnitude darf nie negativ
+        // oder null sein (0/None = kein Wirkung → nicht ein explizit
+        // definierte Consumable) und greift nur auf consumable-Kategories.
+        // Heil UND Mana gleichzeitig nicht definierbar (genau eine Wirkung).
+        let consumable_category = matches!(
+            self.category,
+            ItemCategory::Potion | ItemCategory::Food | ItemCategory::Drink
+        );
+        if let Some(h) = self.heal_amount {
+            if h <= 0 {
+                errors.push("heal_amount <= 0".to_string());
+            }
+            if !consumable_category {
+                errors.push("heal_amount nur für consumable-Kategorie".to_string());
+            }
+        }
+        if let Some(m) = self.mana_amount {
+            if m <= 0 {
+                errors.push("mana_amount <= 0".to_string());
+            }
+            if !consumable_category {
+                errors.push("mana_amount nur für consumable-Kategorie".to_string());
+            }
+        }
+        if self.heal_amount.is_some() && self.mana_amount.is_some() {
+            errors.push("heal_amount und mana_amount nicht gleichzeitig".to_string());
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -354,6 +413,26 @@ impl ItemDefinition {
             }
         }
         self.allowed_classes.is_empty() || self.allowed_classes.contains(&class)
+    }
+
+    /// Ist das Definition ein **explizit definierte** Heil-/Manakonsumable?
+    /// Genauer: consumable-Kategorie UND genau einer der Wirkungsspalte
+    /// `heal_amount`/`mana_amount` `Some(>0)` present. Returns the effect
+    /// kind and the server-side magnitude. `None` = not a valid consumable
+    /// (missing/invalid effect → use rejected without mutation).
+    pub fn consumable_effect(&self) -> Option<(ConsumableKind, i64)> {
+        let consumable_category = matches!(
+            self.category,
+            ItemCategory::Potion | ItemCategory::Food | ItemCategory::Drink
+        );
+        if !consumable_category {
+            return None;
+        }
+        match (self.heal_amount, self.mana_amount) {
+            (Some(h), None) if h > 0 => Some((ConsumableKind::Heal, h)),
+            (None, Some(m)) if m > 0 => Some((ConsumableKind::Mana, m)),
+            _ => None,
+        }
     }
 }
 
@@ -847,5 +926,65 @@ mod tests {
             },
         );
         assert_eq!(inst.effective_numeric_quality(&def), final_q);
+    }
+
+    // ── Konsumable-Sofortwirkung (Heil-/Manatrank, additive Schema) ──────
+
+    #[test]
+    fn consumable_effect_only_for_defined_potion() {
+        let mut heal = ItemDefinition::new("hp_potion", "Heiltrank", ItemCategory::Potion);
+        heal.max_stack = 20;
+        heal.heal_amount = Some(30);
+        assert!(heal.validate().is_ok());
+        assert_eq!(heal.consumable_effect(), Some((ConsumableKind::Heal, 30)));
+
+        let mut mana = ItemDefinition::new("mp_potion", "Manatrank", ItemCategory::Potion);
+        mana.mana_amount = Some(25);
+        assert!(mana.validate().is_ok());
+        assert_eq!(mana.consumable_effect(), Some((ConsumableKind::Mana, 25)));
+
+        // A plain potion WITHOUT an explicit effect is NOT a consumable
+        // (no invented effect, no guessed magnitude).
+        let plain = ItemDefinition::new("hp_potion", "Heiltrank", ItemCategory::Potion);
+        assert_eq!(plain.consumable_effect(), None);
+
+        // A weapon never carries a consumable effect.
+        let sword = weapon_def();
+        assert_eq!(sword.consumable_effect(), None);
+    }
+
+    #[test]
+    fn consumable_effect_validation_rejects_invalid() {
+        // Zero/negative effect is not a valid magnitude.
+        let mut bad = ItemDefinition::new("hp_potion", "X", ItemCategory::Potion);
+        bad.heal_amount = Some(0);
+        assert!(bad.validate().is_err());
+        let mut bad = ItemDefinition::new("hp_potion", "X", ItemCategory::Potion);
+        bad.heal_amount = Some(-5);
+        assert!(bad.validate().is_err());
+        // Effect on a non-consumable category.
+        let mut bad = weapon_def();
+        bad.heal_amount = Some(10);
+        assert!(bad.validate().is_err());
+        // Both effects at once are not a single defined consumable.
+        let mut bad = ItemDefinition::new("both", "X", ItemCategory::Potion);
+        bad.heal_amount = Some(10);
+        bad.mana_amount = Some(10);
+        assert!(bad.validate().is_err());
+        assert_eq!(bad.consumable_effect(), None);
+    }
+
+    #[test]
+    fn consumable_fields_serde_default_none_roundtrip() {
+        // Alt-Definitionen ohne die additive Felds remain lesbar (serde-default).
+        let json = r#"{"item_id":"hp_potion","name":"H","category":"Potion",
+            "rarity":"Common","item_level":1,"base_quality":100.0,"max_stack":20,
+            "weight":0.0,"weapon_type":null,"base_damage":null,"duration_ms":null,
+            "range":null,"armor_value":null,"min_level":null,"allowed_classes":[],
+            "binding_rule":"Tradeable","attribute_bonuses":{},"resistances":{}}"#;
+        let def: ItemDefinition = serde_json::from_str(json).expect("altformat lesbar");
+        assert_eq!(def.heal_amount, None);
+        assert_eq!(def.mana_amount, None);
+        assert_eq!(def.consumable_effect(), None);
     }
 }

@@ -90,6 +90,17 @@ struct CommittedTradeReceipt {
     artifact: crate::persist::TradeArtifact,
 }
 
+/// Only produced after the transactional DB identity/content proof of a
+/// single-character quest completion succeeds. Legacy bare artifacts are
+/// deliberately not adopted as proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedQuestCompletionReceipt {
+    kind: String,
+    format_version: u16,
+    artifact: crate::persist::QuestCompletionArtifact,
+}
+
 /// Fassung des Batch-Umschlags. Der Eintrag selbst trägt weiterhin seine
 /// eigene `format_version` (`SpoolEntry`).
 pub const BATCH_FORMAT_VERSION: u16 = 1;
@@ -197,6 +208,8 @@ pub struct Spool {
     /// A visible file after failed directory sync must not drain before its
     /// identical publication and RAM handoff have been confirmed.
     held_trade_publications: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Same boundary for single-character quest-completion orders.
+    held_quest_completion_publications: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Ein Spieler-Gate mit Halter-Zähler.
@@ -498,6 +511,7 @@ impl PersistRuntime {
             base_dir: base_dir.to_path_buf(),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             held_trade_publications: Arc::new(Mutex::new(Default::default())),
+            held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
         };
         spool.ensure_dirs()?;
         Ok(Self {
@@ -585,7 +599,8 @@ impl PersistRuntime {
     ///   `DEGRADED`; die Restarbeit wird als „offen" markiert, damit der
     ///   Hintergrund-Drainer `READY` erst nach dem Abarbeiten zulässt.
     pub fn apply_startup_recovery(&self, outcome: &RecoveryOutcome) -> RecoveryStatusUpdate {
-        if outcome.batches_remaining == 0 && !self.spool.has_unresolved_trades().unwrap_or(true) {
+        if outcome.batches_remaining == 0 && !(self.spool.has_unresolved_trades().unwrap_or(true)
+            || self.spool.has_unresolved_quest_completions().unwrap_or(true)) {
             self.set_recovery_open(false);
             self.set_status(PersistStatus::Ready);
             RecoveryStatusUpdate::Ready
@@ -618,7 +633,7 @@ impl PersistRuntime {
     pub fn apply_drain_tick(&self) -> Result<RecoveryStatusUpdate, String> {
         match self.spool.count_batches()? {
             0 => {
-                if self.spool.has_unresolved_trades()? {
+                if self.spool.has_unresolved_trades()? || self.spool.has_unresolved_quest_completions()? {
                     self.set_status(PersistStatus::Degraded);
                     self.set_recovery_open(true);
                     return Ok(RecoveryStatusUpdate::RecoveryStillOpen { remaining: 0 });
@@ -658,8 +673,8 @@ impl PersistRuntime {
         if self.lifecycle_startup_finalized() {
             return Ok(crate::db::ItemFinalizeReport::default());
         }
-        if self.spool.has_unresolved_trades()? {
-            return Err("trade recovery pending; lifecycle finalization deferred".into());
+        if self.spool.has_unresolved_trades()? || self.spool.has_unresolved_quest_completions()? {
+            return Err("trade/quest recovery pending; lifecycle finalization deferred".into());
         }
         let report = crate::db::finalize_detached_item_instances(pool).await?;
         self.lifecycle_startup_finalized
@@ -921,6 +936,14 @@ trait DrainDb: Send + Sync {
     ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
         Box::pin(async { Err("trade DB adapter unavailable".into()) })
     }
+
+    fn apply_quest_completion<'a>(
+        &'a self,
+        _artifact: &'a crate::persist::QuestCompletionArtifact,
+        _weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
+        Box::pin(async { Err("quest completion DB adapter unavailable".into()) })
+    }
 }
 
 /// Produktionsanbindung: reicht den echten Pool unverändert durch.
@@ -937,6 +960,17 @@ impl DrainDb for PoolDrainDb<'_> {
         Box::pin(crate::persist::apply_trade_to_db(
             self.pool,
             trade,
+            weapon_skill_id,
+        ))
+    }
+    fn apply_quest_completion<'a>(
+        &'a self,
+        artifact: &'a crate::persist::QuestCompletionArtifact,
+        weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
+        Box::pin(crate::persist::apply_quest_completion_to_db(
+            self.pool,
+            artifact,
             weapon_skill_id,
         ))
     }
@@ -1056,7 +1090,133 @@ impl Spool {
         &self,
         snapshot: &PersistSnapshot,
     ) -> Result<bool, String> {
-        self.normal_trade_dependency_allows(snapshot)
+        match self.normal_trade_dependency_allows(snapshot) {
+            Ok(true) => self.normal_quest_completion_dependency_allows(snapshot),
+            Ok(false) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A normal publication may not uncontrolled overtake an OPEN completion:
+    /// if a completion order for this character targets a revision the snapshot
+    /// would reach or pass, the snapshot must wait (docs/Quest-Turn-In-Persistenz.md).
+    pub(crate) fn normal_quest_completion_dependency_allows(
+        &self,
+        snapshot: &PersistSnapshot,
+    ) -> Result<bool, String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            for path in list_json_files(&dir)? {
+                if let Some((_, pid, _base, target)) = quest_completion_file_header(&path) {
+                    if pid == snapshot.player_id && snapshot.persist_revision >= target {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn hold_quest_completion_publication(&self, id: &str) {
+        self.held_quest_completion_publications
+            .lock()
+            .unwrap()
+            .insert(id.to_string());
+    }
+
+    pub(crate) fn release_quest_completion_publication(&self, id: &str) {
+        self.held_quest_completion_publications.lock().unwrap().remove(id);
+    }
+
+    pub(crate) fn write_quest_completion(&self, a: &crate::persist::QuestCompletionArtifact) -> Result<(), String> {
+        self.write_quest_completion_with_sync(a, sync_dir)
+    }
+
+    pub(crate) fn write_quest_completion_with_sync<S>(
+        &self,
+        a: &crate::persist::QuestCompletionArtifact,
+        sync: S,
+    ) -> Result<(), String>
+    where
+        S: FnOnce(&Path) -> Result<(), String>,
+    {
+        a.validate()?;
+        let expected_name = quest_completion_file_name(a);
+        for dir in [
+            self.spool_dir(),
+            self.dir("quest_receipts"),
+            self.quarantine_open_dir(),
+        ] {
+            for path in list_json_files(&dir)? {
+                if quest_completion_file_header(&path).is_some_and(|(id, _, _, _)| id == a.commit_id)
+                    && (dir == self.quarantine_open_dir()
+                        || path.file_name().unwrap().to_string_lossy() != expected_name)
+                {
+                    return Err("quest completion ID conflict".into());
+                }
+            }
+        }
+        let target = self.spool_dir().join(quest_completion_file_name(a));
+        let bytes = serde_json::to_vec(a).map_err(|e| format!("quest completion serialize: {e}"))?;
+        publish_quest_completion_bytes(&target, &bytes, sync)
+    }
+
+    /// Both participants are attributed from the canonical filename even if the
+    /// payload becomes unreadable. Quarantine never releases one half.
+    pub(crate) fn ensure_quest_completion_save_allowed(&self, id: &str) -> Result<(), String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            for path in list_json_files(&dir)? {
+                if let Some((_, pid, _, _)) = quest_completion_file_header(&path) {
+                    if pid == id {
+                        return Err("quest completion pending".into());
+                    }
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("q-"))
+                {
+                    return Err("quest completion attribution unavailable".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn has_unresolved_quest_completions(&self) -> Result<bool, String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            if list_json_files(&dir)?.iter().any(|p|
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("q-"))
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(!self.held_quest_completion_publications.lock().unwrap().is_empty())
+    }
+
+    pub(crate) fn quest_completion_receipt(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::persist::QuestCompletionArtifact>, String> {
+        for path in list_json_files(&self.dir("quest_receipts"))? {
+            let Some((commit_id, _, _, _)) = quest_completion_file_header(&path) else {
+                return Err("quest receipt attribution unavailable".into());
+            };
+            if commit_id == id {
+                let envelope: CommittedQuestCompletionReceipt = serde_json::from_slice(
+                    &std::fs::read(&path).map_err(|e| format!("quest receipt read: {e}"))?,
+                )
+                .map_err(|e| format!("quest receipt parse: {e}"))?;
+                if envelope.kind != "character_quest_completion_receipt" || envelope.format_version != 1 {
+                    return Err("unproven quest receipt format".into());
+                }
+                let receipt = envelope.artifact;
+                receipt.validate()?;
+                if quest_completion_file_name(&receipt) != path.file_name().unwrap().to_string_lossy() {
+                    return Err("quest receipt attribution conflict".into());
+                }
+                return Ok(Some(receipt));
+            }
+        }
+        Ok(None)
     }
 
     fn quarantine_trade(&self, path: &Path, raw: &[u8]) -> Result<(), String> {
@@ -1068,6 +1228,19 @@ impl Spool {
             .quarantine_open_dir()
             .join(format!("{name}--malformed.json"));
         publish_trade_bytes(&target, raw, sync_dir)?;
+        remove_file(path)?;
+        sync_dir(path)
+    }
+
+    fn quarantine_quest_completion(&self, path: &Path, raw: &[u8]) -> Result<(), String> {
+        let name = path
+            .file_name()
+            .ok_or("quest completion filename missing")?
+            .to_string_lossy();
+        let target = self
+            .quarantine_open_dir()
+            .join(format!("{name}--malformed.json"));
+        publish_quest_completion_bytes(&target, raw, sync_dir)?;
         remove_file(path)?;
         sync_dir(path)
     }
@@ -1151,6 +1324,75 @@ impl Spool {
             }
         }
     }
+    async fn drain_quest_completion<D: DrainDb>(
+        &self,
+        db: &D,
+        weapon_skill_id: &str,
+        path: &Path,
+    ) -> Result<Option<DrainReport>, String> {
+        let (id, pid, _base, _target) = quest_completion_file_header(path).ok_or("quest completion attribution conflict")?;
+        let _gate = self.player_gate(&pid).await.lock_owned().await;
+        if self.held_quest_completion_publications.lock().unwrap().contains(&id) {
+            return Ok(None);
+        }
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("quest completion read: {e}")),
+        };
+        let artifact = serde_json::from_slice::<crate::persist::QuestCompletionArtifact>(&raw);
+        let valid = artifact.as_ref().is_ok_and(|a|
+            a.validate().is_ok()
+                && quest_completion_file_name(a) == path.file_name().unwrap().to_string_lossy()
+        );
+        if !valid {
+            self.quarantine_quest_completion(path, &raw)?;
+            return Ok(Some(DrainReport {
+                batches_processed: 1,
+                batches_quarantined: 1,
+                ..Default::default()
+            }));
+        }
+        let artifact = artifact.map_err(|e| format!("quest completion parse: {e}"))?;
+        // Content was read under the gate; all writers of these paths use it.
+        let receipt = self.quest_completion_receipt(&artifact.commit_id)?;
+        if receipt.as_ref().is_some_and(|r| r != &artifact) {
+            return Err("quest completion receipt content conflict".into());
+        }
+        match db
+            .apply_quest_completion(&artifact, weapon_skill_id)
+            .await?
+        {
+            crate::persist::QuestCompletionApply::Waiting => Ok(None),
+            crate::persist::QuestCompletionApply::Conflict => {
+                self.quarantine_quest_completion(path, &raw)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    batches_quarantined: 1,
+                    ..Default::default()
+                }))
+            }
+            outcome => {
+                // Keep the immutable identity/content receipt across restarts.
+                let receipt_path = self.dir("quest_receipts").join(quest_completion_file_name(&artifact));
+                let receipt_bytes = serde_json::to_vec(&CommittedQuestCompletionReceipt {
+                    kind: "character_quest_completion_receipt".into(),
+                    format_version: 1,
+                    artifact: artifact.clone(),
+                })
+                .map_err(|e| format!("quest receipt serialize: {e}"))?;
+                publish_quest_completion_bytes(&receipt_path, &receipt_bytes, sync_dir)?;
+                remove_file(path)?;
+                sync_dir(path)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    entries_applied: if outcome == crate::persist::QuestCompletionApply::Applied { 1 } else { 0 },
+                    entries_skipped: if outcome == crate::persist::QuestCompletionApply::AlreadyApplied { 1 } else { 0 },
+                    ..Default::default()
+                }))
+            }
+        }
+    }
     fn dir(&self, name: &str) -> PathBuf {
         self.base_dir.join(name)
     }
@@ -1176,6 +1418,7 @@ impl Spool {
         for d in [
             self.spool_dir(),
             self.dir("trade_receipts"),
+            self.dir("quest_receipts"),
             self.superseded_dir(),
             self.quarantine_open_dir(),
             self.quarantine_archive_dir(),
@@ -1536,6 +1779,12 @@ impl Spool {
         {
             return self.drain_trade(db, weapon_skill_id, &batch_path).await;
         }
+        if batch_path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("q-"))
+        {
+            return self.drain_quest_completion(db, weapon_skill_id, &batch_path).await;
+        }
         let file_name = batch_path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
@@ -1646,7 +1895,7 @@ impl Spool {
         // Ein Eintrag je Batch-Datei (V1). Robust trotzdem als Liste gedacht:
         // Batch wird erst NACH Abschluss ALLER Einträge entfernt.
         let player_id = entry.snapshot.player_id.clone();
-        if !self.normal_trade_dependency_allows(&entry.snapshot)? {
+        if !self.normal_publication_allowed(&entry.snapshot)? {
             return Ok(None);
         }
         let db_rev = match db.load_persist_revision(&player_id).await {
@@ -1865,7 +2114,7 @@ impl Spool {
             let player_id = entry.snapshot.player_id.clone();
             // P-30: Charakter-Gate je Eintrag, vor jeder Mutation.
             let _entry_gate = self.player_gate(&player_id).await.lock_owned().await;
-            if !self.normal_trade_dependency_allows(&entry.snapshot)? {
+            if !self.normal_publication_allowed(&entry.snapshot)? {
                 unfinished = true;
                 continue;
             }
@@ -2475,6 +2724,42 @@ fn trade_file_header(path: &Path) -> Option<(String, [(String, i64); 2])> {
     Some((parts[0].to_string(), [(a, ar), (b, br)]))
 }
 
+/// Canonical filename of a single-character completion order. The commit-ID
+/// carries no '-'; the character is numeric and both revisions are stamped, so
+/// the attribution stays parseable even if the payload becomes unreadable.
+fn quest_completion_file_name(a: &crate::persist::QuestCompletionArtifact) -> String {
+    format!(
+        "q-{}-{}-r{}-r{}.json",
+        a.commit_id,
+        a.character_id,
+        a.base_revision,
+        a.snapshot.persist_revision,
+    )
+}
+
+fn quest_completion_file_header(path: &Path) -> Option<(String, String, i64, i64)> {
+    let name = path.file_name()?.to_str()?;
+    let original = name.split_once("--").map_or(name, |(s, _)| s);
+    let stem = original.strip_suffix(".json")?.strip_prefix("q-")?;
+    let parts: Vec<_> = stem.split('-').collect();
+    if parts.len() != 4
+        || parts[0].is_empty()
+        || parts[0].len() > 64
+        || !parts[0]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return None;
+    }
+    let c = canonical_player_id(parts[1])?;
+    let base = canonical_revision(parts[2].strip_prefix('r')?)?;
+    let target = canonical_revision(parts[3].strip_prefix('r')?)?;
+    if base == 0 || target == 0 || target != base + 1 {
+        return None;
+    }
+    Some((parts[0].to_string(), c, base, target))
+}
+
 /// Same publication primitive as ordinary batches, including confirmation of
 /// a visible file after sync failure. The seam replaces only directory sync.
 fn publish_trade_bytes<S>(target: &Path, bytes: &[u8], sync: S) -> Result<(), String>
@@ -2515,6 +2800,37 @@ enum PublishOutcome {
     /// Der finale Name war bereits belegt. Es wurde **nichts** verändert; der
     /// Inhalt entscheidet über die weitere Behandlung.
     TargetExists,
+}
+
+/// Same publication primitive as ordinary batches, including confirmation of
+/// a visible file after sync failure. The seam replaces only directory sync.
+fn publish_quest_completion_bytes<S>(target: &Path, bytes: &[u8], sync: S) -> Result<(), String>
+where
+    S: FnOnce(&Path) -> Result<(), String>,
+{
+    if target.exists() {
+        if std::fs::read(target).map_err(|e| format!("quest completion confirmation: {e}"))? != bytes {
+            return Err("quest completion content conflict".into());
+        }
+        return sync(target);
+    }
+    let tmp = target.with_file_name(format!(
+        ".tmp-{}",
+        target
+            .file_name()
+            .ok_or("quest completion filename")?
+            .to_string_lossy()
+    ));
+    // A producer holds the character gate; TargetExists is still verified, never trusted.
+    match publish_new_file_with_sync(&tmp, target, bytes, sync)? {
+        PublishOutcome::Published => Ok(()),
+        PublishOutcome::TargetExists => {
+            if std::fs::read(target).map_err(|e| format!("quest completion confirmation: {e}"))? != bytes {
+                return Err("quest completion content conflict".into());
+            }
+            sync_dir(target)
+        }
+    }
 }
 
 /// `fsync` des Elternverzeichnisses. Fehler werden weitergereicht: die
@@ -2669,6 +2985,7 @@ mod tests {
             base_dir: base.to_path_buf(),
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             held_trade_publications: Arc::new(Mutex::new(Default::default())),
+            held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
         }
     }
 
@@ -2775,8 +3092,295 @@ mod tests {
         }
     }
 
+    fn quest_completion_artifact() -> crate::persist::QuestCompletionArtifact {
+        let mut snap = snapshot("7", 2, 1.0);
+        snap.item_lifecycle =
+            Some(crate::item_lifecycle::ItemLifecycle::new().snapshot_view(2, "test"));
+        let completed = crate::quest::CharacterQuestState {
+            quest_id: "q".into(),
+            state: crate::quest::QuestState::Completed,
+            progress: vec![crate::quest::CharacterObjectiveProgress {
+                objective_id: "kill".into(),
+                current: 5,
+            }],
+            started_at_ms: Some(1),
+            completed_at_ms: Some(2),
+        };
+        let a = crate::persist::QuestCompletionArtifact {
+            kind: "character_quest_completion".into(),
+            format_version: 1,
+            commit_id: "qc_test".into(),
+            character_id: "7".into(),
+            quest_id: "q".into(),
+            base_revision: 1,
+            snapshot: snap,
+            completed_data: crate::quest::encode_state_for_db(&completed).unwrap(),
+        };
+        a.validate().unwrap();
+        a
+    }
+
+    /// SQL/rollback MODEL only for the single-character completion. The real
+    /// drain/format/gates/files and the real revision decision are exercised;
+    /// this adapter does not prove MariaDB.
+    struct QuestDbModel {
+        revisions: Mutex<HashMap<String, i64>>,
+        committed: Mutex<HashMap<String, String>>,
+        applies: std::sync::atomic::AtomicUsize,
+        fail: bool,
+        lose_ack: bool,
+    }
+
+    impl QuestDbModel {
+        fn new(rev: i64) -> Self {
+            Self {
+                revisions: Mutex::new(HashMap::from([("7".into(), rev)])),
+                committed: Mutex::new(HashMap::new()),
+                applies: std::sync::atomic::AtomicUsize::new(0),
+                fail: false,
+                lose_ack: false,
+            }
+        }
+    }
+
+    impl DrainDb for QuestDbModel {
+        fn load_persist_revision<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+            Box::pin(async move { Ok(self.revisions.lock().unwrap().get(id).copied()) })
+        }
+        fn apply_snapshot<'a>(
+            &'a self,
+            s: &'a PersistSnapshot,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.revisions
+                    .lock()
+                    .unwrap()
+                    .insert(s.player_id.clone(), s.persist_revision);
+                Ok(())
+            })
+        }
+        fn apply_trade<'a>(
+            &'a self,
+            _t: &'a crate::persist::TradeArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
+            Box::pin(async { Err("no trade in quest model".into()) })
+        }
+        fn apply_quest_completion<'a>(
+            &'a self,
+            a: &'a crate::persist::QuestCompletionArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
+            Box::pin(async move {
+                let mut revisions = self.revisions.lock().unwrap();
+                let mut committed = self.committed.lock().unwrap();
+                let current = revisions.get(&a.character_id).copied();
+                let proof = committed.get(&a.commit_id).map(String::as_str);
+                let action = crate::persist::quest_completion_revision_action_with_proof(
+                    a,
+                    current,
+                    proof,
+                );
+                if action == crate::persist::QuestCompletionApply::Applied {
+                    if self.fail {
+                        return Err("model: completion rolled back".into());
+                    }
+                    revisions.insert(a.character_id.clone(), a.snapshot.persist_revision);
+                    committed.insert(a.commit_id.clone(), a.commit_payload()?);
+                    self.applies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if self.lose_ack {
+                        return Err("model: DB commit ack lost after crash".into());
+                    }
+                }
+                Ok(action)
+            })
+        }
+    }
+
     #[test]
-    fn trade_commit_publication_sync_failure_confirms_identical_content_only() {
+    fn quest_completion_publication_sync_failure_confirms_identical_only() {
+        let base = temp_dir("qc-sync");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        let target = s.spool_dir().join(quest_completion_file_name(&a));
+        let bytes = serde_json::to_vec(&a).unwrap();
+        assert!(publish_quest_completion_bytes(&target, &bytes, |_| Err(
+            "injected directory sync failure".into()
+        ))
+        .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert!(s.ensure_quest_completion_save_allowed("7").is_err());
+        for id in ["7"] {
+            assert!(s.ensure_quest_completion_save_allowed(id).is_err());
+        }
+        let called = std::sync::atomic::AtomicBool::new(false);
+        publish_quest_completion_bytes(&target, &bytes, |p| {
+            called.store(true, std::sync::atomic::Ordering::SeqCst);
+            sync_dir(p)
+        })
+        .unwrap();
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(publish_quest_completion_bytes(&target, b"different", sync_dir).is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_applies_snapshot_completed_and_receipt() {
+        let base = temp_dir("qc-drain");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        s.write_quest_completion(&a).unwrap();
+        let db = QuestDbModel::new(1);
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(db.revisions.lock().unwrap()["7"], 2);
+        // Durable receipt written in the same drain step.
+        assert_eq!(s.quest_completion_receipt("qc_test").unwrap().unwrap().commit_id, "qc_test");
+        assert_eq!(s.count_batches().unwrap(), 0);
+        // Crash-after-commit: same file again -> idempotent skip, no second apply.
+        s.write_quest_completion(&a).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_skipped, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_older_snapshot_never_overwrites_completion() {
+        let base = temp_dir("qc-order");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        s.write_quest_completion(&a).unwrap();
+        let db = QuestDbModel::new(1);
+        // Apply the completion first (revision -> 2).
+        let _ = s.drain_one_with(&db, "sword").await.unwrap();
+        // A normal snapshot at an OLDER revision must not undo COMPLETED/revision.
+        s.write_batch_run(vec![snapshot("7", 1, 9.0)]).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_superseded, 1);
+        assert_eq!(db.revisions.lock().unwrap()["7"], 2);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_normal_publication_waits_while_open() {
+        let base = temp_dir("qc-wait");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        // A normal snapshot at the completion's target is written FIRST.
+        s.write_batch_run(vec![snapshot("7", 2, 9.0)]).unwrap();
+        s.write_quest_completion(&a).unwrap();
+        let db = QuestDbModel::new(1);
+        // The completion (base 1) applies; the normal r2 must NOT overtake it.
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // The normal publication is still open (waits behind the completion).
+        assert_eq!(s.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_db_error_keeps_order_pending() {
+        let base = temp_dir("qc-err");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        s.write_quest_completion(&a).unwrap();
+        let mut db = QuestDbModel::new(1);
+        db.fail = true;
+        let out = s.drain_one_with(&db, "sword").await;
+        // A pre-COMMIT DB error is an error, the order stays in the spool.
+        assert!(out.is_err());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // DB returns: identical order resolves, exactly one apply.
+        let db2 = QuestDbModel::new(1);
+        let r = s.drain_one_with(&db2, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_divergent_receipt_is_conflict() {
+        let base = temp_dir("qc-div");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        // Pre-seed a receipt for the SAME commit-ID with DIVERGENT content.
+        let receipt = s.dir("quest_receipts").join(quest_completion_file_name(&a));
+        let mut other = a.clone();
+        other.snapshot.idia = 999;
+        let env = serde_json::to_vec(&CommittedQuestCompletionReceipt {
+            kind: "character_quest_completion_receipt".into(),
+            format_version: 1,
+            artifact: other,
+        })
+        .unwrap();
+        publish_quest_completion_bytes(&receipt, &env, sync_dir).unwrap();
+        s.write_quest_completion(&a).unwrap();
+        let db = QuestDbModel::new(1);
+        let out = s.drain_one_with(&db, "sword").await;
+        // Divergent content for the same identity is a hard conflict, not applied.
+        assert!(out.is_err());
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn quest_completion_missing_receipt_not_resolved_by_completed_alone() {
+        // Revision equality / a COMPLETED row alone never yields AlreadyApplied:
+        // without a content receipt the decision is Conflict, never AlreadyApplied.
+        let a = quest_completion_artifact();
+        let action = crate::persist::quest_completion_revision_action_with_proof(&a, Some(2), None);
+        assert_eq!(action, crate::persist::QuestCompletionApply::Conflict);
+        // A matching content receipt on the same identity -> AlreadyApplied.
+        let payload = a.commit_payload().unwrap();
+        let action2 = crate::persist::quest_completion_revision_action_with_proof(&a, Some(2), Some(&payload));
+        assert_eq!(action2, crate::persist::QuestCompletionApply::AlreadyApplied);
+    }
+
+    #[test]
+    fn quest_completion_file_attribution_survives_unreadable_payload() {
+        let base = temp_dir("qc-attr");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        let name = quest_completion_file_name(&a);
+        // A malformed payload under the canonical name still attributes the char.
+        let target = s.spool_dir().join(name);
+        std::fs::write(&target, b"{not json").unwrap();
+        assert_eq!(quest_completion_file_header(&target).unwrap().1, "7");
+        assert!(s.ensure_quest_completion_save_allowed("7").is_err());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quest_completion_drain_routing_by_filename_prefix() {
+        let base = temp_dir("qc-route");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = quest_completion_artifact();
+        s.write_quest_completion(&a).unwrap();
+        // The completion file is recognized as a completion (q-), not a batch.
+        assert_eq!(s.count_batches().unwrap(), 1);
+        let db = QuestDbModel::new(1);
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn quest_completion_publication_sync_failure_confirms_identical_content_only() {
         let base = temp_dir("trade-sync");
         let s = spool(&base);
         s.ensure_dirs().unwrap();
@@ -6861,6 +7465,7 @@ mod tests {
                 base_dir: base.clone(),
                 in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 held_trade_publications: Arc::new(Mutex::new(Default::default())),
+                held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
             },
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),

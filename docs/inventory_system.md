@@ -51,7 +51,7 @@ ausschließlich temporären, nie persistierten Runtime-State fest; Abschnitt 16
 regelt den Item-Instanz-Lifecycle und verwaiste Iteminstanzen. Für diese
 Dokumentation wurde kein Produktionscode geändert.
 
-Die bestehende Item-System-V1-Architektur (`item_properties.md`, Abschnitt „Item System V1 – Implementierungsstand") ist verbindlich und wird hier nicht verändert.
+Die bestehende Gegenstandssystem-V1-Architektur (`item_properties.md`, Abschnitt „Gegenstandssystem V1 – Implementierungsstand") ist verbindlich und wird hier nicht verändert.
 
 **Instanzgenaue Kernoperationen eingebaut:** `try_take_instance` und
 `try_insert_instance` in `src/realm-rs/src/inventory.rs`; API-/UUID-Vertrag
@@ -777,10 +777,31 @@ count?}`, danach der bestätigte Folgestand per S2C 23 `INVENTORY` (`seq`
   belegt → `slot_occupied`.
 * `unequip` (`slot`): leer → `slot_empty`; Zielplatz nach vorhandener
   Regel (passender Stack, sonst freier Slot), voll → `inventory_full`.
-* `use`: `no_consumable_contract` — es existiert kein verbindlicher
-  Verbrauchsvertrag und kein Effektpfad (`Attribute_und_Regeneration.md`
-  §9: Consumable-Logik folgt separat). Benannte Grenze statt erfundener
-  Wirkung: kein Effekt, keine Mengenänderung, kein Dirty.
+* `use` (Heil-/Manaverbrauchsgegenstände, IMPLEMENTIERT — siehe Projekt-Status 15i):
+  Nur ein **explizit definierter** Verbrauchsgegenstand ist zulässig — eine
+  Definition der Verbrauchskategorie (`Potion`/`Food`/`Drink`) mit genau einem
+  positiven Wert in `heal_amount`/`mana_amount` (serverseitige `ItemDefinition`,
+  additive Migration 024). Die Wirkungsstärke stammt NUR aus der Definition,
+  niemals vom Client. Prüfungen vor jeder Änderung (sonst vollständige
+  Ablehnung, keine Änderungsmarkierung): lebend (`hp<=0` → `character_dead`,
+  keine Wiederbelebung), eigene eindeutige UUID im Basisinventar/in einer Tasche
+  (`owned_instance`; fremd/fehlend/mehrdeutig → `not_in_inventory`;
+  Ausrüstung/Puffer sind keine Benutzungsquelle), Definition vorhanden
+  (`definition_unavailable`), gültiger Verbrauchsgegenstand (sonst
+  `not_consumable`), Zielressource nicht voll (voll → `resource_full`,
+  KEIN Verbrauch/KEINE Abklingzeit), gemeinsame Abklingzeit von 30 s abgelaufen
+  (sonst `on_cooldown`). Atomar unter derselben World-Sperre: geprüfter
+  HP-/Manazuwachs mit Begrenzung auf den Maximalwert (kein Überlauf), Verbrauch
+  von genau EINER Einheit über `try_take_instance(uuid,1)` (Reststapel behält
+  seine UUID; die letzte Einheit gibt den Platz frei und wird revisionsgebunden
+  über `reconcile_after_take(..., Consumed)` finalisiert — KEIN direktes Löschen
+  in der DB), Start der gemeinsamen Abklingzeit `consumable` über
+  `cooldowns::start` (Änderungsmarkierung nur bei tatsächlicher Änderung →
+  `Progression`, P-18), Änderungsmarkierung von `Resources`+`Inventory`.
+  ABWEICHUNG von der früheren offenen Regel: `no_consumable_contract` wird
+  durch diesen tatsächlichen Vertrag ersetzt; andere Verbrauchsarten
+  (Verstärkungseffekte, Essen ohne Wirkung, Quests, Spielbalance-Systeme)
+  bleiben außerhalb des Umfangs.
 
 Erfolg markiert `PersistComponent::Inventory` (kein Umgehen der
 Dirty-/Persistenzanbindung, kein eigener DB-Pfad, keine Migration, kein

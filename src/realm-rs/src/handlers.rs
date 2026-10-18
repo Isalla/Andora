@@ -31,7 +31,18 @@ pub struct Ctx {
     /// Quest V1 (docs/Quest-System.md §27): zentrale serverseitige
     /// Quest-Komponente. Registerspieldefinitionen (internes V1.1-Format);
     /// Spielerzustand wird aus der Tabelle `quests` geladen/persistiert.
-    pub quest: crate::quest::QuestService,
+    /// Arc-shared: derselben Definition-Autorität serves the Handler-Pfad
+    /// here and the Tick-Loop (`combat_tick` Kill-Credit, §27.8/§27.16).
+    pub quest: std::sync::Arc<crate::quest::QuestService>,
+    /// Modelladapter nur für Offline-Handler-/Dispatch-Nachweise.
+    #[cfg(test)]
+    pub quest_accept_store: Option<Arc<dyn crate::npc_quest::AcceptStore>>,
+    /// Explicit Zeitgrenze um den **jeamlig** Questannahme-Persistenzversuch
+    /// (Acquire + SQL + COMMIT). Production: `QUEST_ACCEPT_IO_TIMEOUT`; offline
+    /// Nachweise inject een gestoerte (kurzen) Tokio-Zeit-Limit. Reused by
+    /// Annahme, Retry, Logout/Takeover und Shutdown. Kene globale Pool-
+    /// Verhaltensänderung (cf. `net.rs:31` acquire-Default).
+    pub quest_io_timeout: std::time::Duration,
     /// Stufe-B-Persistenz: Spool + Status (Recovery/Ready/Degraded). Wird im
     /// HELLO-Guard (Recovering → Login blockiert) und beim finalen
     /// Disconnect-Save genutzt.
@@ -345,6 +356,21 @@ pub async fn handle_hello(
     // Rested-Zeit aus dem echten Logout-Zeitpunkt der beendeten Sitzung und
     // setzt die Spalte danach selbst zurück — ein verspäteter Logout-Write der
     // alten Sitzung kann die aktive Sitzung nicht mehr markieren.
+    // FIX: resolve an outstanding quest acceptance for this character over the
+    // SAME idempotent persist-path BEFORE the takeover gate. A possibly-committed
+    // ACTIVE is thus never raced or overwritten; under permanent DB failure the
+    // acceptance stays pending and the `quests`-Table remains the authority when
+    // the character is loaded below (no unsafe Gate release, no false ACTIVE).
+    if let Err(e) = crate::npc_quest::retry_quest_acceptances(
+        crate::npc_quest::build_accept_store(ctx),
+        &ctx.persist,
+        ctx.shared.clone(),
+        Some(&[char_id.clone()]),
+        ctx.quest_io_timeout,
+    )
+    .await {
+        log::error!("login quest acceptance deferred: {e}");
+    }
     let _logout_gate = ctx.persist.player_gate(&char_id).await.lock_owned().await;
 
     // AUTH-03 (Takeover): Die neue Verbindung darf erst übernehmen, wenn
@@ -1533,6 +1559,8 @@ pub async fn handle_auction_buy(
 /// Rückzug ohne Antwort und ohne Mutation), dann `trade::attempt_trade`
 /// (validieren + atomar übernehmen). Erfolg antwortet `NPC_TEXT` mit dem
 /// resultierenden Währungs-/Historyzustand, Ablehnung mit stabilem `reason`.
+/// Zusätzlich: `quest_offers`/`quest_accept` mit `quest_id?` auf denselben
+/// Nachrichten-IDs, getrennt vom Händlerzweig (Quest-System.md §27.27).
 pub async fn handle_npc_talk(
     ctx: &Ctx,
     tx: &mpsc::UnboundedSender<String>,
@@ -1540,6 +1568,14 @@ pub async fn handle_npc_talk(
     seq: i64,
     data: &serde_json::Value,
 ) {
+    if matches!(get_str(data, "action").as_str(), "quest_offers" | "quest_accept") {
+        crate::npc_quest::handle(ctx, tx, conn_id, seq, data).await;
+        return;
+    }
+    if matches!(get_str(data, "action").as_str(), "quest_turn_ins" | "quest_turn_in") {
+        crate::npc_quest::handle_turn_in(ctx, tx, conn_id, seq, data).await;
+        return;
+    }
     let action = match crate::trade::TradeAction::parse(&get_str(data, "action")) {
         Some(a) => a,
         None => {
@@ -1645,9 +1681,27 @@ pub async fn handle_inventory(
     if !world.players.contains_key(&pid) {
         return;
     }
-    match attempt_inventory_action(&mut world, &pid, &req) {
+    match attempt_inventory_action(&mut world, &pid, &req, std::time::SystemTime::now()) {
         Ok(out) => {
             let _ = tx.send(Frame::new(seq, s2c::INVENTORY_RESULT, success_payload(&out)).encode());
+            // A confirmed Heil-/Manatrank changes HP and/or Mana: the Client
+            // reads those ONLY from server frames (STATE carries own HP,
+            // VITALS own Mana) — no local prediction, no new UI.
+            if action == crate::inventory_actions::InventoryAction::Use {
+                if let Some(p) = world.players.get(&pid) {
+                    let _ = tx.send(
+                        Frame::new(
+                            0,
+                            s2c::STATE,
+                            serde_json::json!({
+                                "id": p.id, "x": p.x, "y": p.y, "face": p.face,
+                                "hp": p.hp, "max_hp": p.max_hp,
+                            }),
+                        ).encode(),
+                    );
+                    let _ = tx.send(crate::world::vitals_frame(p.mana, p.max_mana, p.level).encode());
+                }
+            }
             // Bestätigter Folgestand (Eigentümer-Sicht, seq 0 als Push);
             // Ablehnungen brauchen keinen Push (nichts geändert).
             let payload = inventory_state_payload(&world, &pid);
@@ -2003,7 +2057,7 @@ pub async fn handle_heartbeat(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     // Lokal-HTTP-Stub für die signierten Auth-API-Aufrufe: canned
     // JSON-Responses für /handoff/validate und /session/validate,
     // konfigurierbar pro Test (Signature wird im Test nicht geprüft).
@@ -2164,7 +2218,7 @@ mod tests {
     /// erreichbarer Lazy-Pool. Ein gültiger Canonical-`char_id` erreicht damit
     /// nachweisbar Gate und World-Logik; jeder DB-Zugriff schlägt fehl.
     /// Gespiegelt aus `net::tests::test_ctx`.
-    async fn test_ctx() -> std::sync::Arc<Ctx> {
+    pub(crate) async fn test_ctx() -> std::sync::Arc<Ctx> {
         use std::collections::HashMap;
         let dir = std::env::temp_dir().join(format!(
             "andora-realm-hello-test-{}-{}",
@@ -2199,6 +2253,7 @@ mod tests {
                 database: "realm_state_test".into(),
             },
             migrations_dir: String::new(),
+            content_root: String::new(),
             allow_destructive: false,
             combat: crate::config::combat_config(&env),
             npc: crate::config::npc_config(&env),
@@ -2242,7 +2297,9 @@ mod tests {
             parental,
             registry: crate::combat::ability::AbilityRegistry::new(),
             groups,
-            quest: crate::quest::QuestService::new(),
+            quest: std::sync::Arc::new(crate::quest::QuestService::new()),
+            quest_accept_store: None,
+            quest_io_timeout: std::time::Duration::from_millis(20),
             persist,
         })
     }
@@ -2966,6 +3023,7 @@ mod tests {
                 database: "realm_state_test".into(),
             },
             migrations_dir: String::new(),
+            content_root: String::new(),
             allow_destructive: false,
             combat: crate::config::combat_config(&env),
             npc: crate::config::npc_config(&env),
@@ -3759,7 +3817,7 @@ mod tests {
 
     /// Händlerwelt: Spieler "held" (0,0, 500 Idia, 5 Tränke), Händler npc_5
     /// (1,0) mit Trank-Sortiment, Eigentümer-Verbindung 7.
-    async fn insert_trade_setup(ctx: &Ctx) {
+    pub(crate) async fn insert_trade_setup(ctx: &Ctx) {
         use std::collections::{BTreeMap, HashSet};
         let (ptx, _prx) = mpsc::unbounded_channel();
         let mut world = ctx.shared.lock().await;
@@ -3826,6 +3884,7 @@ mod tests {
             crate::npc::Npc {
                 id: "npc_5".into(),
                 spawn_id: 5,
+                content_id: "npc_5".into(),
                 name: "Borin".into(),
                 kind: "named".into(),
                 attackable: false,
@@ -4063,11 +4122,16 @@ mod tests {
         let mut ctx = test_ctx().await;
         insert_trade_setup(&ctx).await;
         // Quest mit Sammelziel quest_relic registrieren + ACTIVE setzen.
-        Arc::get_mut(&mut ctx)
-            .expect("eindeutiger Testkontext")
-            .quest
-            .register(crate::quest::QuestDefinition {
+        // Fixture-Definition (Testkontext only — der Content-/Quest-Loader
+        // bleibt offen, §27.9/§27.15; kein hartcodierte Testquest im Realm-
+        // Start). Arc-shared: der Service wird built BEFORE the Ctx exists.
+        let relic_svc = {
+            let mut svc = crate::quest::QuestService::new();
+            svc.register(crate::quest::QuestDefinition {
                 id: "q_relic".into(),
+                giver: None,
+                turn_in: None,
+                rewards: crate::quest::RewardBundle { exp: 0, idia: 0 },
                 title_key: "t".into(),
                 description_key: "d".into(),
                 objectives: vec![crate::quest::QuestObjective {
@@ -4079,8 +4143,12 @@ mod tests {
                 min_level: 1,
                 requires: vec![],
                 repeatable: false,
-            })
-            .unwrap();
+            }).unwrap();
+            svc
+        };
+        Arc::get_mut(&mut ctx)
+            .expect("eindeutiger Testkontext")
+            .quest = Arc::new(relic_svc);
         {
             let mut w = ctx.shared.lock().await;
             w.players.get_mut("held").unwrap().quests.insert(

@@ -13,7 +13,7 @@ pub mod c2s {
     pub const ATTACK: i64 = 3; // {target_id} start / {stop: true} beenden (Combat V1)
     pub const PICKUP: i64 = 4; // {loot_id} (Loot System V1)
     pub const CHAT: i64 = 5; // {channel, text}
-    pub const NPC_TALK: i64 = 6; // Händler: {npc_id, action, item_id?, item_uuid?, history_id?, count?} (docs/Handelssystem.md §13)
+    pub const NPC_TALK: i64 = 6; // Händler unverändert; Quest: {npc_id, action: quest_offers/quest_accept, quest_id?}, docs/Quest-System.md §27.27
     pub const AUCTION_LIST: i64 = 7; // (künftig)
     pub const AUCTION_BID: i64 = 8; // (künftig)
     pub const AUCTION_BUY: i64 = 9; // (künftig)
@@ -57,7 +57,7 @@ pub mod s2c {
     pub const DAMAGE: i64 = 5; // {id, amount, from_id, hit} (hit: miss/dodge/parry/block/normal/crit)
     pub const KILL: i64 = 6; // {id, killer_id}
     pub const LOOT: i64 = 7; // {id, kind, x, y, claimed[, item_id, count | gold]} (Loot System V1)
-    pub const NPC_TEXT: i64 = 8; // Händlerantwort: {ok, action?, reason?, offers?, history?, idia?, ...} (docs/Handelssystem.md §13)
+    pub const NPC_TEXT: i64 = 8; // Händler unverändert; Quest: {ok, action, npc_id, quests?, quest_id?, state?, rewards?, reason?}, §27.27/§27.28 (Abgabe+Belohnungen embedded; state ACTIVE/COMPLETED)
     pub const CHAT: i64 = 9; // {from, channel, text}
     pub const LEVELUP: i64 = 10; // (künftig)
     pub const SYNC: i64 = 11; // {ack_seq}

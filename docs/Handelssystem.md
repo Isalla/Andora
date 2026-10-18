@@ -287,7 +287,7 @@ Bestehende Regeln hierzu bleiben unverändert autoritativ.
 |---|---|
 | `inventory_system.md` §11 | Sicherheits-Puffer als analoger temporärer Runtime-State (nicht persistiert) |
 | `inventory_system.md` §16 | Item-Instanz-Lifecycle: Endgültig vernichtete Iteminstanzen → kontrollierte Persistenzentfernung |
-| `item_properties.md` | Verkäufe als Item-Usage-Art; Bindungsregeln für Verkäufe |
+| `item_properties.md` | Verkäufe als Verwendungsart von Gegenständen; Bindungsregeln für Verkäufe |
 | `Quest-System.md` §27.19 | Questitems nach Abbruch: an geeignete NPC-Händler verkäuflich, ohne konkrete Preisvorgaben |
 | `Player_Persistenz.md` | Sell-/Buyback-History ausdrücklich nicht Teil der Dirty-/Persistenzkomponenten |
 | `Datenbank_Architektur.md` | Händler-Grunddaten als statische Realm-Definitionen (Realm-DB); Verkäufe als realmgebundene Operation |
@@ -297,6 +297,13 @@ Bestehende Regeln hierzu bleiben unverändert autoritativ.
 ## 13. Händlerprotokoll (NPC_TALK/NPC_TEXT, eingebaut)
 
 `NPC_TALK` (C2S 6) trägt `{npc_id, action, item_id?, item_uuid?, history_id?, count?}` mit `action` = `open`/`buy`/`sell`/`buyback`. IDs unverändert (`protocol.rs`, `shared/protocol.gd` numerisch identisch).
+
+Zusätzlich verwendet die Quest-Erweiterung dieselben Nachrichten-IDs mit
+`action = quest_offers/quest_accept` und optionalem `quest_id` (Vertrag:
+`Quest-System.md` §27.27). Diese Aktionen werden vor dem Händlerzweig
+getrennt behandelt; Händlerpreise, Kauf/Verkauf/Buyback, Nutzdaten und
+Antworten dieses Abschnitts bleiben unverändert. NPC-Questgeber werden über
+stabile Content-ID zugeordnet; die Händlerrolle bleibt wie bisher spawnbezogen.
 
 * `open` `{npc_id}`: Antwort mit Sortiment (`offers`: je `{item_id, name, buy_price, sell_price}`, `null` = nicht angeboten/nicht angenommen) und aktueller History.
 * `buy` `{npc_id, item_id, count}`: Kauf aus unbegrenztem Angebot zu `buy_price × count` (geprüfte Arithmetik).

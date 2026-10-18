@@ -98,6 +98,22 @@ quest = {
 
 Die Werte sind lediglich ein Beispiel für die Struktur.
 
+**Umsetzung des minimalen V1-Formats:** `Quest-System.md` §27.9/§27.27 ist
+maßgeblich. Ein ladbares Skript gibt seine Datentabelle zurück und enthält
+Ziel-IDs. Die Vorbereitung aus `Quest-System.md` §27.28 validiert nun
+`turn_in` und `rewards = {exp = N, idia = M}` für die Abgabevorschau, ohne
+Belohnungen zu vergeben. Andere Reward-Felder werden abgewiesen. Für die
+NPC-Annahme kann es zusätzlich `giver = "borin"` enthalten: Der Wert muss
+eine tatsächlich geladene stabile NPC-Content-ID aus `monster_definitions`
+sein, kein Anzeigename und kein Spawn-Schlüssel. Ohne `giver` bleibt das
+Skript ladbar, bietet aber keine NPC-Annahme an. Ungültige Referenzen werden
+beim Laden abgewiesen. `turn_in` bezeichnet einen expliziten, unabhängig von
+`giver` validierten Abgabe-NPC; ohne Zuordnung kein Abgabeangebot. Die
+mutierende Abgabe wartet auf die in `Quest-Turn-In-Persistenz.md` vorgelegte
+Vertragsfreigabe. Das obige langfristige Beispiel mit `xp` und `gold` ist
+weiterhin kein unverändert ladbares V1-Skript; seine Beispielbeträge sind
+keine Balancevorgabe.
+
 Lua beschreibt die Quest.
 
 Der Realm-Server (Rust) entscheidet, ob die Bedingungen tatsächlich erfüllt wurden.

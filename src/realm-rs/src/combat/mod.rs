@@ -203,6 +203,17 @@ fn dist(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 ///   Claim wird gelöscht; EXP (§7) wird an die aktiven Gruppenmitglieder
 ///   bzw. den Claim-Spieler verteilt. Loot-Tabelle wird am Sterbeort
 ///   als Boden-Loot gespawnt (Loot System V1; keine Tabelle → kein Loot).
+/// - Quest V1 (§27.8 KILL, §27.16 Credit): der tatsächliche Einmaligkeits-
+///   Übergang Alive→Dead (NOT jeder Tick with hp<=0) feeds the serverbestätigte
+///   Monster-Tod into `QuestService.add_progress` for the documented Claim-/
+///   positionsrecipients (group claim → active members within leader range,
+///   player claim → that player, no claim → killer fallback — identical to the
+///   EXP rule, §27.12: no additional Damage-/Assist-/Ownershiprule). Matching
+///   is by stable Content-/Definitionskennung (`Npc.content_id`), only ACTIVE
+///   quests with a matching `kill`-Objective receive delta 1; quantity/goal
+///   logic is the existing `add_progress` (clamp at required). Pure RAM-
+///   mutation — no DB I/O under the World lock (intermediate progress persists
+///   at Quest-Checkpoints only, docs/Player_Persistenz.md §8).
 /// - Sender: DAMAGE (+ hp via world_tick-STATE) und KILL an alle Sichtbaren.
 pub fn combat_tick(
     world: &mut World,
@@ -210,6 +221,7 @@ pub fn combat_tick(
     loot_cfg: &LootCfg,
     prog: &ProgressionCfg,
     groups: &GroupManager,
+    quests: &crate::quest::QuestService,
     rng: &mut dyn CombatRng,
     now: Instant,
     wall_now: SystemTime,
@@ -390,6 +402,9 @@ pub fn combat_tick(
                             let exp_reward = n.exp_reward;
                             let monster_level = n.level;
                             let claim = n.claimed_by.clone();
+                            // Quest-Kill-Credit: stable Content-ID (never the
+                            // Zufälligen Spawn-Key or the Anzeigename).
+                            let content_id = n.content_id.clone();
                             // Loot am Sterbeort (Loot System V1).
                             npc_loot = Some((n.loot_table_id, claim.clone(), n.x, n.y));
                             n.status = crate::npc::NpcStatus::Dead;
@@ -409,6 +424,14 @@ pub fn combat_tick(
                                 &claim,
                                 aid,
                                 prog,
+                            );
+                            credit_quest_kill_progress(
+                                world,
+                                quests,
+                                groups,
+                                &content_id,
+                                claim,
+                                aid,
                             );
                             true
                         } else {
@@ -558,6 +581,72 @@ fn award_monster_exp(
                         "free_attr_points": free_attr_points
                     }),
                 ));
+            }
+        }
+    }
+}
+
+/// Quest V1 Kill-Credit (docs/Quest-System.md §27.8 „KILL: Fortschritt
+/// entsteht ausschließlich aus einem vom Realm bestätigten Gegner-Tod",
+/// §27.16 positionsrule): called ONLY at the actual Einmaligkeits-Übergang
+/// Alive→Dead in `combat_tick` — never on subsequent hp<=0-Ticks, never from
+/// a Clientbehauptung (no C2S-Questmessage exists; §27.8).
+///
+/// Recipients follow the EXISTING documented Claim-/positionsrules —
+/// identical to `award_monster_exp` (§7/§27.16): group claim `g:<gid>` →
+/// active members (online + within the 100 m leader range; a gestorbener
+/// Spieler still inside the area keeps Credit, a teleported one outside gets
+/// keinen); player claim → that player; no claim → killer fallback. §27.12:
+/// no additional Damage-/Assist-/Ownershiprules are invented here.
+///
+/// For every recipient: only ACTIVE quests with a `kill`-Objective whose
+/// `target` equals the stable Content-/Definitionskennung (`content_id`)
+/// receive delta 1 via `QuestService.add_progress` — the existing quantity/
+/// goal logic (clamp at `required`, `met` only on the new fulfillment).
+/// Pure RAM-mutation: no DB I/O under the World lock (intermediate progress
+/// persists at Quest-Checkpoints only, docs/Player_Persistenz.md §8).
+#[allow(clippy::too_many_arguments)]
+fn credit_quest_kill_progress(
+    world: &mut World,
+    quests: &crate::quest::QuestService,
+    groups: &GroupManager,
+    content_id: &str,
+    claim: Option<String>,
+    fallback_killer: &str,
+) {
+    let recipients: Vec<String> = match claim {
+        Some(c) if crate::group::is_group_claim(&c) => {
+            if let Some(gid) = crate::group::decode_group_claim(&c) {
+                let positions: HashMap<String, (f64, f64)> = world
+                    .players
+                    .iter()
+                    .map(|(id, p)| (id.clone(), (p.x, p.y)))
+                    .collect();
+                groups.active_members(gid, &positions, groups.cfg.range)
+            } else {
+                Vec::new()
+            }
+        }
+        Some(pid) => vec![pid.to_string()],
+        None => vec![fallback_killer.to_string()],
+    };
+    for pid in recipients {
+        let Some(p) = world.players.get_mut(&pid) else {
+            continue;
+        };
+        for (quest_id, state) in p.quests.iter_mut() {
+            if state.state != crate::quest::QuestState::Active {
+                continue;
+            }
+            let Some(def) = quests.find_definition(quest_id) else {
+                continue;
+            };
+            for o in &def.objectives {
+                if o.kind == crate::quest::ObjectiveType::Kill && o.target == content_id {
+                    if let Err(e) = quests.add_progress(quest_id, state, o.id.as_str(), 1) {
+                        log::warn!("Quest-Kill-Credit {pid}/{quest_id}: {e}");
+                    }
+                }
             }
         }
     }
@@ -844,6 +933,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t1,
             wall(),
@@ -862,6 +952,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t2,
             wall(),
@@ -881,6 +972,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             t3,
             wall(),
@@ -908,6 +1000,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -935,6 +1028,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -958,6 +1052,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -989,6 +1084,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9, 0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -1040,6 +1136,7 @@ mod tests {
             &crate::config::LootCfg::default(),
             &crate::progression::ProgressionCfg::default(),
             &groups(),
+            &crate::quest::QuestService::new(),
             &mut ScriptedRng::from(&[0.8, 0.9]),
             now + Duration::from_millis(10),
             wall(),
@@ -1137,5 +1234,520 @@ mod tests {
             &crate::progression::ProgressionCfg::default(),
         );
         assert_eq!(w.players.get("a").unwrap().exp, 125);
+    }
+
+    // ── Quest V1 Kill-Credit (docs/Quest-System.md §27.8/§27.16) ──────────
+    //
+    // These tests drive the REAL combat path: `combat_tick` processes the
+    // server-confirmed Monster-Tod (the actual Einmaligkeits-Übergang
+    // Alive→Dead) and feeds `QuestService.add_progress` for the documented
+    // Claim-/positionsempfängers. Quest-Definitions come from a FIXTURE
+    // registered here — NOT a hartcodierte Testquest in the normal Realm-
+    // Start (the Quest-Content-/Definition-Loader stays open, §27.9/§27.15).
+    // Direct Service-Tests live in quest.rs::tests; the end-to-end
+    // production path (dispatch → combat_tick) lives in net.rs::tests.
+
+    use crate::quest::{
+        CharacterObjectiveProgress,
+        CharacterQuestState,
+        ObjectiveType,
+        QuestDefinition,
+        QuestObjective,
+        QuestService,
+        QuestState,
+    };
+
+    /// Quest-Fixture: „Töte <required> <content>." — ACTIVE-Objective `o_kill`
+    /// with the stable Content-ID as `target`.
+    fn kill_quest(content: &str, required: u32) -> QuestService {
+        let mut svc = QuestService::new();
+        svc.register(QuestDefinition {
+            id: "q_kill_test".into(),
+            giver: None,
+            turn_in: None,
+            rewards: crate::quest::RewardBundle { exp: 0, idia: 0 },
+            title_key: "quest.test_kill.title".into(),
+            description_key: "quest.test_kill.description".into(),
+            objectives: vec![QuestObjective {
+                id: "o_kill".into(),
+                kind: ObjectiveType::Kill,
+                target: content.into(),
+                required,
+            }],
+            min_level: 1,
+            requires: Vec::new(),
+            repeatable: false,
+        })
+            .unwrap();
+        svc
+    }
+
+    /// Monster-Instance with a stable Content-ID (never matched via Spawn-Key
+    /// or Anzeigename).
+    fn monster(content_id: &str, spawn_id: i64, hp: i32, x: f64, y: f64) -> crate::npc::Npc {
+        crate::npc::Npc {
+            id: crate::npc::npc_id(spawn_id),
+            spawn_id,
+            content_id: content_id.into(),
+            name: "Testmonster".into(),
+            kind: "normal".into(),
+            attackable: true,
+            aggressive: false,
+            aggro_range: 8.0,
+            attack_range: 1.5,
+            attack_duration_ms: 1500,
+            weapon_damage: 10,
+            weapon_skill: 1,
+            armor: 0,
+            max_hp: hp,
+            move_speed: 4.0,
+            respawn_ms: 300_000,
+            faction: None,
+            exp_reward: 0,
+            level: 1,
+            loot_table_id: None,
+            pack_id: None,
+            home_x: x,
+            home_y: y,
+            home_radius: 5.0,
+            leash_radius: 15.0,
+            status: crate::npc::NpcStatus::Alive,
+            hp,
+            x,
+            y,
+            target_id: None,
+            last_attack: Instant::now(),
+            no_link_since: None,
+            return_started_at: None,
+            respawn_after: None,
+            claimed_by: None,
+            override_ctx: None,
+            effects: Vec::new(),
+            cooldowns: std::collections::BTreeMap::new(),
+            active_cast: None,
+        }
+    }
+
+    /// Puts a fresh ACTIVE kill-Quest (progress 0) into the Player-Zustand.
+    fn with_active_kill_quest(p: crate::world::Player) -> crate::world::Player {
+        let mut p = p;
+        p.quests.insert(
+            "q_kill_test".into(),
+            CharacterQuestState {
+                quest_id: "q_kill_test".into(),
+                state: QuestState::Active,
+                progress: vec![CharacterObjectiveProgress {
+                    objective_id: "o_kill".into(),
+                    current: 0,
+                }],
+                started_at_ms: Some(1),
+                completed_at_ms: None,
+            },
+        );
+        p
+    }
+
+    fn quest_progress(w: &World, pid: &str) -> u32 {
+        w.players
+            .get(pid)
+            .and_then(|p| p.quests.get("q_kill_test"))
+            .map(|s| s.progress.iter().find(|x| x.objective_id == "o_kill").map(|x| x.current).unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn realm_confirmed_death_credits_matching_active_kill_objective() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        a.x = 0.0;
+        let now = Instant::now();
+        let n = monster("wolf", 1, 100, 1.0, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(w.npcs["npc_1"].status, crate::npc::NpcStatus::Dead);
+        assert_eq!(quest_progress(&w, "a"), 1, "serverbestätigte Tod → +1");
+    }
+
+    #[test]
+    fn wrong_monster_content_credits_nothing() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        a.x = 0.0;
+        let now = Instant::now();
+        // Monster-Content "boar" ≠ Quest-Target "wolf" (Spawn-Key/Anzeigename
+        // are never the match key).
+        let n = monster("boar", 1, 100, 1.0, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(w.npcs["npc_1"].status, crate::npc::NpcStatus::Dead);
+        assert_eq!(quest_progress(&w, "a"), 0, "falscher Monstertyp → kein Fortschritt");
+    }
+
+    #[test]
+    fn non_active_quest_receives_no_progress() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a.x = 0.0;
+        // AVAILABLE (not accepted) → no ACTIVE-Zustand.
+        a.quests.insert(
+            "q_kill_test".into(),
+            CharacterQuestState {
+                quest_id: "q_kill_test".into(),
+                state: QuestState::Available,
+                progress: vec![CharacterObjectiveProgress {
+                    objective_id: "o_kill".into(),
+                    current: 0,
+                }],
+                started_at_ms: None,
+                completed_at_ms: None,
+            },
+        );
+        let (mut b, _) = player("b", 100, "Warrior");
+        b.x = 0.0;
+        // COMPLETED → also no further progress.
+        b.quests.insert(
+            "q_kill_test".into(),
+            CharacterQuestState {
+                quest_id: "q_kill_test".into(),
+                state: QuestState::Completed,
+                progress: vec![CharacterObjectiveProgress {
+                    objective_id: "o_kill".into(),
+                    current: 5,
+                }],
+                started_at_ms: Some(1),
+                completed_at_ms: Some(2),
+            },
+        );
+        let now = Instant::now();
+        let n = monster("wolf", 1, 100, 1.0, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.players.insert("b".into(), b);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 0, "AVAILABLE → kein Fortschritt");
+        assert_eq!(quest_progress(&w, "b"), 5, "COMPLETED → unchanged");
+    }
+
+    #[test]
+    fn repeated_ticks_after_death_never_credit_again() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        a.x = 0.0;
+        let now = Instant::now();
+        let n = monster("wolf", 1, 100, 1.0, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 1);
+        // Further Ticks: the NPC stays Dead (hp<=0) — the Credit is bound to
+        // the Einmaligkeits-Transition, NOT to every Tick with hp<=0.
+        for i in 0..3 {
+            combat_tick(
+                &mut w,
+                &cfg,
+                &crate::config::LootCfg::default(),
+                &crate::progression::ProgressionCfg::default(),
+                &groups(),
+                &svc,
+                &mut ScriptedRng::from(&[0.8, 0.9]),
+                now + Duration::from_millis(20 + i),
+                wall(),
+                20.0,
+            );
+        }
+        assert_eq!(quest_progress(&w, "a"), 1, "kein double-Credit after Tod");
+    }
+
+    #[test]
+    fn kill_progress_clamps_at_required_via_existing_logic() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        a.x = 0.0;
+        let now = Instant::now();
+        // required = 1, two matching Monsters die → progress stays 1
+        // (existing add_progress clamp + `met` only on the new fulfillment).
+        let m1 = monster("wolf", 1, 100, 1.0, 0.0);
+        let m2 = monster("wolf", 2, 100, 1.5, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.npcs.insert(m1.id.clone(), m1);
+        w.npcs.insert(m2.id.clone(), m2);
+        let svc = kill_quest("wolf", 1);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 1);
+        // Re-arm on the second Monster (first Tod entwaffnet a).
+        armed_player(&mut w.players.get_mut("a").unwrap(), "npc_2", now);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(2001),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 1, "Zielgrenze: clamped at required");
+    }
+
+    #[test]
+    fn group_claim_credits_only_members_in_leader_range() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let t = Instant::now();
+        let mut gm = GroupManager::new(crate::group::GroupCfg::default());
+        let gid = gm.create_group("a", t).unwrap();
+        gm.invite(gid, "a", "b", t).unwrap();
+        gm.accept_invite(gid, "b", t).unwrap();
+        gm.invite(gid, "a", "c", t).unwrap();
+        gm.accept_invite(gid, "c", t).unwrap();
+        // a (Leiter) 0,0; b 5,0 (in range, but DEAD hp=0 — §27.16 keeps
+        // Credit while inside the area); c 150,0 (outside 100 m → keinen).
+        for (id, x, hp) in [("a", 0.0, 100), ("b", 5.0, 0), ("c", 150.0, 100)] {
+            let (mut p, _) = player(id, hp, "Warrior");
+            p = with_active_kill_quest(p);
+            p.x = x;
+            w.players.insert(id.into(), p);
+        }
+        let now = Instant::now();
+        let mut n = monster("wolf", 1, 100, 1.0, 0.0);
+        // Claim already owned by the GROUP (first damage earlier, §2/§8).
+        n.claimed_by = Some(crate::group::encode_group_claim(gid));
+        armed_player(&mut w.players.get_mut("a").unwrap(), "npc_1", now);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &gm,
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 1, "Leiter in Range → Credit");
+        assert_eq!(quest_progress(&w, "b"), 1, "toter Member in Range → Credit (§27.16)");
+        assert_eq!(quest_progress(&w, "c"), 0, "outside 100 m → keinen Credit");
+    }
+
+    #[test]
+    fn solo_claim_credits_claim_player_not_the_killer() {
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        a.x = 0.0;
+        let (mut b, _) = player("b", 100, "Warrior");
+        b = with_active_kill_quest(b);
+        b.x = 0.0;
+        let now = Instant::now();
+        let mut n = monster("wolf", 1, 100, 1.0, 0.0);
+        // Claim owned by a (first valid damage earlier); b lands the killing
+        // blow → Credit follows the Claim, not the Killer (§2/§7/§27.16).
+        n.claimed_by = Some("a".into());
+        armed_player(&mut b, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.players.insert("b".into(), b);
+        w.npcs.insert(n.id.clone(), n);
+        let svc = kill_quest("wolf", 5);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        assert_eq!(quest_progress(&w, "a"), 1, "Claim-Spieler → Credit");
+        assert_eq!(quest_progress(&w, "b"), 0, "Killer ohne Claim → keinen");
+    }
+
+    /// Documented fallback of the SAME Credit-Rule as `award_monster_exp`
+    /// (§7): no Claim → the Killer receives the Credit. Direct call of the
+    /// Credit-Function (the branch is defensive: any valid killing damage
+    /// already sets a Claim in `combat_tick`).
+    #[test]
+    fn no_claim_falls_back_to_the_killer_credit() {
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a = with_active_kill_quest(a);
+        w.players.insert("a".into(), a);
+        let svc = kill_quest("wolf", 5);
+        credit_quest_kill_progress(
+            &mut w,
+            &svc,
+            &groups(),
+            "wolf".into(),
+            None,
+            "a",
+        );
+        assert_eq!(quest_progress(&w, "a"), 1, "no Claim → Killer fallback");
+    }
+
+    // ── Loader-Verbindung: Definition via Content-Pfad → Kill-Credit ──────
+    //
+    /// The Questdefinition comes from the DOCUMENTED Content-Pfad
+    /// (`<root>/quests/*.lua` via the Lua-Sandbox/ScriptManager,
+    /// `QuestService::load_quest_definitions`) — NOT from a hartcodierte
+    /// Testquest — and the production `combat_tick` Kill-Credit then
+    /// advances it. Short-lived temp-Dir (ai_jobs „Temporäre Dateien").
+    #[test]
+    fn loaded_fixture_definition_credits_kill_via_content_loader() {
+        use std::fs;
+        use std::path::Path;
+        let root = std::env::temp_dir()
+            .join("pimmo-lua-quest-combat-load")
+            .join(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+                .to_string());
+        let dir = root.join("quests");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("q_wolfcull.lua"),
+            r#"return {
+    id = "q_wolfcull",
+    title_key = "quest.q_wolfcull.title",
+    description_key = "quest.q_wolfcull.description",
+    requirements = { level = 1 },
+    objectives = {
+        { id = "o_wolves", type = "kill", target = "wolf", required = 2 },
+    },
+}"#,
+        )
+            .unwrap();
+
+        let mut content_monsters = std::collections::HashSet::new();
+        content_monsters.insert("wolf".into());
+        let content = crate::quest::ContentIndex {
+            monsters: content_monsters,
+            items: std::collections::HashSet::new(),
+        };
+        let mut svc = crate::quest::QuestService::new();
+        let n = svc.load_quest_definitions(&root, &content).unwrap();
+        assert_eq!(n, 1, "one Definition via Content-Pfad");
+
+        let cfg = test_cfg();
+        let mut w = World::new();
+        let (mut a, _) = player("a", 100, "Warrior");
+        a.x = 0.0;
+        // ACTIVE-Zustand for the LOADED Quest (progress entry matches).
+        a.quests.insert(
+            "q_wolfcull".into(),
+            crate::quest::CharacterQuestState {
+                quest_id: "q_wolfcull".into(),
+                state: crate::quest::QuestState::Active,
+                progress: vec![crate::quest::CharacterObjectiveProgress {
+                    objective_id: "o_wolves".into(),
+                    current: 0,
+                }],
+                started_at_ms: Some(1),
+                completed_at_ms: None,
+            },
+        );
+        let now = Instant::now();
+        let n_m = monster("wolf", 1, 100, 1.0, 0.0);
+        armed_player(&mut a, "npc_1", now);
+        w.players.insert("a".into(), a);
+        w.npcs.insert(n_m.id.clone(), n_m);
+        combat_tick(
+            &mut w,
+            &cfg,
+            &crate::config::LootCfg::default(),
+            &crate::progression::ProgressionCfg::default(),
+            &groups(),
+            &svc,
+            &mut ScriptedRng::from(&[0.8, 0.9]),
+            now + Duration::from_millis(10),
+            wall(),
+            20.0,
+        );
+        let prog = w.players["a"].quests
+            .get("q_wolfcull").unwrap().progress[0].current;
+        assert_eq!(prog, 1, "loaded Definition + serverconfirmed Tod → +1");
     }
 }
