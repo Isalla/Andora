@@ -191,7 +191,12 @@ pub async fn handle(
                     .filter(|def| !pending_has(&world, &pid, &def.id))
                     .filter(|def| service.state_for(def, player.quests.get(&def.id), player.level, &done) == QuestState::Available)
                     .map(|def| json!({"quest_id": def.id, "title_key": def.title_key,
-                        "description_key": def.description_key, "state": "AVAILABLE", "can_accept": true}))
+                        "description_key": def.description_key, "state": "AVAILABLE", "can_accept": true,
+                        "turn_in": def.turn_in,
+                        "objectives": def.objectives.iter().map(|o| json!({
+                            "id": o.id, "type": o.kind.key(), "target": o.target,
+                            "required": o.required,
+                        })).collect::<Vec<serde_json::Value>>()}))
                     .collect();
                 let _ = tx.send(
                     Frame::new(
@@ -492,6 +497,14 @@ pub async fn handle_turn_in(
                             "objectives_met": met,
                             "rewards": {"exp": def.rewards.exp, "idia": def.rewards.idia},
                             "can_turn_in": met,
+                            "turn_in": def.turn_in,
+                            "objectives": def.objectives.iter().map(|o| json!({
+                                "id": o.id, "type": o.kind.key(), "target": o.target,
+                                "required": o.required,
+                                "current": state.progress.iter()
+                                    .find(|pp| pp.objective_id == o.id)
+                                    .map(|pp| pp.current).unwrap_or(0u32),
+                            })).collect::<Vec<serde_json::Value>>(),
                         })
                     })
                 }).collect();

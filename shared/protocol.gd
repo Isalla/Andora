@@ -76,3 +76,100 @@ static func decode(text: String) -> Dictionary:
 	if typeof(r.result) == TYPE_DICTIONARY:
 		return r.result
 	return {}
+
+# ---------- Quest-Protokoll V1.3 (docs/Quest-Protokoll-V1.3.md) ----------
+# C2S (Godot->Rust) ueber NPC_TALK (6); S2C (Rust->Godot) als Payload in
+# NPC_TEXT (8). Der Client sendet nur Absichten; die Server allein entscheidet
+# (Validationspfad, InventoryState.try_remove, guarded_complete_quest,
+# spool::publish_quest_completion). Alle Decoders are seq-Korrelation-tolerant:
+# they recognise a NPC_TEXT/NPC_TALK-Frame by type+action, otherwise {}.
+
+# C2S_quest_turn_in (NPC_TALK 6): {npc_id, action:'quest_turn_in', quest_id,
+# npc_content_id?, item_uuids?:Array<String>}. npc_id = NPC-Instanz-ID (Server
+# interaction); npc_content_id = stabile Content-ID (V1.3-Absicht, Server
+# vergleich Npc.content_id); item_uuids = Absicht-List (Server entscheidet).
+static func encode_quest_turn_in_frame(seq: int, npc_id: String, quest_id: String, npc_content_id: String = "", item_uuids: Array = []) -> String:
+	var data = {
+		"npc_id": npc_id,
+		"action": "quest_turn_in",
+		"quest_id": quest_id,
+	}
+	if npc_content_id != "":
+		(data)["npc_content_id"] = npc_content_id
+	if not item_uuids.empty():
+		(data)["item_uuids"] = item_uuids
+	return encode(seq, C2S["NPC_TALK"], data)
+
+# C2S_quest_accept (NPC_TALK 6): {npc_id, action:'quest_accept', quest_id}.
+static func encode_quest_accept_frame(seq: int, npc_id: String, quest_id: String) -> String:
+		return encode(seq, C2S["NPC_TALK"], {
+			"npc_id": npc_id,
+			"action": "quest_accept",
+			"quest_id": quest_id,
+		})
+
+# decode_quest_offer_frame: S2C NPC_TEXT (8) action 'quest_offers' ->
+# quest_offer-Payload (Array {quest_id,title_key,description_key,state,can_accept}).
+# Non-matching -> [].
+static func decode_quest_offer_frame(frame: Dictionary) -> Array:
+		if int(frame.get("type", 0)) != S2C["NPC_TEXT"]:
+			return []
+		var d = frame.get("data", {})
+		if typeof(d) != TYPE_DICTIONARY:
+			return []
+		if str(d.get("action", "")) != "quest_offers":
+			return []
+		var qs = d.get("quests", [])
+		return qs if typeof(qs) == TYPE_ARRAY else []
+
+# decode_quest_turn_in_frame: C2S NPC_TALK (6) turn-in -> {npc_id, action,
+# quest_id, item_uuids}. Validate type+action+non-empty npc_id/quest_id.
+# Invalid -> {}.
+static func decode_quest_turn_in_frame(frame: Dictionary) -> Dictionary:
+		if int(frame.get("type", 0)) != C2S["NPC_TALK"]:
+			return {}
+		var d = frame.get("data", {})
+		if typeof(d) != TYPE_DICTIONARY:
+			return {}
+		if str(d.get("action", "")) != "quest_turn_in":
+			return {}
+		var npc_id = str(d.get("npc_id", ""))
+		var quest_id = str(d.get("quest_id", ""))
+		if npc_id == "" or quest_id == "":
+			return {}
+		var out = {
+			"npc_id": npc_id,
+			"action": "quest_turn_in",
+			"quest_id": quest_id,
+		}
+		var iu = d.get("item_uuids", [])
+		(out)["item_uuids"] = iu if typeof(iu) == TYPE_ARRAY else []
+		if d.has("npc_content_id"):
+			(out)["npc_content_id"] = str(d.get("npc_content_id", ""))
+		return out
+
+# decode_quest_text_frame: S2C NPC_TEXT (8) action 'quest_turn_in' ->
+# quest_turn_in_result-Payload {ok, state?, rewards?, receipt_id?, reason?,
+# error?}. rewards carries the V1 fields exp/idia (V1.3 alias: experience=exp,
+# gold=idia; items still open, see Quest-System.md 27.26). Non-matching -> {}.
+static func decode_quest_text_frame(frame: Dictionary) -> Dictionary:
+		if int(frame.get("type", 0)) != S2C["NPC_TEXT"]:
+			return {}
+		var d = frame.get("data", {})
+		if typeof(d) != TYPE_DICTIONARY:
+			return {}
+		if str(d.get("action", "")) != "quest_turn_in":
+			return {}
+		var out = {
+			"ok": bool(d.get("ok", false)),
+			"quest_id": str(d.get("quest_id", "")),
+		}
+		if bool(d.get("ok", false)):
+			(out)["state"] = str(d.get("state", ""))
+			(out)["rewards"] = d.get("rewards", {})
+			if d.has("receipt_id"):
+			(out)["receipt_id"] = str(d.get("receipt_id", ""))
+		else:
+			(out)["reason"] = str(d.get("reason", ""))
+			(out)["error"] = str(d.get("error", d.get("reason", "")))
+		return out

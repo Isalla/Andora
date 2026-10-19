@@ -685,13 +685,14 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
                 }
                 q.send(&Frame::new(0, s2c::LOOT, payload));
             } else {
-                let (status, aggro, claimed, name) = {
+                let (status, aggro, claimed, name, content_id) = {
                     let n = world.npcs.get(pid.as_str());
                     (
                         n.map(|n| n.status.key()).unwrap_or("alive"),
                         n.map(|n| n.target_id.is_some()).unwrap_or(false),
                         n.map(|n| n.claimed_by.is_some()).unwrap_or(false),
                         n.map(|n| n.name.clone()).unwrap_or_default(),
+                        n.map(|n| n.content_id.clone()).unwrap_or_default(),
                     )
                 };
                 if !q.entities.contains(pid) {
@@ -700,7 +701,7 @@ pub fn world_tick(world: &mut World, aofb_radius: f64) {
                         s2c::SPAWN,
                         serde_json::json!({
                             "id": pid, "kind": "npc", "x": px, "y": py, "face": face,
-                            "extra": {"status": status, "aggro": aggro, "claimed": claimed, "name": name}
+                            "extra": {"status": status, "aggro": aggro, "claimed": claimed, "name": name, "content_id": content_id}
                         }),
                     ));
                     q.entities.insert(pid.clone());

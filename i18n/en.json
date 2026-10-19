@@ -275,5 +275,22 @@
   "tc_inv_e_notconsumable": "Not a defined healing/manadrop.",
   "tc_inv_e_dead": "You are dead – cannot drink.",
   "tc_inv_e_full": "Resource already full – no use.",
-  "tc_inv_e_cooldown": "Drink still cooling down."
+  "tc_inv_e_cooldown": "Drink still cooling down.",
+  "quest.tc_q_hides.description": "Bring 3 wolf hides and 2 wolf meat.",
+  "quest.tc_q_hides.title": "Hides and Meat",
+  "quest.tc_q_ore.description": "Bring 4 units of iron ore.",
+  "quest.tc_q_ore.title": "Iron Delivery",
+  "quest.tc_q_wolves.description": "Slay five wolves near the Borin hunting grounds.",
+  "quest.tc_q_wolves.objectives.o_wolves": "Wolves slain: {current}/{required}",
+  "quest.tc_q_wolves.reward.exp": "Experience: {exp}",
+  "quest.tc_q_wolves.reward.idia": "Idia: {idia}",
+  "quest.tc_q_wolves.title": "Wolf Hunt",
+  "quest.turn_in": "Turn in",
+  "tc_ql_title": "Quest Log",
+  "tc_ql_objective": "{current}/{required} — {label}",
+  "tc_ql_turn_in": "Turn in at: {name}",
+  "tc_map_hint": "Map: white=you, yellow=NPC, blue circle=quest area (hover = objectives)",
+  "quest.tc_q_hides.objectives.o_hides": "Wolf hides",
+  "quest.tc_q_hides.objectives.o_meat": "Wolf meat",
+  "quest.tc_q_ore.objectives.o_ore": "Iron ore"
 }

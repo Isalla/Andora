@@ -275,5 +275,22 @@
   "tc_inv_e_notconsumable": "Not a defined Heil-/Manatrank.",
   "tc_inv_e_dead": "You are dead – cannot drink.",
   "tc_inv_e_full": "Resource already full – no use.",
-  "tc_inv_e_cooldown": "Trank still cooling down."
+  "tc_inv_e_cooldown": "Trank still cooling down.",
+  "quest.tc_q_hides.description": "Bring 3 Wolfspelz and 2 pieces of Wolfmeat.",
+  "quest.tc_q_hides.title": "Wolfläute und Fleisch",
+  "quest.tc_q_ore.description": "Bring 4 units of iron ore.",
+  "quest.tc_q_ore.title": "Eisen Delivery",
+  "quest.tc_q_wolves.description": "Fünf Wolves near the Borin-Huntingground slay.",
+  "quest.tc_q_wolves.objectives.o_wolves": "Wolves slain: {current}/{required}",
+  "quest.tc_q_wolves.reward.exp": "Experience: {exp}",
+  "quest.tc_q_wolves.reward.idia": "Idia: {idia}",
+  "quest.tc_q_wolves.title": "Wolfcull",
+  "quest.turn_in": "Turn in",
+  "tc_ql_title": "Questlog",
+  "tc_ql_objective": "{current}/{required} — {label}",
+  "tc_ql_turn_in": "Abgabe at: {name}",
+  "tc_map_hint": "Map: Wei=Own gelocation, gel dot=NPC, blue circle=Questarea (Mouse over circle = Goals)",
+  "quest.tc_q_hides.objectives.o_hides": "Wolf pelts",
+  "quest.tc_q_hides.objectives.o_meat": "Wolf meat",
+  "quest.tc_q_ore.objectives.o_ore": "Iron ore"
 }
