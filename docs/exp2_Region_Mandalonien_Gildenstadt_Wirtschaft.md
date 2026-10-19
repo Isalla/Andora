@@ -41,6 +41,12 @@ Die Gilde entscheidet selbst, welche Gebäude sie bauen und verbessern möchte, 
 > **Stadtkasse → Was können wir uns leisten?**
 > **Gilde → Was wollen wir tatsächlich bauen?**
 
+> **Ergänzung (Auftragsdokumentation):** Das **Stadtlevel** ist vom **Gildenlevel** zu
+> unterscheiden. Der Gildenaufstieg basiert nach vereinbarter Richtung auf **Gildenstatus**;
+> höhere Gildenlevel erweitern **Gildenbankkapazität** und **Mitgliederplätze**. Das Verhältnis
+> von Gildenstatus, Gildenlevel und politischem Einfluss ist noch offen
+> (siehe `Politik-Herrschaftssystem.md` §27, `Quest-System.md` Statusquests).
+
 ---
 
 # 3. Sichtbarer Gebäudeausbau
@@ -123,6 +129,29 @@ Die Gildenführung muss dann entscheiden:
 * oder die Gildensteuer erhöhen
 
 > **Eine Stadt wird mit ihrem Ausbau nicht künstlich teurer – sie wird teurer, weil tatsächlich mehr unterhalten werden muss.**
+
+## Spenden oder Statussteuer (vereinbarte Richtung – Entwurf)
+
+> **Bestandskorrektur:** Die einleitende Aussage dieses Abschnitts („Die Gildenführung bestimmt
+> eine regelmäßige Gildensteuer, beispielsweise 10 % pro Woche. Die Einnahmen fließen in die
+> Stadtkasse.“) ist **keine festgelegte Regel** und insoweit überholt. Nach der vereinbarten
+> Richtung gilt für den Einzahlungsmodus der Mitglieder:
+
+* Wurde **kein** Steuerbetrag gesetzt, gilt das **freiwillige Spendenmodell**.
+* Setzt der **Gildenleiter** einen Betrag, **ersetzt** eine **wöchentliche Statussteuer** diesen
+  Einzahlungsmodus.
+* Wird die Festlegung **aufgehoben**, gilt wieder das Spendenmodell.
+* **Tatsächlicher Einzug = Minimum** aus festgelegtem Betrag und vorhandenem **persönlichem
+  Status**.
+* **Genau der eingezogene Betrag** wird der Gilde gutgeschrieben.
+* Es entstehen **keine negativen Bestände, keine Schulden, keine Nachforderungen**.
+* Der **Steuerbetrag ist für Mitglieder sichtbar** vorgesehen.
+* **Offen:** Abrechnungstag/Zeitzone, Offline-Abrechnung, Ein-/Austrittszeitpunkte, Wirksamkeit
+  von Änderungen, Obergrenzen und die Bedeutung eines ausdrücklich gesetzten Werts **0**.
+
+Ob daneben eine monetäre Gildensteuer auf Währung/Einkommen besteht, bleibt offen; die frühere
+10-%-Formulierung ist nicht beschlossen. Die konkrete Anbindung an die Stadtkasse ist noch nicht
+festgelegt (siehe `Politik-Herrschaftssystem.md` §27, `Quest-System.md` Statusquests).
 
 ---
 

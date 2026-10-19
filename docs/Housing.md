@@ -283,6 +283,11 @@ festgelegt:
 - Folgen unbezahlter Grundstücks- oder Hauskosten
 - Schutz von Housing-Gegenständen bei Verlust eines Hauses
 
+**Vereinbarte Richtung (Entwurf, nicht implementiert):** Eine höhere Housing-Stufe – ein
+**Prestigehaus** – ist vorgesehen, die **sowohl Idia als auch persönlichen Status** (Statuspunkte)
+kostet. Konkrete Schwellen, Stufen und die genaue Einordnung bleiben offen
+(siehe `Politik-Herrschaftssystem.md` §27, `Quest-System.md` Statusquests).
+
 ---
 
 ## 7. Querverweise
@@ -290,3 +295,4 @@ festgelegt:
 - `docs/exp1_Unterwelt.md` (§18 Unterirdisches Housing): Grundstücke können auch in großen sicheren Kavernen der Unterwelt liegen; Housing bleibt Bestandteil der Landschaft.
 - `docs/inventory_system.md`: Housing-Lager ist eine spätere Housing-Ausbaustufe, kein Bestandteil des Inventar-V1.
 - `docs/MMO-Systeme-Ideensammlung.md` (Housing): Backlog-Themen, die nicht Teil von Housing V1 sind.
+- `docs/Politik-Herrschaftssystem.md` (§27) und `docs/Quest-System.md` (Statusquests): persönlicher Status als zusätzliche Kosten eines Prestigehauses.

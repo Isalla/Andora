@@ -509,6 +509,38 @@ Grundprinzip:
 
 > **Gruppenquests teilen ein gemeinsames Ereignis, aber der individuelle Questfortschritt richtet sich nach der Aufgabe des jeweiligen Charakters.**
 
+## Gemeinsame Gruppenaufträge (spätere Erweiterung – vereinbarte Richtung)
+
+Diese Richtung ist **vereinbart**, aber **nicht** Teil von Quest V1 und **nicht implementiert**
+(§27.11). Sie führt keine neue Zustandsmaschine ein; Annahme, Fortschritt und Abschluss nutzen
+die bestehenden Wege (§27.26–§27.28). Die einzelnen Punkte sind **Vereinbarungen**, keine
+Implementierung. Die individuellen persönlichen Aufträge aus §12–§14 sind davon zu unterscheiden.
+
+* Ein **Gildenhaus beziehungsweise eine Auftragsstelle** kann später gemeinsame Gruppenaufträge
+  anbieten. Die konkrete Zugangsregel bleibt offen.
+* Der **Leader** nimmt für die Gruppe an.
+* Die Quest gehört der **Gruppen-ID**; **alle Gruppenmitglieder** nehmen teil.
+* Gemeinsame Teilziele dürfen in **verschiedenen Gebieten** liegen.
+* **Austritt** beendet die Questteilnahme und den noch offenen Belohnungsanspruch; bereits
+  erzielter Gruppenfortschritt bleibt erhalten.
+* **Neue Mitglieder** übernehmen den vorhandenen Fortschritt und haben Anspruch auf die noch
+  ausstehende Abschlussbelohnung.
+* **Leaderwechsel** erhält den Auftrag.
+* **Gruppenauflösung** beendet den Auftrag.
+* **Disconnect allein ist kein Austritt**, solange die Mitgliedschaft besteht
+  (`Gruppensystem.md` §9).
+* Beim **verbindlichen Abschluss** wird die **Empfängerliste fixiert**. Ein späterer Beitritt
+  erzeugt **keinen rückwirkenden Anspruch**. Eine Wiederaufnahme darf **keine doppelte
+  Auszahlung** erzeugen.
+* Die tatsächliche Empfängerzuordnung und die Anbindung an den bestehenden Abschlussvertrag
+  (`quest_completion`, `character_quest_commits`) sind noch zu entwerfen. Die bestehenden
+  Abschlussregeln gelten für eine einzelne Charakterzeile; eine spätere gemeinsame
+  Gruppenabrechnung muss daran anschließen, ohne den Doppelauszahlungsschutz zu schwächen.
+
+Querverweise: `Gruppensystem.md` §2/§8/§9 (Mitgliedschaft, Leaderwechsel, Austritt,
+Disconnect/Reconnect), `KI_Personalisierungs_Questsystem_v2.md` §4.5 (persönliche
+Gruppenmitglieder-Aufträge).
+
 ---
 
 # 15. Klassenspezifische Questreihen
@@ -718,6 +750,30 @@ Die Höhe der Quest-EXP-Belohnung wird von der jeweiligen Quest selbst festgeleg
 Lua darf beschreiben, welche Belohnung vorgesehen ist.
 
 Der Realm-Server (Rust) führt die tatsächliche Vergabe aus.
+
+## Statusquests und Statusbelohnungen (spätere Erweiterung – vereinbarte Richtung)
+
+Diese Richtung ist **vereinbart**, aber **nicht implementiert** und **nicht** Teil von Quest V1.
+Sie ändert die verbindliche Reward-Semantik des Abschlusses (§27.26–§27.28) nicht. Die einzelnen
+Punkte sind **Vereinbarungen**, keine Implementierung.
+
+* Statusquests sind **solo und als Gruppenaufträge** vorgesehen. Gruppenquests vergeben
+  **höhere Statusbelohnungen**; konkrete Zahlen bleiben offen.
+* **Persönlicher Status** und **Gildenstatus** sind **getrennte Bestände**.
+* **Persönlicher Status** ist ausgebbar, beispielsweise für Prestigehäuser, die **sowohl Idia
+  als auch Statuspunkte** kosten (siehe `Housing.md`).
+* **Gildenstatus** dient dem **Gildenaufstieg**. Höhere **Gildenlevel** erweitern
+  **Gildenbankkapazität** und **Mitgliederplätze**
+  (siehe `exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md`).
+* Gildenstatus soll außerdem zum **regionalen politischen Einfluss** und zum möglichen Aufstieg
+  als **Hauptstadtverwalter** beitragen (siehe `Politik-Herrschaftssystem.md` §27).
+* **Noch nicht festgelegt:** das Verhältnis von ausgebbarem Gildenstatus, Gildenlevel und
+  politischem Einfluss. Es wird **keine** getrennte Einflusswährung, **keine**
+  Berechnungsformel und **keine** automatische Statusbelohnungsaufteilung erfunden.
+* Bei Gruppen mit **mehreren Gilden** bleibt die Zurechnung des Gildenanteils offen.
+
+Querverweise: `KI_Personalisierungs_Questsystem_v2.md` (persönliche/Statusquests),
+`Politik-Herrschaftssystem.md` §27, `Housing.md`, `exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md`.
 
 ---
 
@@ -1129,6 +1185,12 @@ Ausdrücklich **nicht** Bestandteil des ersten V1-Kerns:
 
 Diese Dinge werden dadurch nicht verworfen.
 
+> **Einordnung (Auftragsdokumentation):** Die genannten Punkte bleiben weiterhin außerhalb des
+> V1-Implementierungsumfangs. Einige davon sind inzwischen als **spätere, vereinbarte Richtung**
+> dokumentiert: gemeinsame Gruppenaufträge (§14), Statusquests und Status (§23) sowie
+> persönliche, gesprächsbasierte NPC-Aufträge (`KI_Personalisierungs_Questsystem_v2.md` §4.5).
+> Diese Nennung behauptet **keine** Implementierung und ändert die V1-Abgrenzung nicht.
+
 ---
 
 ## 27.12 Gruppen-Kill-Credit – geregelt
@@ -1209,6 +1271,8 @@ Mindestens offen bleiben:
 * endgültige Questitem-Verkaufspreise
 * automatische Wiederherstellung zerstörter/verlorener Questitems
 * konkrete erste Beispielquest/Content
+* gemeinsame Gruppenaufträge: Zugangsregel, Empfängerzuordnung und Gruppenabschluss (spätere vereinbarte Richtung, §14)
+* Statusquests und Status: Höhe, Verhältnis von Gildenstatus/Gildenlevel/politischem Einfluss, Zurechnung bei mehreren Gilden (spätere vereinbarte Richtung, §23)
 
 Weitere echte Blocker, die erst bei der Implementierung entdeckt werden, werden in der jeweiligen Implementierungsphase dokumentiert.
 

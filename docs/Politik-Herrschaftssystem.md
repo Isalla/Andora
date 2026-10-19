@@ -34,6 +34,11 @@ erworben werden.
 
 Die genauen Quellen werden später mit dem Quest- und Fraktionssystem definiert.
 
+> **Abgrenzung (Auftragsdokumentation):** Der hier beschriebene politische Einflusswert ist vom
+> **Gildenstatus** als eigenem Gildenbestand zu unterscheiden. Gildenstatus dient dem
+> Gildenaufstieg und soll zum politischen Einfluss beitragen; das Verhältnis ist noch offen
+> (siehe §27, „Gildenstatus und politischer Einfluss“).
+
 ---
 
 # 3. Fester Maximalwert
@@ -577,6 +582,30 @@ Das Politiksystem benötigt später das Gildensystem für:
 * politische Berechtigungen
 
 Die genaue interne Organisation einer Gilde wird separat entwickelt.
+
+## Gildenstatus und politischer Einfluss (vereinbarte Richtung – Entwurf)
+
+Die folgende Richtung ist **vereinbart**, aber **nicht implementiert**. Die einzelnen Punkte sind
+**Vereinbarungen**, keine Implementierung.
+
+Der in §2 beschriebene **politische Einfluss- beziehungsweise Statuswert** (fester Maximalwert,
+regelmäßig zu erhaltender Wert) bleibt bestehen. Davon getrennt ist ein **Gildenstatus** als
+eigener Gildenbestand vereinbart:
+
+* **Persönlicher Status** und **Gildenstatus** sind **getrennte Bestände**.
+* **Gildenstatus** dient dem **Gildenaufstieg**. Höhere **Gildenlevel** erweitern
+  **Gildenbankkapazität** und **Mitgliederplätze**
+  (siehe `exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md`).
+* **Gildenstatus** soll außerdem zum **regionalen politischen Einfluss** und zum möglichen
+  Aufstieg als **Hauptstadtverwalter** beitragen.
+* **Noch nicht festgelegt:** das Verhältnis von ausgebbarem Gildenstatus, Gildenlevel und
+  politischem Einfluss. Es wird **keine** getrennte Einflusswährung, **keine**
+  Berechnungsformel und **keine** automatische Statusbelohnungsaufteilung erfunden.
+* Bei Gruppen mit **mehreren Gilden** bleibt die Zurechnung des Gildenanteils offen.
+
+Querverweise: `Quest-System.md` (Statusquests und Statusbelohnungen, §23),
+`exp2_Region_Mandalonien_Gildenstadt_Wirtschaft.md` (Gildensteuer/Gildenlevel),
+`Housing.md` (Prestigehäuser).
 
 ---
 

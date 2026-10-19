@@ -258,6 +258,12 @@ Bewusst nicht Bestandteil dieses ersten Gruppensystems sind unter anderem:
 * konkrete Questsystem-Implementierung
 * vollständige Gruppen-UI
 
+> **Ergänzung (Auftragsdokumentation):** Gemeinsame Gruppenaufträge sind eine **vereinbarte
+> spätere Richtung** (`Quest-System.md`, Abschnitt „Gemeinsame Gruppenaufträge“) und bleiben
+> weiterhin **nicht** Teil von V1. Sie nutzen die bestehenden Regeln zu Mitgliedschaft,
+> Leaderwechsel, Austritt und Disconnect/Reconnect (§2, §8, §9); die dortige Richtung führt keine
+> neue Gruppenmechanik ein.
+
 V1 soll zuerst die technische Grundlage schaffen:
 
 **Gruppe bilden -> verwalten -> räumliche Teilnahme bestimmen -> EXP verteilen -> Claim an Gruppe binden -> Disconnect/Reconnect behandeln.**
