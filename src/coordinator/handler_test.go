@@ -176,3 +176,33 @@ func TestQueryInvalidJobID(t *testing.T) {
 		t.Errorf("invalid id: code = %d", w.Code)
 	}
 }
+
+// Freier NPC-Gesprach reuses the existing Coordinator job path (job_type
+// "npc" = active NPC-interaction priority, docs/Coordinator.md §5). No new
+// job type, no parallel pipeline. The realm submits the player's free text;
+// the coordinator validates length (§7) and queues it.
+func TestSubmitConversationJob(t *testing.T) {
+	srv := newTestServer(t, "")
+	cred := srv.cfg.Realms["de1"]
+	code, m := postJob(t, srv, cred, jobSubmission{
+		JobType: "npc", JobID: "conv-7-42", Text: "hello there",
+		NPCID: "npc_9", CharacterID: "1", PlayerID: "7",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("conversation submit: %d %v", code, m)
+	}
+	if m["code"] != CodeQueued || m["job_id"] != "conv-7-42" || m["job_type"] != "npc" {
+		t.Errorf("conversation queued: %v", m)
+	}
+}
+
+func TestSubmitConversationTooLong(t *testing.T) {
+	srv := newTestServer(t, "MAX_TEXT_CHARS=5\n")
+	cred := srv.cfg.Realms["de1"]
+	code, _ := postJob(t, srv, cred, jobSubmission{
+		JobType: "npc", JobID: "conv-long", Text: "hello world this is too long",
+	})
+	if code != http.StatusBadRequest {
+		t.Errorf("long conversation: code = %d", code)
+	}
+}

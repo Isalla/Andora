@@ -156,6 +156,29 @@ pub async fn detach(parental: &SharedParental, player_id: &str) {
     parental.states.lock().await.remove(player_id);
 }
 
+/// Test-only: seed a parent-locked state (enabled, chat locked) so the
+/// communication gate can be exercised offline without the Auth-API.
+#[cfg(test)]
+pub async fn seed_chat_locked(parental: &SharedParental, player_id: &str) {
+    parental.states.lock().await.insert(
+        player_id.to_string(),
+        ParentalPlayerState {
+            account_id: 0,
+            enabled: true,
+            remaining_seconds: 0,
+            blocked: false,
+            buffer_until: None,
+            force_logout: false,
+            chat_allowed: false,
+            voice_allowed: false,
+            warning: false,
+            extended_used_today: false,
+            temp_chat: false,
+            temp_voice: false,
+        },
+    );
+}
+
 /// Chat-Gate (temporäre Freischaltung inklusive).
 pub async fn chat_allowed(parental: &SharedParental, player_id: &str) -> bool {
     match parental.states.lock().await.get(player_id) {

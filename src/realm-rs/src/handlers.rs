@@ -28,6 +28,9 @@ pub struct Ctx {
     pub parental: SharedParental,
     pub registry: AbilityRegistry,
     pub groups: SharedGroups,
+    /// Realm -> Coordinator-Anbindung (KI-Jobs; job_type "npc"). Arc-shared;
+    /// production = live signed client, offline Nachweise = modelled transport.
+    pub coordinator: std::sync::Arc<crate::conversation::CoordinatorClient>,
     /// Quest V1 (docs/Quest-System.md §27): zentrale serverseitige
     /// Quest-Komponente. Registerspieldefinitionen (internes V1.1-Format);
     /// Spielerzustand wird aus der Tabelle `quests` geladen/persistiert.
@@ -1568,6 +1571,10 @@ pub async fn handle_npc_talk(
     seq: i64,
     data: &serde_json::Value,
 ) {
+    if get_str(data, "action").as_str() == "talk" {
+        crate::conversation::handle(ctx, tx, conn_id, seq, data).await;
+        return;
+    }
     if matches!(get_str(data, "action").as_str(), "quest_offers" | "quest_accept") {
         crate::npc_quest::handle(ctx, tx, conn_id, seq, data).await;
         return;
@@ -2245,6 +2252,11 @@ pub(crate) mod tests {
                 service_id: String::new(),
                 secret: String::new(),
             },
+            coordinator: crate::config::CoordinatorConfig {
+                url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
             realm_db: crate::config::DbConfig {
                 host: "127.0.0.1".into(),
                 port: 3306,
@@ -2300,6 +2312,7 @@ pub(crate) mod tests {
             quest: std::sync::Arc::new(crate::quest::QuestService::new()),
             quest_accept_store: None,
             quest_io_timeout: std::time::Duration::from_millis(20),
+            coordinator: std::sync::Arc::new(crate::conversation::CoordinatorClient::modelled()),
             persist,
         })
     }
@@ -3011,6 +3024,11 @@ pub(crate) mod tests {
             render_cap: 64,
             ollama_url: String::new(),
             auth_api: crate::config::AuthApiConfig {
+                url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
+            coordinator: crate::config::CoordinatorConfig {
                 url: String::new(),
                 service_id: String::new(),
                 secret: String::new(),
@@ -4243,5 +4261,301 @@ pub(crate) mod tests {
         assert_eq!(w.players["held"].idia, 500);
         assert!(!w.players["held"].dirty.any());
         assert!(w.sell_history.get("held").map(|h| h.is_empty()).unwrap_or(true));
+    }
+
+    // ================= conversation (action "talk") =================
+    // Freier NPC-Gesprach at the Handler-/Coordinator-Pfad. KI-/Transport-
+    // answers are MODELLIERT (offline; no live KI service assumed).
+
+    async fn conv_npc_setup(ctx: &Ctx) {
+        ctx.shared.lock().await.npcs.insert("npc_9".into(), conv_npc("npc_9", 1.0));
+        ctx.shared.lock().await.npcs.insert("npc_far".into(), conv_npc("npc_far", 100.0));
+    }
+
+    fn conv_npc(id: &str, x: f64) -> crate::npc::Npc {
+        crate::npc::Npc {
+            id: id.into(),
+            spawn_id: 0,
+            content_id: id.into(),
+            name: "Borin".into(),
+            kind: "named".into(),
+            attackable: false,
+            aggressive: false,
+            aggro_range: 0.0,
+            attack_range: 0.0,
+            attack_duration_ms: 0,
+            weapon_damage: 0,
+            weapon_skill: 0,
+            armor: 0,
+            max_hp: 100,
+            move_speed: 0.0,
+            respawn_ms: 0,
+            faction: None,
+            exp_reward: 0,
+            level: 1,
+            loot_table_id: None,
+            pack_id: None,
+            home_x: x,
+            home_y: 0.0,
+            home_radius: 1.0,
+            leash_radius: 1.0,
+            status: crate::npc::NpcStatus::Alive,
+            hp: 100,
+            x,
+            y: 0.0,
+            target_id: None,
+            last_attack: std::time::Instant::now(),
+            no_link_since: None,
+            return_started_at: None,
+            respawn_after: None,
+            claimed_by: None,
+            override_ctx: None,
+            effects: Vec::new(),
+            cooldowns: std::collections::BTreeMap::new(),
+            active_cast: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn conv_valid_answers_ki_text() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hello there"}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[0]["action"].as_str().unwrap(), "talk");
+        assert_eq!(f[0]["source"].as_str().unwrap(), "ki");
+        assert!(f[0]["conversation_id"].as_str().unwrap().starts_with("conv-"));
+        assert!(f[0]["text"].as_str().unwrap().contains("Modelled"));
+    }
+
+    #[tokio::test]
+    async fn conv_unknown_npc_rejected() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            9,
+            &serde_json::json!({"npc_id": "npc_missing", "action": "talk", "text": "hi"}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], false);
+        assert_eq!(f[0]["reason"].as_str().unwrap(), "unknown_npc");
+    }
+
+    #[tokio::test]
+    async fn conv_out_of_range_rejected() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            9,
+            &serde_json::json!({"npc_id": "npc_far", "action": "talk", "text": "hi"}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], false);
+        assert_eq!(f[0]["reason"].as_str().unwrap(), "out_of_range");
+    }
+
+    #[tokio::test]
+    async fn conv_input_too_long_rejected_no_ki() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        let long = "x".repeat(501);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            9,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": long}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], false);
+        assert_eq!(f[0]["reason"].as_str().unwrap(), "input_too_long");
+    }
+
+    #[tokio::test]
+    async fn conv_ownership_lost_sends_nothing() {
+        let ctx = test_ctx().await;
+        conv_npc_setup(&ctx).await;
+        // NO by_conn -> Ownership lost -> stiller Rückzug.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            9,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        )
+        .await;
+        assert!(npc_text_frames(&mut rx).is_empty());
+    }
+
+    #[tokio::test]
+    async fn conv_queue_full_falls_back_locally() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        ctx.coordinator.set_model("QUEUE_FULL", "COMPLETED", "");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[0]["source"].as_str().unwrap(), "fallback");
+        assert_eq!(f[0]["text"].as_str().unwrap(), crate::conversation::FALLBACK_TEXT);
+    }
+
+    #[tokio::test]
+    async fn conv_timeout_falls_back_locally() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        ctx.coordinator.set_model("QUEUED", "TIMEOUT", "");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx,
+            &tx,
+            7,
+            42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        )
+        .await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[0]["source"].as_str().unwrap(), "fallback");
+        assert_eq!(f[0]["text"].as_str().unwrap(), crate::conversation::FALLBACK_TEXT);
+    }
+
+    // A — two messages, same connection, SAME seq -> distinct server-side jobs,
+    // each correctly correlated (conversation_id differs; seq stays correlation).
+    #[tokio::test]
+    async fn conv_same_seq_distinct_jobs() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "one"}),
+        ).await;
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "two"}),
+        ).await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 2);
+        let a = f[0]["conversation_id"].as_str().unwrap();
+        let b = f[1]["conversation_id"].as_str().unwrap();
+        assert!(a.starts_with("conv-") && b.starts_with("conv-"));
+        assert!(a != b, "same seq must not collide into one job");
+    }
+
+    // A — identity collision must NEVER adopt an old/foreign result.
+    #[tokio::test]
+    async fn conv_collision_never_adopts_foreign_result() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        // Coordinator reports the job already exists (collision) -> no poll/adopt.
+        ctx.coordinator.set_model("JOB_EXISTS", "COMPLETED", "OLD-FOREIGN-RESULT");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        ).await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[0]["source"].as_str().unwrap(), "fallback");
+        assert_eq!(f[0]["text"].as_str().unwrap(), crate::conversation::FALLBACK_TEXT);
+        assert_ne!(f[0]["text"].as_str().unwrap(), "OLD-FOREIGN-RESULT");
+    }
+
+    // B — never-answering transport ends within the total deadline -> fallback.
+    #[tokio::test]
+    async fn conv_deadline_falls_back() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        ctx.coordinator.set_model("QUEUED", "HANG", "");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        ).await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], true);
+        assert_eq!(f[0]["source"].as_str().unwrap(), "fallback");
+        assert_eq!(f[0]["text"].as_str().unwrap(), crate::conversation::FALLBACK_TEXT);
+    }
+
+    // C — parental communication lock: no transport/KI request, unique rejection.
+    #[tokio::test]
+    async fn conv_parental_locked_no_ki() {
+        let ctx = test_ctx().await;
+        insert_owned_player(&ctx, 7, "1").await;
+        conv_npc_setup(&ctx).await;
+        crate::parental::seed_chat_locked(&ctx.parental, "1").await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        ).await;
+        let f = npc_text_frames(&mut rx);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0]["ok"], false);
+        assert_eq!(f[0]["reason"].as_str().unwrap(), "chat_locked");
+    }
+
+    // Ownership/Takeover: by_conn maps conn to a pid that is not a live player
+    // -> no request, no answer.
+    #[tokio::test]
+    async fn conv_takeover_no_request() {
+        let ctx = test_ctx().await;
+        insert_foreign_player(&ctx).await; // players has "1"
+        ctx.shared.lock().await.by_conn.insert(7, "ghost".into()); // reassigned owner
+        conv_npc_setup(&ctx).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_npc_talk(
+            &ctx, &tx, 7, 42,
+            &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
+        ).await;
+        assert!(npc_text_frames(&mut rx).is_empty());
     }
 }

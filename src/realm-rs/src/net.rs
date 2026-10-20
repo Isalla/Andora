@@ -436,6 +436,7 @@ pub async fn serve(
         let mut world = shared.lock().await;
         world.persistent_cooldown_ids = registry.persistent_cooldown_ids();
     }
+    let coordinator = Arc::new(crate::conversation::CoordinatorClient::live(&cfg.coordinator));
     let ctx = Arc::new(Ctx {
         cfg,
         db,
@@ -445,6 +446,7 @@ pub async fn serve(
         registry,
         groups,
         quest,
+        coordinator,
         #[cfg(test)]
         quest_accept_store: None,
         quest_io_timeout: crate::npc_quest::QUEST_ACCEPT_IO_TIMEOUT,
@@ -1282,6 +1284,11 @@ mod tests {
                 service_id: String::new(),
                 secret: String::new(),
             },
+            coordinator: crate::config::CoordinatorConfig {
+                url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
             realm_db: crate::config::DbConfig {
                 host: "127.0.0.1".into(),
                 port: 3306,
@@ -1321,6 +1328,7 @@ mod tests {
             registry: crate::combat::ability::AbilityRegistry::new(),
             groups,
             quest: Arc::new(crate::quest::QuestService::new()),
+            coordinator: Arc::new(crate::conversation::CoordinatorClient::modelled()),
             quest_accept_store: None,
             quest_io_timeout: std::time::Duration::from_millis(20),
             persist,

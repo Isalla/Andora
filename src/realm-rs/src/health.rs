@@ -342,6 +342,11 @@ pub(crate) fn test_config() -> Config {
             service_id: String::new(),
             secret: String::new(),
         },
+        coordinator: crate::config::CoordinatorConfig {
+            url: String::new(),
+            service_id: String::new(),
+            secret: String::new(),
+        },
         realm_db: crate::config::DbConfig {
             host: String::new(),
             port: 3306,

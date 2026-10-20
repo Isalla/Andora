@@ -10,6 +10,7 @@ mod auth_api;
 mod class;
 mod combat;
 mod config;
+mod conversation;
 mod db;
 mod group;
 mod handlers;

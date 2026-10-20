@@ -160,6 +160,17 @@ pub struct AuthApiConfig {
     pub secret: String,
 }
 
+/// Realm -> Coordinator-Anbindung (docs/Coordinator.md §3/§30). Der Realm
+/// greift NIE der KI-Provider (Ollama) directly; alle KI-Jobs go über den
+/// Coordinator (existing Queue, job_type "npc"). Leer url = Anbindung
+/// deactivated (fail-closed: a conversation falls back to the local line).
+#[derive(Debug, Clone)]
+pub struct CoordinatorConfig {
+    pub url: String,
+    pub service_id: String,
+    pub secret: String,
+}
+
 /// Vorläufige NPC/Combat-V2-Mechanikwerte (docs/Kampfsystem.md §§18–21).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -499,6 +510,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub ollama_url: String,
     pub auth_api: AuthApiConfig,
+    /// Realm -> Coordinator-Anbindung (KI-Jobs; job_type "npc").
+    pub coordinator: CoordinatorConfig,
     /// Die EIGENE Realm-Datenbank (realm_state_<realm>).
     pub realm_db: DbConfig,
     /// Migrationsverzeichnis-Override (sonst <bindir>/migrations).
@@ -642,6 +655,11 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
             url: bracket_url_host(&g("AUTHAPI_URL").trim_end_matches('/').to_string()),
             service_id: g("AUTHAPI_SERVICE_ID"),
             secret: g("AUTHAPI_SERVICE_SECRET"),
+        },
+        coordinator: CoordinatorConfig {
+            url: bracket_url_host(&g("COORDINATOR_URL").trim_end_matches('/').to_string()),
+            service_id: g("COORDINATOR_SERVICE_ID"),
+            secret: g("COORDINATOR_SERVICE_SECRET"),
         },
         realm_db,
         migrations_dir: g("REALM_STATE_MIGRATIONS_DIR"),
