@@ -595,6 +595,7 @@ mod tests {
         crate::handlers::handle_chat(
             parental,
             shared,
+            crate::group::new_shared_groups(crate::group::GroupCfg::default()),
             tx_a,
             7,
             1,

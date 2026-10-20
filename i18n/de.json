@@ -300,5 +300,15 @@
   "tc_map_hint": "Map: Wei=Own gelocation, gel dot=NPC, blue circle=Questarea (Mouse over circle = Goals)",
   "quest.tc_q_hides.objectives.o_hides": "Wolf pelts",
   "quest.tc_q_hides.objectives.o_meat": "Wolf meat",
-  "quest.tc_q_ore.objectives.o_ore": "Iron ore"
+  "quest.tc_q_ore.objectives.o_ore": "Iron ore",
+  "tc_gp_title": "Gruppe (max. 4):",
+  "tc_gp_none": "Noch keine Gruppe.",
+  "tc_gp_btn_invite": "Einladen",
+  "tc_gp_btn_leave": "Verlassen",
+  "tc_gp_btn_kick": "Entfernen",
+  "tc_gp_btn_transfer": "Führung übertragen",
+  "tc_gp_accept": "Annehmen",
+  "tc_gp_reject": "Ablehnen",
+  "tc_gp_dialog": "{name} lädt dich zu einer Gruppe ein.",
+  "tc_gp_toast": "Gruppe: {text}"
 }

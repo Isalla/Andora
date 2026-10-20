@@ -985,6 +985,7 @@ async fn dispatch(
             handlers::handle_chat(
                 &ctx.parental,
                 &ctx.shared,
+                ctx.groups.clone(),
                 tx,
                 conn_id,
                 frame.seq,
@@ -7883,4 +7884,370 @@ mod tests {
         }
         assert_eq!(ctx.persist.spool().count_batches().unwrap(), 1);
     }
+
+    /// Fixture: Players with captured channels for the group-Dispatch-
+    /// Nachweis. `conns` maps conn_id -> player index (by_conn). Returns
+    /// the (tx, rx) pairs in insertion order (tx = clone of the player's
+    /// own channel, usable as the connection-sender for `dispatch`).
+    async fn insert_group_players(
+        ctx: &Arc<Ctx>,
+        spec: Vec<(&str, f64, f64)>,
+        conns: Vec<(u64, usize)>,
+    ) -> Vec<(mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>)> {
+        let mut chans: Vec<(mpsc::UnboundedSender<String>, mpsc::UnboundedReceiver<String>)> = Vec::new();
+        {
+            let mut w = ctx.shared.lock().await;
+            for (id, x, y) in &spec {
+                let (ptx, rx) = mpsc::unbounded_channel();
+                let mut p = crate::world::Player {
+                    id: id.to_string(),
+                    name: id.to_string(),
+                    x: *x,
+                    y: *y,
+                    face: 0.0,
+                    ping_ms: 0,
+                    zone_id: 0,
+                    hp: 100,
+                    max_hp: 100,
+                    lang: "de".into(),
+                    account_id: 1,
+                    session_id: String::new(),
+                    entities: Default::default(),
+                    last_activity: std::time::Instant::now(),
+                    tx: ptx.clone(),
+                    char_class: "Adventurer".into(),
+                    class: crate::class::ClassStatus::Adventurer,
+                    faction_transition: false,
+                    level: 1,
+                    exp: 0,
+                    free_attr_points: 0,
+                    rested_pool: 0,
+                    idia: 0,
+                    armor: 0,
+                    weapon_skill: 1,
+                    combat: None,
+                    last_strike: None,
+                    mana: 50,
+                    max_mana: 50,
+                    effects: Default::default(),
+                    cooldowns: Default::default(),
+                    active_cast: None,
+                    learned_abilities: Default::default(),
+                    attributes: Default::default(),
+                    max_hp_base: 100,
+                    max_mana_base: 50,
+                    sitting: false,
+                    hp_regen_bonus: 0.0,
+                    mana_regen_bonus: 0.0,
+                    hp_regen_carry: 0.0,
+                    mana_regen_carry: 0.0,
+                    inventory: Default::default(),
+                    quests: Default::default(),
+                    dirty: Default::default(),
+                    persist_generation: 0,
+                    persist_revision: 0,
+                };
+                w.players.insert(id.to_string(), p);
+                chans.push((ptx.clone(), rx));
+            }
+            for (conn, idx) in conns {
+                w.by_conn.insert(conn, spec[idx].0.to_string());
+            }
+        }
+        chans
+    }
+
+    async fn group_c2s(
+        ctx: &Arc<Ctx>,
+        guard: &mut crate::security::ConnGuard,
+        sec_cfg: &crate::security::SecurityCfg,
+        tx: &mpsc::UnboundedSender<String>,
+        conn: u64,
+        seq: i64,
+        msg_type: i64,
+        data: serde_json::Value,
+    ) {
+        let frame = crate::protocol::Frame::new(seq, msg_type, data);
+        assert!(
+            !dispatch(ctx, tx, conn, guard, sec_cfg, frame, &Instant::now).await,
+            "Group-Frame {msg_type} darf in diesem Nachweis keine Verbindung trennen"
+        );
+    }
+
+    fn drain_all(rx: &mut mpsc::UnboundedReceiver<String>) -> usize {
+        let mut n = 0;
+        while let Ok(s) = rx.try_recv() {
+            n += 1;
+        }
+        n
+    }
+
+    fn frames_of_type(rx: &mut mpsc::UnboundedReceiver<String>, t: i64) -> Vec<serde_json::Value> {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        while let Ok(s) = rx.try_recv() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if v.get("type") == Some(&serde_json::json!(t)) {
+                    out.push(v);
+                }
+            }
+        }
+        out
+    }
+
+    /// Group V1 via the REAL dispatch path: SUGGEST (leaderless player
+    /// founds group) -> DECIDE accept (invitation sent) -> REACT accept
+    /// (member joins). Both members get GROUP_INFO (documented payload
+    /// with max_hp/max_mp); the invitee gets GROUP_INVITE_S2C exactly
+    /// once. A repeated or invalid REACT changes nothing.
+    #[tokio::test]
+    async fn dispatch_group_suggest_decide_accept_broadcasts_group_info() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let chans = insert_group_players(
+            &ctx,
+            vec![("a", 0.0, 0.0), ("b", 500.0, 0.0)],
+            vec![(7, 0), (8, 1)],
+        ).await;
+        let mut chans = chans;
+        let (tx_a, rx_a) = chans.remove(0);
+        let (tx_b, rx_b) = chans.remove(0);
+        let mut rx_a = rx_a;
+        let mut rx_b = rx_b;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        // 1) SUGGEST from leaderless a: group founded (a = leader).
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 1,
+            crate::protocol::c2s::GROUP_SUGGEST,
+            serde_json::json!({"target_id": "b"})).await;
+        // 2) DECIDE accept from leader a: real invitation to b.
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 2,
+            crate::protocol::c2s::GROUP_SUGGEST_DECIDE,
+            serde_json::json!({"target_id": "b", "accept": true})).await;
+        let inv_b = frames_of_type(&mut rx_b, crate::protocol::s2c::GROUP_INVITE_S2C);
+        assert_eq!(inv_b.len(), 1, "b gets the invitation exactly once");
+        // 3) REACT accept from b (conn 8): b joins, GROUP_INFO to both.
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 3,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        let gi_a = frames_of_type(&mut rx_a, crate::protocol::s2c::GROUP_INFO);
+        let gi_b = frames_of_type(&mut rx_b, crate::protocol::s2c::GROUP_INFO);
+        assert_eq!(gi_a.len(), 1, "a: one GROUP_INFO");
+        assert_eq!(gi_b.len(), 1, "b: one GROUP_INFO");
+        let members = gi_b[0]["data"]["members"].as_array().unwrap();
+        assert_eq!(members.len(), 2, "two members");
+        assert!(members.iter().all(|m| m.get("max_hp").is_some() && m.get("max_mp").is_some()),
+            "documented payload carries max values");
+        // 4) Repeated accept from b: already member -> nothing again.
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 4,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        assert!(frames_of_type(&mut rx_a, crate::protocol::s2c::GROUP_INFO).is_empty(),
+            "no second join broadcast");
+        // 5) Invalid group_id: nothing happens.
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 5,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 999, "accept": true})).await;
+        assert!(frames_of_type(&mut rx_a, crate::protocol::s2c::GROUP_INFO).is_empty());
+    }
+
+    /// Leader rights via dispatch: a non-leader member may NOT kick or
+    /// transfer; membership and leader stay untouched, no frames to the
+    /// non-leader.
+    #[tokio::test]
+    async fn dispatch_group_nonleader_cannot_kick_or_transfer() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let chans = insert_group_players(
+            &ctx,
+            vec![("a", 0.0, 0.0), ("b", 1.0, 0.0)],
+            vec![(7, 0), (8, 1)],
+        ).await;
+        let mut chans = chans;
+        let (tx_a, rx_a) = chans.remove(0);
+        let (tx_b, rx_b) = chans.remove(0);
+        let mut rx_a = rx_a;
+        let mut rx_b = rx_b;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        // Found the group (a leader, b member) via the documented flow.
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 1,
+            crate::protocol::c2s::GROUP_SUGGEST,
+            serde_json::json!({"target_id": "b"})).await;
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 2,
+            crate::protocol::c2s::GROUP_SUGGEST_DECIDE,
+            serde_json::json!({"target_id": "b", "accept": true})).await;
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 3,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        drain_all(&mut rx_a);
+        drain_all(&mut rx_b);
+        // b (non-leader) tries kick and transfer: silent rejection.
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 4,
+            crate::protocol::c2s::GROUP_KICK,
+            serde_json::json!({"target_id": "a"})).await;
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 5,
+            crate::protocol::c2s::GROUP_TRANSFER,
+            serde_json::json!({"target_id": "a"})).await;
+        assert_eq!(drain_all(&mut rx_b), 0, "non-leader: no frames");
+        {
+            let groups = ctx.groups.lock().await;
+            assert_eq!(groups.member_ids(1).len(), 2, "membership unchanged");
+            assert!(groups.is_leader("a"), "leader unchanged");
+        }
+    }
+
+    /// Size cap (binding decision: max. 4 including the leader): the
+    /// invite of a fifth target is rejected serverseitig; the target
+    /// receives no GROUP_INVITE_S2C.
+    #[tokio::test]
+    async fn dispatch_group_invite_caps_at_four_members() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let mut chans = insert_group_players(
+            &ctx,
+            vec![("a", 0.0, 0.0), ("b", 1.0, 0.0), ("c", 2.0, 0.0), ("d", 3.0, 0.0), ("e", 4.0, 0.0)],
+            vec![(7, 0), (8, 1), (9, 2), (10, 3)],
+        ).await;
+        let mut chans = chans;
+        let (tx_a, rx_a) = chans.remove(0);
+        let (tx_b, rxb) = chans.remove(0);
+        let (tx_c, rxc) = chans.remove(0);
+        let (tx_d, rxd) = chans.remove(0);
+        let (txe, rxe) = chans.remove(0);
+        let mut rx_a = rx_a;
+        let mut rx_b = rxb;
+        let mut rx_c = rxc;
+        let mut rx_d = rxd;
+        let mut rx_e = rxe;
+        let _ = txe;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        let mut g3 = crate::security::ConnGuard::default();
+        let mut g4 = crate::security::ConnGuard::default();
+        // a founds group with b (documented flow).
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 1,
+            crate::protocol::c2s::GROUP_SUGGEST,
+            serde_json::json!({"target_id": "b"})).await;
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 2,
+            crate::protocol::c2s::GROUP_SUGGEST_DECIDE,
+            serde_json::json!({"target_id": "b", "accept": true})).await;
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 3,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        drain_all(&mut rx_a);
+        drain_all(&mut rx_b);
+        // Invite c and d, both accept -> group reaches exactly 4.
+        for (seq, tid) in [(10i64, "c"), (11i64, "d")] {
+            group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, seq,
+                crate::protocol::c2s::GROUP_INVITE,
+                serde_json::json!({"target_id": tid})).await;
+        }
+        group_c2s(&ctx, &mut g3, &sec_cfg, &tx_c, 9, 12,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        group_c2s(&ctx, &mut g4, &sec_cfg, &tx_d, 10, 13,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        {
+            let groups = ctx.groups.lock().await;
+            assert_eq!(groups.member_ids(1).len(), 4, "cap: exactly 4 members");
+        }
+        // Fifth invite (e): rejected by the cap -> no invitation frame.
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 14,
+            crate::protocol::c2s::GROUP_INVITE,
+            serde_json::json!({"target_id": "e"})).await;
+        assert!(frames_of_type(&mut rx_e, crate::protocol::s2c::GROUP_INVITE_S2C).is_empty(),
+            "no invitation beyond the cap");
+    }
+
+    /// Group chat (Phase E): channel "group" reaches the group member
+    /// DISTANCE-INDEPENDENTLY (b at 500 m), the sender exactly once, and
+    /// a non-group player within range receives nothing on this channel.
+    #[tokio::test]
+    async fn dispatch_group_chat_far_member_yes_outsider_no() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let chans = insert_group_players(
+            &ctx,
+            vec![("a", 0.0, 0.0), ("b", 500.0, 0.0), ("c", 1.0, 0.0)],
+            vec![(7, 0), (8, 1), (9, 2)],
+        ).await;
+        let mut chans = chans;
+        let (tx_a, rx_a) = chans.remove(0);
+        let (tx_b, rx_b) = chans.remove(0);
+        let (tx_c, rx_c) = chans.remove(0);
+        let mut rx_a = rx_a;
+        let mut rx_b = rx_b;
+        let mut rx_c = rx_c;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut g1 = crate::security::ConnGuard::default();
+        let mut g2 = crate::security::ConnGuard::default();
+        let mut g3 = crate::security::ConnGuard::default();
+        // a and b form a group (documented flow).
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 1,
+            crate::protocol::c2s::GROUP_SUGGEST,
+            serde_json::json!({"target_id": "b"})).await;
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 2,
+            crate::protocol::c2s::GROUP_SUGGEST_DECIDE,
+            serde_json::json!({"target_id": "b", "accept": true})).await;
+        group_c2s(&ctx, &mut g2, &sec_cfg, &tx_b, 8, 3,
+            crate::protocol::c2s::GROUP_INVITE_REACT,
+            serde_json::json!({"group_id": 1, "accept": true})).await;
+        drain_all(&mut rx_a);
+        drain_all(&mut rx_b);
+        // a sends on the group channel: b (500 m) gets it, c (1 m, no
+        // group) gets nothing; a gets own echo exactly once.
+        group_c2s(&ctx, &mut g1, &sec_cfg, &tx_a, 7, 4,
+            crate::protocol::c2s::CHAT,
+            serde_json::json!({"channel": "group", "text": "hello group"})).await;
+        let to_b = frames_of_type(&mut rx_b, crate::protocol::s2c::CHAT);
+        let to_c = frames_of_type(&mut rx_c, crate::protocol::s2c::CHAT);
+        let to_a = frames_of_type(&mut rx_a, crate::protocol::s2c::CHAT);
+        assert_eq!(to_b.len(), 1, "far member receives (distance-independent)");
+        assert_eq!(to_a.len(), 1, "sender echo exactly once");
+        assert_eq!(to_c.len(), 0, "outsider receives nothing on group channel");
+        // Outsider c tries the group channel: no group -> nothing sent.
+        group_c2s(&ctx, &mut g3, &sec_cfg, &tx_c, 9, 5,
+            crate::protocol::c2s::CHAT,
+            serde_json::json!({"channel": "group", "text": "intruder"})).await;
+        assert!(frames_of_type(&mut rx_a, crate::protocol::s2c::CHAT).is_empty());
+        assert!(frames_of_type(&mut rx_b, crate::protocol::s2c::CHAT).is_empty());
+        assert!(frames_of_type(&mut rx_c, crate::protocol::s2c::CHAT).is_empty(),
+            "non-member cannot use the group channel");
+    }
+
+    /// Unauthenticated group action (no by_conn for the conn_id): the
+    /// handler resolves no owner -> no state change, no frames.
+    #[tokio::test]
+    async fn dispatch_group_action_unauthenticated_no_effect() {
+        let fixture = test_ctx().await;
+        let ctx = fixture.ctx.clone();
+        let chans = insert_group_players(
+            &ctx,
+            vec![("a", 0.0, 0.0)],
+            vec![(7, 0)],
+        ).await;
+        let mut chans = chans;
+        let (tx_a, rxa) = chans.remove(0);
+        let mut rx_a = rxa;
+        let sec_cfg = crate::security::SecurityCfg::from(&ctx.cfg.security);
+        let mut guard = crate::security::ConnGuard::default();
+        {
+            let mut groups = ctx.groups.lock().await;
+            groups.create_group("a", Instant::now()).ok();
+        }
+        // conn 42 has NO by_conn entry: the action must not touch a.
+        group_c2s(&ctx, &mut guard, &sec_cfg, &tx_a, 42, 1,
+            crate::protocol::c2s::GROUP_LEAVE,
+            serde_json::json!({})).await;
+        assert_eq!(drain_all(&mut rx_a), 0, "no frames to a");
+        {
+            let groups = ctx.groups.lock().await;
+            assert_eq!(groups.member_ids(1).len(), 1, "group untouched");
+        }
+    }
+
 }

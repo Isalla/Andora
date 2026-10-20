@@ -716,6 +716,15 @@ pub async fn handle_hello(
         let _ = tx.send(Frame::new(0, s2c::INVENTORY, payload).encode());
     }
 
+    // Own HP initial state (S2C 4 STATE, owner only): HP comes ONLY via STATE
+    // (WELCOME/VITALS never carry HP) — without this push the Client would
+    // show uninitialized values after login. Push (seq 0), same frame shape
+    // as on MOVE. Mana/Level are already initialized in WELCOME (`you`).
+    {
+        let world = ctx.shared.lock().await;
+        crate::world::push_own_state(&world, &c.id);
+    }
+
     // Gebiets-Kollegen: Spieler spawnen (SPAWN + STATE) und umgekehrt.
     {
         let mut world = ctx.shared.lock().await;
@@ -792,14 +801,7 @@ pub async fn handle_move(
         me.y = y;
         me.mark_dirty(crate::persist::PersistComponent::Position);
         me.last_activity = Instant::now();
-        me.send(&Frame::new(
-            0,
-            s2c::STATE,
-            serde_json::json!({
-                "id": me.id, "x": me.x, "y": me.y, "face": me.face,
-                "hp": me.hp, "max_hp": me.max_hp,
-            }),
-        ));
+        me.send(&crate::world::own_state_frame(&me));
     }
 
     // Cast-Unterbrechung durch Bewegung (Ability-System.md §3;
@@ -1021,6 +1023,7 @@ pub async fn handle_ability(
 pub async fn handle_chat(
     parental: &SharedParental,
     shared: &Shared,
+    groups: crate::group::SharedGroups,
     tx: &mpsc::UnboundedSender<String>,
     conn_id: u64,
     seq: i64,
@@ -1064,6 +1067,27 @@ pub async fn handle_chat(
         serde_json::json!({"from": me.name, "channel": channel, "text": text}),
     )
     .encode();
+    if channel == "group" {
+        // Gruppensystem V1: the group channel is distance-independent —
+        // delivery ONLY to actual members of the sender's group
+        // (serverseitig GroupManager, never the radius broadcast). A
+        // non-member cannot use the channel (no group → nothing sent).
+        let g = groups.lock().await;
+        let Some(gid) = g.group_of(&pid) else {
+            return;
+        };
+        // Sender: own message exactly once (Echo, like the other channels).
+        let _ = tx.send(payload.clone());
+        for mid in g.member_ids(gid) {
+            if mid == pid {
+                continue;
+            }
+            if let Some(o) = world.players.get(&mid) {
+                let _ = o.tx.send(payload.clone());
+            }
+        }
+        return;
+    }
     for o in world.players.values() {
         if o.id == pid {
             // Der Sender ist aus dem Radius-Broadcast ausgeschlossen: er
@@ -1116,7 +1140,9 @@ fn group_info_json(
                 "class": p.map(|p| p.char_class.as_str()).unwrap_or(""),
                 "level": p.map(|p| p.level).unwrap_or(0),
                 "hp": p.map(|p| p.hp).unwrap_or(0),
+                "max_hp": p.map(|p| p.max_hp).unwrap_or(0),
                 "mp": p.map(|p| p.mana).unwrap_or(0),
+                "max_mp": p.map(|p| p.max_mana).unwrap_or(0),
                 "online": m.online,
                 "is_leader": group.leader_id == m.player_id,
                 "in_range": m.online && in_range,
@@ -1327,6 +1353,19 @@ pub async fn handle_group_leave(ctx: &Ctx, conn_id: u64, _data: &serde_json::Val
     let text = format!("{name} hat die Gruppe verlassen");
     group_toast(&world, &groups, gid, &text);
     broadcast_group_info(&world, &groups, gid);
+    // Self-confirmation to the leaving player (no longer a member, so the
+    // member-broadcast above skips him): distinct kind lets the Client
+    // clear his group view without inventing anything locally.
+    if let Some(p) = world.players.get(&pid) {
+        let _ = p.tx.send(
+            Frame::new(
+                0,
+                s2c::GROUP_TOAST,
+                serde_json::json!({"text": text, "kind": "left"}),
+            )
+            .encode(),
+        );
+    }
 }
 
 /// §2: Leiter entfernt Mitglied. {target_id}
@@ -1351,6 +1390,18 @@ pub async fn handle_group_kick(ctx: &Ctx, conn_id: u64, data: &serde_json::Value
     let text = format!("{target_id} wurde aus der Gruppe entfernt");
     group_toast(&world, &groups, gid, &text);
     broadcast_group_info(&world, &groups, gid);
+    // Self-confirmation to the kicked player (removed from the member list
+    // before the broadcasts): distinct kind "kicked" clears his group view.
+    if let Some(p) = world.players.get(&target_id) {
+        let _ = p.tx.send(
+            Frame::new(
+                0,
+                s2c::GROUP_TOAST,
+                serde_json::json!({"text": text, "kind": "kicked"}),
+            )
+            .encode(),
+        );
+    }
 }
 
 /// §2: Leiter überträgt Leitung. {target_id}

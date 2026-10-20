@@ -373,6 +373,9 @@ pub fn combat_tick(
                     // §6/§39: HP-Änderung (Schaden) → Komponente `Resources`
                     // dirty (Stufe B).
                     t.mark_dirty(crate::persist::PersistComponent::Resources);
+                    // DAMAGE carries no HP (STATE does): own STATE to the
+                    // owner so the HP display stays server-authoritative.
+                    t.send(&crate::world::own_state_frame(&t));
                     t.hp == 0
                 } else {
                     false
@@ -940,8 +943,15 @@ mod tests {
             20.0,
         );
         let msgs = drain(&mut rb);
-        assert_eq!(msgs.len(), 1, "DAMAGE-Broadcast erwartet");
-        assert!(msgs[0].contains("\"type\":5") && msgs[0].contains("\"amount\":100"));
+        assert_eq!(msgs.len(), 2, "DAMAGE-Broadcast + own STATE (own HP) erwartet");
+        assert!(
+            msgs.iter().any(|m| m.contains("\"type\":5") && m.contains("\"amount\":100")),
+            "DAMAGE present"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("\"type\":4") && m.contains("\"hp\":900")),
+            "own STATE carries server-confirmed HP: {msgs:?}"
+        );
         assert_eq!(w.players["b"].hp, 900);
 
         // Noch innerhalb der Duration → kein Folgeangriff.
@@ -978,7 +988,7 @@ mod tests {
             wall(),
             20.0,
         );
-        assert_eq!(drain(&mut rb).len(), 1);
+        assert_eq!(drain(&mut rb).len(), 2, "DAMAGE + own STATE per follow-up hit");
     }
 
     #[test]

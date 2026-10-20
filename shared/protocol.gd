@@ -27,6 +27,15 @@ const S2C = {
 	"ATTRIBUTE_RESULT": 21, "PLAYER_TRADE": 22, "INVENTORY": 23,
 	"VITALS": 24, "INVENTORY_RESULT": 25
 }
+# Gruppensystem V1 (docs/Gruppensystem.md §§1–9, server: group.rs/handlers.rs):
+# C2S 13 GROUP_INVITE {target_id}; 14 GROUP_INVITE_REACT {group_id, accept};
+# 15 GROUP_SUGGEST {target_id}; 16 GROUP_SUGGEST_DECIDE {target_id, accept};
+# 17 GROUP_LEAVE {}; 18 GROUP_KICK {target_id}; 19 GROUP_TRANSFER {target_id}.
+# S2C 18 GROUP_INFO {group_id, leader_id, members:[{id,name,class,level,hp,
+# max_hp,mp,max_mp,online,is_leader,in_range,effects}]}; 19 GROUP_INVITE_S2C
+# {group_id, from_id, from_name}; 20 GROUP_TOAST {text, kind} (kind "group",
+# self-confirm "left"/"kicked"). Chat channel "group": server routes to
+# group members distance-independent (GroupManager), never radius-broadcast.
 # NPC_TEXT (8) Händlerantwort (docs/Handelssystem.md §13):
 # Erfolg {ok: true, action, npc_id, merchant_name, idia, history[]} plus je
 # Aktion offers/item_id/item_uuid/count/total_price; Ablehnung

@@ -917,6 +917,11 @@ pub(crate) fn broadcast_combat_event(
                 }),
             );
             events::broadcast_aofb(world, x, y, aofb, &frame);
+            // DAMAGE carries no HP (STATE does): the owner of an affected
+            // Player also gets own STATE so the HP display stays authoritative.
+            if let Some(t) = world.players.get(target_id) {
+                t.send(&crate::world::own_state_frame(t));
+            }
         }
         CombatEvent::HealApplied {
             target_id,
@@ -931,6 +936,10 @@ pub(crate) fn broadcast_combat_event(
                 }),
             );
             events::broadcast_aofb(world, x, y, aofb, &frame);
+            // Own HP/max for the owner (heal-STATE above has no x/y/hp).
+            if let Some(t) = world.players.get(target_id) {
+                t.send(&crate::world::own_state_frame(t));
+            }
         }
         CombatEvent::EffectApplied {
             entity_id,
@@ -969,6 +978,10 @@ pub(crate) fn broadcast_combat_event(
                 }),
             );
             events::broadcast_all(world, &frame);
+            // Dead owner: own STATE (hp 0) so the Client shows the dead state.
+            if let Some(t) = world.players.get(target_id) {
+                t.send(&crate::world::own_state_frame(t));
+            }
         }
         CombatEvent::AbilityResult {
             caster_id,
@@ -1568,9 +1581,36 @@ mod tests {
         );
     }
 
+    /// broadcast_combat_event: DAMAGE/HealApplied/TargetDied additionally
+    /// send own STATE (own HP ONLY via STATE) to the affected Player's owner.
     #[test]
-    fn heal_clamped_at_max() {
-        let def = healing_light_def();
+    fn combat_events_push_own_state_to_affected_owner() {
+        let mut w = World::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut p = make_player("b", 100, 50);
+        p.tx = tx;
+        p.hp = 70;
+        w.players.insert("b".into(), p);
+        broadcast_combat_event(
+            &w,
+            0.0,
+            0.0,
+            20.0,
+            &CombatEvent::DamageApplied {
+                target_id: "b".into(),
+                amount: 10,
+                from_id: "a".into(),
+            },
+        );
+        let first = rx.try_recv().expect("DAMAGE to visible owner");
+        assert!(first.contains("\"type\":5"), "DAMAGE first");
+        let second = rx.try_recv().expect("own STATE to affected owner");
+        assert!(second.contains("\"type\":4") && second.contains("\"hp\":70"));
+        assert!(rx.try_recv().is_err(), "exactly two frames");
+    }
+
+    #[test]
+    fn heal_clamped_at_max() {        let def = healing_light_def();
         let (mut w, reg) = make_world_with_ability(def);
         w.players.get_mut("a").unwrap().hp = 90;
         let mut target = make_player("b", 100, 50);

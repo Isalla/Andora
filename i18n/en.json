@@ -300,5 +300,15 @@
   "tc_map_hint": "Map: white=you, yellow=NPC, blue circle=quest area (hover = objectives)",
   "quest.tc_q_hides.objectives.o_hides": "Wolf hides",
   "quest.tc_q_hides.objectives.o_meat": "Wolf meat",
-  "quest.tc_q_ore.objectives.o_ore": "Iron ore"
+  "quest.tc_q_ore.objectives.o_ore": "Iron ore",
+  "tc_gp_title": "Group (max. 4):",
+  "tc_gp_none": "No group (yet).",
+  "tc_gp_btn_invite": "Invite",
+  "tc_gp_btn_leave": "Leave",
+  "tc_gp_btn_kick": "Remove",
+  "tc_gp_btn_transfer": "Transfer leadership",
+  "tc_gp_accept": "Accept",
+  "tc_gp_reject": "Decline",
+  "tc_gp_dialog": "{name} invites you to a group.",
+  "tc_gp_toast": "Group: {text}"
 }

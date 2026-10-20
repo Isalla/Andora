@@ -754,6 +754,29 @@ pub fn push_vitals(world: &World, pid: &str) {
         p.send(&vitals_frame(p.mana, p.max_mana, p.level));
     }
 }
+
+/// Own-STATE-Frame (S2C 4, nur Eigentümer): Position plus own HP/max. HP
+/// comes exclusively via STATE (WELCOME/VITALS never carry HP). Field names
+/// like in Player.
+pub fn own_state_frame(p: &Player) -> Frame {
+    Frame::new(
+        0,
+        s2c::STATE,
+        serde_json::json!({
+            "id": p.id, "x": p.x, "y": p.y, "face": p.face,
+            "hp": p.hp, "max_hp": p.max_hp,
+        }),
+    )
+}
+
+/// Send the current own STATE (own HP/max) to the owner (its `tx`).
+/// Used at login (initial state after WELCOME) and on actual HP changes
+/// (damage, heal, regen) so the Client never shows uninitialized 0/0.
+pub fn push_own_state(world: &World, pid: &str) {
+    if let Some(p) = world.players.get(pid) {
+        p.send(&own_state_frame(p));
+    }
+}
 /// HP-/Mana-Regeneration pro Tick (docs/Attribute_und_Regeneration.md
 /// (Kampf 15 %, stehend 100 %, sitzend 125 % — Sitzbonus nie im Kampf),
 /// intern f64 mit Carry je Ressource; gedeckelt auf 0 bzw. max. Tote
@@ -765,9 +788,15 @@ pub fn world_regen_tick(world: &mut World, tick_ms: u64) {
         // Vorher/Nachher-Vergleich ohne neue Felder, Versand an den
         // Eigentümer via dessen `tx` (Fremde erhalten nichts).
         let before = (p.mana, p.max_mana, p.level);
+        let hp_before = p.hp;
         crate::regen::apply_regen(p, tick_ms);
         if (p.mana, p.max_mana, p.level) != before {
             p.send(&vitals_frame(p.mana, p.max_mana, p.level));
+        }
+        // Own HP changes (regen) reach the owner via own STATE (S2C 4) —
+        // same gating as VITALS, no Tick-spam, no new message type.
+        if p.hp != hp_before {
+            p.send(&own_state_frame(&p));
         }
     }
 }
@@ -1437,5 +1466,57 @@ mod tests {
         assert_eq!(v["data"]["max_mana"], 50);
         assert_eq!(v["data"]["level"], 1);
         assert!(ra.try_recv().is_err(), "genau ein Frame");
+    }
+
+    /// Own-STATE-Frame (S2C 4, nur Eigentümer): Typ, own id/position plus
+    /// HP/max. Field names like in Player; no Mana (VITALS carries those).
+    #[test]
+    fn own_state_frame_shape() {
+        let (p, _rx) = test_player("a", 1.0, 2.0);
+        let f = own_state_frame(&p);
+        let v: serde_json::Value = serde_json::from_str(&f.encode()).unwrap();
+        assert_eq!(v["type"], crate::protocol::s2c::STATE);
+        assert_eq!(v["data"]["id"], "a");
+        assert_eq!(v["data"]["x"], 1.0);
+        assert_eq!(v["data"]["y"], 2.0);
+        assert_eq!(v["data"]["hp"], 100);
+        assert_eq!(v["data"]["max_hp"], 100);
+        assert!(v["data"].get("mana").is_none(), "kein Mana im own STATE");
+    }
+
+    /// HP-Regeneration-Change → own STATE to the owner (same gating as
+    /// VITALS): full HP → no push; injured HP → exactly one own STATE with
+    /// grown HP. Foreign players receive nothing.
+    #[test]
+    fn regen_tick_pushes_own_state_on_hp_change() {
+        let mut w = World::new();
+        let (a, mut ra) = test_player("a", 0.0, 0.0);
+        w.players.insert("a".into(), a);
+        world_regen_tick(&mut w, 1000);
+        assert!(ra.try_recv().is_err(), "voller HP: kein Push");
+        w.players.get_mut("a").unwrap().hp = 10;
+        world_regen_tick(&mut w, 1000);
+        let f = ra.try_recv().expect("own STATE bei HP-Change");
+        let v: serde_json::Value = serde_json::from_str(&f).unwrap();
+        assert_eq!(v["type"], crate::protocol::s2c::STATE);
+        assert_eq!(v["data"]["id"], "a");
+        assert!(v["data"]["hp"].as_i64().unwrap() > 10, "HP grew server-side");
+        assert_eq!(v["data"]["max_hp"], 100);
+        assert!(v["data"].get("mana").is_none(), "kein Mana im own STATE");
+        assert!(ra.try_recv().is_err(), "genau ein Frame");
+    }
+
+    /// push_own_state: Frame ONLY to the owner's connection (its `tx`).
+    #[test]
+    fn push_own_state_sends_to_owner_only() {
+        let mut w = World::new();
+        let (a, mut ra) = test_player("a", 3.0, 4.0);
+        let (b, mut rb) = test_player("b", 0.0, 0.0);
+        w.players.insert("a".into(), a);
+        w.players.insert("b".into(), b);
+        push_own_state(&w, "a");
+        let f = ra.try_recv().expect("owner got own STATE");
+        assert!(f.contains("\"type\":4") && f.contains("\"hp\""));
+        assert!(rb.try_recv().is_err(), "foreign got nothing");
     }
 }
