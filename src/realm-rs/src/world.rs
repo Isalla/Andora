@@ -219,6 +219,13 @@ pub struct World {
     /// Runtime receipts prevent a caller retry from allocating a second commit
     /// for an already confirmed completion (mirrors `trade_receipts`).
     pub quest_completion_receipts: HashMap<String, crate::persist::QuestCompletionRequest>,
+    /// Open Mail-Claim orders retained in RAM (prepared, not yet RAM-handed-off).
+    /// Later saves, trades and further claims must not uncontrolled overtake one
+    /// (docs/Quest-Turn-In-Persistenz.md analog, Mail-V1 §23).
+    pub prepared_mail_claims: HashMap<String, crate::mail::PreparedMailClaim>,
+    /// Runtime receipts prevent a caller retry from allocating a second commit
+    /// for an already confirmed claim (mirrors `quest_completion_receipts`).
+    pub mail_claim_receipts: HashMap<String, crate::mail::MailClaimRequest>,
     /// Eigene Runtime-Kennung dieses Realm-Prozesslaufs
     /// (`item_lifecycle::new_runtime_id`): stempelt Lifecycle-Metadaten zur
     /// Zuordnung und wird im Snapshot mitgeführt. Takeover und RAM-Übernahme
@@ -300,6 +307,8 @@ impl World {
             pending_quest_acceptances: HashMap::new(),
             prepared_quest_completions: HashMap::new(),
             quest_completion_receipts: HashMap::new(),
+            prepared_mail_claims: HashMap::new(),
+            mail_claim_receipts: HashMap::new(),
             runtime_id: crate::item_lifecycle::new_runtime_id(),
             npcs: HashMap::new(),
             item_definitions: HashMap::new(),
@@ -337,6 +346,12 @@ impl World {
         self.prepared_quest_completions
             .values()
             .any(|p| p.request.character_id == player_id)
+    }
+    /// Open Mail-Claim order for this character (prepared, not yet RAM-handed-off).
+    pub fn mail_claim_pending(&self, player_id: &str) -> bool {
+        self.prepared_mail_claims
+            .values()
+            .any(|p| p.request.character_id.to_string() == player_id)
     }
 }
 

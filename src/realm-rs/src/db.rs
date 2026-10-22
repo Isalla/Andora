@@ -2048,6 +2048,7 @@ async fn item_uuid_is_referenced(
         "bag_slots",
         "character_equipment",
         "inventory_buffer",
+        "character_mail_items",
     ] {
         let sql = format!("SELECT 1 FROM {table} WHERE item_uuid = ? LIMIT 1");
         let hit: Option<i32> = sqlx::query_scalar(&sql)
@@ -2458,6 +2459,67 @@ pub(crate) async fn write_quest_commit_proof(
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("quest proof write: {e}"))?;
+    Ok(())
+}
+
+/// Additive receipt table `character_mail_claims` (Migration 026): der
+/// canonicale Claim-Beleg ist die unveränderliche JSON des MailClaimArtifacts,
+/// geschrieben in derselben Transaktion wie das Snapshot-Commit und das
+/// Escrow-Löschen. Ein lockender Read entscheidet über Wiederholung anhand des
+/// Inhalts, niemals allein über die Revision.
+pub(crate) async fn load_mail_claim_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    commit_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
+        "SELECT artifact_json FROM character_mail_claims WHERE commit_id = ? FOR UPDATE",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("mail claim proof read: {e}"))
+}
+
+/// Sperrt die zu claimende Mail-Zeile für die Dauer der Transaktion, damit
+/// keine zwei parallelen Claims dieselbe Mail verbrauchen können. Lesestatus
+/// (`unread`/`read`) ist hier ORTHOGONAL: eine gelesene Mail bleibt abholbar,
+/// therefore die Lock never filters on `state`. A claimed Mail is gone (row
+/// deleted) and recognized by the receipt, not by a state value.
+pub(crate) async fn lock_mail_for_claim(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    character_id: &str,
+    mail_id: &str,
+) -> Result<Option<(String,)>, String> {
+    sqlx::query_as::<_, (String,)>(
+        "SELECT mail_id FROM character_mail WHERE mail_id = ? AND character_id = ? FOR UPDATE",
+    )
+    .bind(mail_id)
+    .bind(character_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("mail claim lock: {e}"))
+}
+
+/// Schreibt den Claim-Beleg (INSERT only, nie überschreiben).
+pub(crate) async fn write_mail_claim_proof(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    commit_id: &str,
+    character_id: i64,
+    mail_id: &str,
+    artifact_json: &str,
+    created_at_ms: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO character_mail_claims (commit_id, character_id, mail_id, artifact_json, created_at_ms) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(commit_id)
+    .bind(character_id)
+    .bind(mail_id)
+    .bind(artifact_json)
+    .bind(created_at_ms)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("mail claim proof write: {e}"))?;
     Ok(())
 }
 

@@ -778,6 +778,18 @@ async fn finish_owner(
     .await {
         log::error!("disconnect quest completion deferred: {e}");
     }
+    // An open mail-claim order for this character is resolved over the SAME
+    // idempotent spool/drain path BEFORE the logout gate, so Logout never races
+    // a possibly-delivered inventory and never releases the Gate unsafely.
+    if let Err(e) = crate::mail::retry_mail_claims(
+        ctx.persist.spool(),
+        &ctx.shared,
+        &ctx.db,
+        Some(&[player_id.to_string()]),
+    )
+    .await {
+        log::error!("disconnect mail-claim deferred: {e}");
+    }
     // Gate zuerst: verhindert, dass ein Login-/Takeover für dieselbe player_id
     // zwischen Eigentümerprüfung und `logout_at`-Write abschließt.
     let _logout_gate = ctx.persist.player_gate(player_id).await.lock_owned().await;
@@ -1287,6 +1299,10 @@ mod tests {
             },
             coordinator: crate::config::CoordinatorConfig {
                 url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
+            mail_inbound: crate::config::MailInboundConfig {
                 service_id: String::new(),
                 secret: String::new(),
             },

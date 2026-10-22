@@ -3,14 +3,21 @@
 // Minimal handgerollt (kein Web-Framework nötig): eine TCP-Verbindung,
 // eine Request-Zeile, JSON-Antwort. Entspricht dem Übergangsstand
 // (health.ts), ergänzt um realm_id und Version.
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::auth_api::AuthApi;
 use crate::config::Config;
+use crate::db;
+use crate::mail;
 use crate::spool::PersistRuntime;
 use crate::spool::PersistStatus;
 use crate::world::Shared;
+use sqlx::Pool;
 
 #[derive(Clone)]
 struct CharacterListContext {
@@ -114,6 +121,7 @@ fn response(status: u16, body: &serde_json::Value) -> String {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         503 => "Service Unavailable",
@@ -123,6 +131,189 @@ fn response(status: u16, body: &serde_json::Value) -> String {
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
         text.len()
     )
+}
+
+/// Interne Mail-Endpunkte (Go-API-Forward, service-authentisiert).
+/// Der Realm vertraut dem Go-API, das die Spielersession bereits geprüft hat;
+/// die Service-Signatur ist die Trust-Grenze. Charaktereigentum wird
+/// gegen die Realm-DB geprüft.
+async fn handle_internal_mail(
+    cfg: &Config,
+    pool: &sqlx::Pool<sqlx::MySql>,
+    spool: &crate::spool::Spool,
+    shared: Shared,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    headers: &HashMap<String, String>,
+) -> Result<(u16, serde_json::Value), String> {
+    let error = |status, reason| (status, serde_json::json!({"ok": false, "error": reason}));
+
+    // Service-Auth: X-Andora-Service / X-Andora-Timestamp / X-Andora-Signature
+    // Payload: METHOD\nPATH\n\nTS\nSHA256(BODY) (gleiche Konvention wie
+    // auth_api.rs::sign / src/api/auth.go::signPayload).
+    let service_id = headers.get("X-Andora-Service").cloned().unwrap_or_default();
+    if service_id != cfg.mail_inbound.service_id || service_id.is_empty() {
+        return Ok(error(401, "unknown service"));
+    }
+    let ts_str = headers.get("X-Andora-Timestamp").cloned().unwrap_or_default();
+    let Ok(ts) = ts_str.parse::<i64>() else {
+        return Ok(error(401, "missing timestamp"));
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    if (now - ts).abs() > 300 {
+        return Ok(error(401, "stale timestamp"));
+    }
+    let sig = headers.get("X-Andora-Signature").cloned().unwrap_or_default();
+    let body_hash = hex::encode(Sha256::digest(body));
+    let payload = format!("{method}\n{path}\n\n{ts}\n{body_hash}");
+    let mut mac = Hmac::<Sha256>::new_from_slice(cfg.mail_inbound.secret.as_bytes())
+        .expect("hmac key");
+    mac.update(payload.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+    if !hmac_verify(&sig, &expected) {
+        return Ok(error(401, "bad signature"));
+    }
+
+    // Route auflösen
+    let (action, _mail_id_opt) = if path == "/internal/mail/list" {
+        ("list", None as Option<&str>)
+    } else if path == "/internal/mail/read" {
+        ("read", None as Option<&str>)
+    } else if path == "/internal/mail/claim" {
+        ("claim", None as Option<&str>)
+    } else {
+        return Ok(error(404, "not found"));
+    };
+
+    // Body parsen (minimal: character_id, mail_id)
+    let body_val: Result<serde_json::Value, _> = serde_json::from_slice(body);
+    let Ok(body_val) = body_val else {
+        return Ok(error(400, "invalid json body"));
+    };
+    let character_id = body_val
+        .get("character_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as u64;
+    let mail_id = body_val
+        .get("mail_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if character_id == 0 {
+        return Ok(error(400, "invalid_character"));
+    }
+
+    // Serverseitig Character-Account-Binding (docs §2.1): der geprüften
+    // Session-Account (signierten Forward) MUST owningly match der
+    // character_id. Applies identically to list/read/claim — a clientseitig
+    // character_id is never trusted alone; cross-account access is denied.
+    let owner: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT id, account_id FROM characters WHERE id = ?",
+    )
+    .bind(character_id as i64)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("character load: {e}"))?;
+
+    let Some((_char_id, owner_account_id)) = owner else {
+        return Ok(error(404, "character not found"));
+    };
+
+    let body_account_id = body_val
+        .get("account_id")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as i64;
+    if !crate::mail::mail_owner_verdict(body_account_id, owner_account_id) {
+        return Ok(error(403, "not_owner"));
+    }
+
+    match action {
+        "list" => match mail::list_mails_for_character(pool, character_id).await {
+            Ok(mails) => Ok((200, serde_json::json!({"ok": true, "mails": mails}))),
+            Err(e) => Ok((503, serde_json::json!({"ok": false, "error": e}))),
+        },
+        "read" => {
+            if mail_id.is_empty() {
+                return Ok(error(400, "missing mail_id"));
+            }
+            match mail::read_mail(pool, character_id, &mail_id).await {
+                Ok(Some(m)) => Ok((200, serde_json::json!({"ok": true, "mail": m}))),
+                Ok(None) => Ok((404, serde_json::json!({"ok": false, "error": "not_found"}))),
+                Err(e) => Ok((503, serde_json::json!({"ok": false, "error": e}))),
+            }
+        }
+        "claim" => {
+            if mail_id.is_empty() {
+                return Ok(error(400, "missing mail_id"));
+            }
+
+            // Mail must exist for THIS character and not yet be claimed (row
+            // present). Lesestatus (unread/read) is orthogonal — a read Mail
+            // stays claimable. The authoritative consumption is in the Drain.
+            let mail_exists: Option<(String,)> = sqlx::query_as(
+                "SELECT mail_id FROM character_mail WHERE mail_id = ? AND character_id = ?"
+            )
+            .bind(&mail_id)
+            .bind(character_id as i64)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("mail load: {e}"))?;
+
+            if mail_exists.is_none() {
+                return Ok(error(404, "mail not found or already claimed"));
+            }
+
+            // Öffentliche Claim via Runtime-Commit-Service: Gate → aktuelle
+            // Validierung → unveränderliche Vorbereitung → bestätigte Spool-
+            // Dauerhaftigkeit → RAM-Handoff. Der DB-Application (Snapshot +
+            // Escrow-Verbrauch + Receipt + Revision) bleibt in dem Drain
+            // (`Spool::drain_mail_claim` → `apply_mail_claim_to_db`).
+            let request = crate::mail::MailClaimRequest {
+                commit_id: crate::mail::mail_claim_id(character_id, &mail_id),
+                character_id,
+                mail_id: mail_id.clone(),
+            };
+            match crate::mail::commit_mail_claim(spool, &shared, request, pool).await {
+                Ok(()) => Ok((200, serde_json::json!({"ok": true}))),
+                Err(e) => Ok((503, serde_json::json!({"ok": false, "error": e}))),
+            }
+        }
+        _ => Ok(error(404, "not found")),
+    }
+}
+
+/// Extrahiert Request-Header aus dem rohen Buffer (bis \r\n\r\n) als Map.
+/// Klein-/Grossschreibung wird nicht normalisiert; Aufrufer vergleichen
+// case-insensitive falls nötig.
+fn headers_from_buf(buf: &[u8]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(he) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return out;
+    };
+    let head = String::from_utf8_lossy(&buf[..he]);
+    for line in head.lines().skip(1) {
+        // erste Zeile ist die Request-Zeile, überspringen
+        if let Some((k, v)) = line.split_once(':') {
+            out.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    out
+}
+
+fn hmac_verify(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 async fn serve_with_characters(
@@ -260,9 +451,70 @@ async fn accept_loop(
             let Ok(Some(n)) = read else {
                 return;
             };
-            let head = String::from_utf8_lossy(&buf[..n]);
+            // Lesen bis Header-Ende (\r\n\r\n), dann optional Body nach
+            // Content-Length. Bound Größe und Zeit.
+            let mut total = n;
+            let header_end = buf[..n]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4);
+            let mut content_len: usize = 0;
+            if let Some(he) = header_end {
+                let head = String::from_utf8_lossy(&buf[..he]);
+                for line in head.lines() {
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.trim().eq_ignore_ascii_case("content-length") {
+                            content_len = v.trim().parse::<usize>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            while total < header_end.unwrap_or(0) + content_len {
+                let remaining = buf.len() - total;
+                if remaining == 0 {
+                    break; // Buffer zu klein für Body -> Body leer lassen
+                }
+                let count = match sock.read(&mut buf[total..]).await {
+                    Ok(c) => c,
+                    Err(_) => break,
+                };
+                if count == 0 {
+                    break;
+                }
+                total += count;
+            }
+            let head_end = header_end.unwrap_or(n.min(4));
+            let head = String::from_utf8_lossy(&buf[..head_end]);
             let mut parts = head.split_whitespace();
             let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
+            let body = &buf[head_end..total];
+
+            // Interne Mail-Endpunkte (POST, service-authentisiert).
+            // Der characters-Kontext liefert den DB-Pool; ohne ihn können
+            // Mail-Endpunkte nicht arbeiten (503).
+            if method == "POST" && path.starts_with("/internal/mail/") {
+                let pool = characters.as_ref().map(|c| &c.pool);
+                let Some(pool) = pool else {
+                    let _ = sock.write_all(response(503, &serde_json::json!({"ok":false,"error":"mail_db_unavailable"})).as_bytes()).await;
+                    return;
+                };
+                let (status, body_val) = match handle_internal_mail(
+                    &cfg,
+                    pool,
+                    persist.spool(),
+                    shared.clone(),
+                    method,
+                    path,
+                    body,
+                    &headers_from_buf(&buf[..head_end]),
+                ).await {
+                    Ok(v) => v,
+                    Err(e) => (500, serde_json::json!({"ok": false, "error": e})),
+                };
+                let _ = sock.write_all(response(status, &body_val).as_bytes()).await;
+                return;
+            }
+
             if method != "GET" {
                 let _ = sock
                     .write_all(
@@ -344,6 +596,10 @@ pub(crate) fn test_config() -> Config {
         },
         coordinator: crate::config::CoordinatorConfig {
             url: String::new(),
+            service_id: String::new(),
+            secret: String::new(),
+        },
+        mail_inbound: crate::config::MailInboundConfig {
             service_id: String::new(),
             secret: String::new(),
         },

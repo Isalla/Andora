@@ -333,7 +333,8 @@ mod tests {
     /// Das ausgelieferte Migrationsverzeichnis folgt dem Projektmuster:
     /// lückenlos ab 1 nummeriert, einschließlich der
     /// Lifecycle-Metadaten-Migration (021), Händler-Migration (022) und
-    /// des atomaren Trade-Commit-Nachweises (023).
+    /// des atomaren Trade-Commit-Nachweises (023) sowie des Mail-V1-
+    /// Erweiterung (026).
     /// Nur Dateiebene — es wird keine Migration ausgeführt und keine
     /// Datenbank berührt.
     #[test]
@@ -343,11 +344,11 @@ mod tests {
         let nums: Vec<u32> = files.iter().map(|f| f.num).collect();
         assert_eq!(
             nums,
-            (1..=25).collect::<Vec<_>>(),
-            "Migrationen 001–025 lückenlos"
+            (1..=26).collect::<Vec<_>>(),
+            "Migrationen 001–026 lückenlos"
         );
         let last = files.last().expect("mindestens eine Migration");
-        assert_eq!((last.num, last.tag.as_str()), (25, "character_quest_commits"));
-        assert_eq!(last.file, "025_character_quest_commits.sql");
+        assert_eq!((last.num, last.tag.as_str()), (26, "mail_v1"));
+        assert_eq!(last.file, "026_mail_v1.sql");
     }
 }

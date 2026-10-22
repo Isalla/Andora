@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
 
+use crate::mail::MailClaimArtifact;
 use crate::persist::PersistSnapshot;
 use futures_util::future::BoxFuture;
 
@@ -99,6 +100,17 @@ struct CommittedQuestCompletionReceipt {
     kind: String,
     format_version: u16,
     artifact: crate::persist::QuestCompletionArtifact,
+}
+
+/// Quittung für einen durchgeführten Mail-Claim (analog
+/// `CommittedQuestCompletionReceipt`), in derselben Transaktion wie das
+/// Snapshot-Commit geschrieben.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommittedMailClaimReceipt {
+    kind: String,
+    format_version: u16,
+    artifact: crate::mail::MailClaimArtifact,
 }
 
 /// Fassung des Batch-Umschlags. Der Eintrag selbst trägt weiterhin seine
@@ -210,6 +222,8 @@ pub struct Spool {
     held_trade_publications: Arc<Mutex<std::collections::HashSet<String>>>,
     /// Same boundary for single-character quest-completion orders.
     held_quest_completion_publications: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Same boundary for single-character mail-claim orders.
+    held_mail_claim_publications: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Ein Spieler-Gate mit Halter-Zähler.
@@ -512,6 +526,7 @@ impl PersistRuntime {
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             held_trade_publications: Arc::new(Mutex::new(Default::default())),
             held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
+            held_mail_claim_publications: Arc::new(Mutex::new(Default::default())),
         };
         spool.ensure_dirs()?;
         Ok(Self {
@@ -944,6 +959,14 @@ trait DrainDb: Send + Sync {
     ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
         Box::pin(async { Err("quest completion DB adapter unavailable".into()) })
     }
+
+    fn apply_mail_claim<'a>(
+        &'a self,
+        _artifact: &'a crate::mail::MailClaimArtifact,
+        _weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::mail::MailClaimApply, String>> {
+        Box::pin(async { Err("mail claim DB adapter unavailable".into()) })
+    }
 }
 
 /// Produktionsanbindung: reicht den echten Pool unverändert durch.
@@ -969,6 +992,17 @@ impl DrainDb for PoolDrainDb<'_> {
         weapon_skill_id: &'a str,
     ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
         Box::pin(crate::persist::apply_quest_completion_to_db(
+            self.pool,
+            artifact,
+            weapon_skill_id,
+        ))
+    }
+    fn apply_mail_claim<'a>(
+        &'a self,
+        artifact: &'a crate::mail::MailClaimArtifact,
+        weapon_skill_id: &'a str,
+    ) -> BoxFuture<'a, Result<crate::mail::MailClaimApply, String>> {
+        Box::pin(crate::mail::apply_mail_claim_to_db(
             self.pool,
             artifact,
             weapon_skill_id,
@@ -1219,6 +1253,133 @@ impl Spool {
         Ok(None)
     }
 
+    /// Schreibt ein Mail-Claim-Artefakt in den Spool (m- Präfix).
+    pub(crate) fn write_mail_claim(
+        &self,
+        a: &crate::mail::MailClaimArtifact,
+    ) -> Result<(), String> {
+        self.write_mail_claim_with_sync(a, sync_dir)
+    }
+
+    pub(crate) fn write_mail_claim_with_sync<S>(
+        &self,
+        a: &crate::mail::MailClaimArtifact,
+        sync: S,
+    ) -> Result<(), String>
+    where
+        S: FnOnce(&Path) -> Result<(), String>,
+    {
+        a.validate()?;
+        let expected_name = mail_claim_file_name(a);
+        for dir in [
+            self.spool_dir(),
+            self.dir("mail_claims"),
+            self.quarantine_open_dir(),
+        ] {
+            for path in list_json_files(&dir)? {
+                if mail_claim_file_header(&path)
+                    .is_some_and(|(id, _)| id == a.commit_id)
+                    && (dir == self.quarantine_open_dir()
+                        || path.file_name().unwrap().to_string_lossy() != expected_name)
+                {
+                    return Err("mail claim ID conflict".into());
+                }
+            }
+        }
+        let target = self.spool_dir().join(mail_claim_file_name(a));
+        let bytes = serde_json::to_vec(a).map_err(|e| format!("mail claim serialize: {e}"))?;
+        publish_mail_claim_bytes(&target, &bytes, sync)
+    }
+
+    /// Prüft, ob für den Charakter bereits ein offener Mail-Claim existiert.
+    pub(crate) fn ensure_mail_claim_save_allowed(&self, id: &str) -> Result<(), String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            for path in list_json_files(&dir)? {
+                if let Some((_, pid)) = mail_claim_file_header(&path) {
+                    if pid == id {
+                        return Err("mail claim pending".into());
+                    }
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("m-"))
+                {
+                    return Err("mail claim attribution unavailable".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn has_unresolved_mail_claims(&self) -> Result<bool, String> {
+        for dir in [self.spool_dir(), self.quarantine_open_dir()] {
+            if list_json_files(&dir)?.iter().any(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("m-"))
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(!self.held_mail_claim_publications.lock().unwrap().is_empty())
+    }
+
+    pub(crate) fn mail_claim_receipt(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::mail::MailClaimArtifact>, String> {
+        for path in list_json_files(&self.dir("mail_claims"))? {
+            let Some((commit_id, _)) = mail_claim_file_header(&path) else {
+                return Err("mail claim receipt attribution unavailable".into());
+            };
+            if commit_id == id {
+                let envelope: CommittedMailClaimReceipt = serde_json::from_slice(
+                    &std::fs::read(&path).map_err(|e| format!("mail claim receipt read: {e}"))?,
+                )
+                .map_err(|e| format!("mail claim receipt parse: {e}"))?;
+                if envelope.kind != "character_mail_claim_receipt"
+                    || envelope.format_version != 1
+                {
+                    return Err("unproven mail claim receipt format".into());
+                }
+                let receipt = envelope.artifact;
+                receipt.validate()?;
+                if mail_claim_file_name(&receipt)
+                    != path.file_name().unwrap().to_string_lossy()
+                {
+                    return Err("mail claim receipt attribution conflict".into());
+                }
+                return Ok(Some(receipt));
+            }
+        }
+        Ok(None)
+    }
+
+    fn quarantine_mail_claim(&self, path: &Path, raw: &[u8]) -> Result<(), String> {
+        let name = path
+            .file_name()
+            .ok_or("mail claim filename missing")?
+            .to_string_lossy();
+        let target = self
+            .quarantine_open_dir()
+            .join(format!("{name}--malformed.json"));
+        publish_mail_claim_bytes(&target, raw, sync_dir)?;
+        remove_file(path)?;
+        sync_dir(path)
+    }
+
+    pub(crate) fn hold_mail_claim_publication(&self, id: &str) {
+        self.held_mail_claim_publications
+            .lock()
+            .unwrap()
+            .insert(id.to_string());
+    }
+
+    pub(crate) fn release_mail_claim_publication(&self, id: &str) {
+        self.held_mail_claim_publications
+            .lock()
+            .unwrap()
+            .remove(id);
+    }
+
     fn quarantine_trade(&self, path: &Path, raw: &[u8]) -> Result<(), String> {
         let name = path
             .file_name()
@@ -1393,6 +1554,75 @@ impl Spool {
             }
         }
     }
+
+    async fn drain_mail_claim<D: DrainDb>(
+        &self,
+        db: &D,
+        weapon_skill_id: &str,
+        path: &Path,
+    ) -> Result<Option<DrainReport>, String> {
+        let (id, pid) = mail_claim_file_header(path).ok_or("mail claim attribution conflict")?;
+        let _gate = self.player_gate(&pid).await.lock_owned().await;
+        if self.held_mail_claim_publications.lock().unwrap().contains(&id) {
+            return Ok(None);
+        }
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("mail claim read: {e}")),
+        };
+        let artifact = serde_json::from_slice::<crate::mail::MailClaimArtifact>(&raw);
+        let valid = artifact.as_ref().is_ok_and(|a|
+            a.validate().is_ok()
+                && mail_claim_file_name(a) == path.file_name().unwrap().to_string_lossy()
+        );
+        if !valid {
+            self.quarantine_mail_claim(path, &raw)?;
+            return Ok(Some(DrainReport {
+                batches_processed: 1,
+                batches_quarantined: 1,
+                ..Default::default()
+            }));
+        }
+        let artifact = artifact.map_err(|e| format!("mail claim parse: {e}"))?;
+        let receipt = self.mail_claim_receipt(&artifact.commit_id)?;
+        if receipt.as_ref().is_some_and(|r| r != &artifact) {
+            return Err("mail claim receipt content conflict".into());
+        }
+        match db
+            .apply_mail_claim(&artifact, weapon_skill_id)
+            .await?
+        {
+            crate::mail::MailClaimApply::Waiting => Ok(None),
+            crate::mail::MailClaimApply::Conflict => {
+                self.quarantine_mail_claim(path, &raw)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    batches_quarantined: 1,
+                    ..Default::default()
+                }))
+            }
+            outcome => {
+                let receipt_path = self.dir("mail_claims").join(mail_claim_file_name(&artifact));
+                let receipt_bytes = serde_json::to_vec(&CommittedMailClaimReceipt {
+                    kind: "character_mail_claim_receipt".into(),
+                    format_version: 1,
+                    artifact: artifact.clone(),
+                })
+                .map_err(|e| format!("mail claim receipt serialize: {e}"))?;
+                publish_mail_claim_bytes(&receipt_path, &receipt_bytes, sync_dir)?;
+                remove_file(path)?;
+                sync_dir(path)?;
+                Ok(Some(DrainReport {
+                    batches_processed: 1,
+                    entries_applied: if outcome == crate::mail::MailClaimApply::Applied { 1 } else { 0 },
+                    entries_skipped: if outcome == crate::mail::MailClaimApply::AlreadyApplied { 1 } else { 0 },
+                    ..Default::default()
+                }))
+            }
+        }
+    }
+
     fn dir(&self, name: &str) -> PathBuf {
         self.base_dir.join(name)
     }
@@ -1419,6 +1649,7 @@ impl Spool {
             self.spool_dir(),
             self.dir("trade_receipts"),
             self.dir("quest_receipts"),
+            self.dir("mail_claims"),
             self.superseded_dir(),
             self.quarantine_open_dir(),
             self.quarantine_archive_dir(),
@@ -1784,6 +2015,12 @@ impl Spool {
             .is_some_and(|n| n.to_string_lossy().starts_with("q-"))
         {
             return self.drain_quest_completion(db, weapon_skill_id, &batch_path).await;
+        }
+        if batch_path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("m-"))
+        {
+            return self.drain_mail_claim(db, weapon_skill_id, &batch_path).await;
         }
         let file_name = batch_path
             .file_name()
@@ -2833,6 +3070,59 @@ where
     }
 }
 
+/// Dateiname für ein Mail-Claim-Artefakt im Spool: `m-{commit_id}.json`.
+fn mail_claim_file_name(a: &crate::mail::MailClaimArtifact) -> String {
+    format!("m-{}.json", a.commit_id)
+}
+
+/// Parst den Mail-Claim-Dateinamen: `m-{commit_id}.json`.
+/// Gibt `(commit_id, character_id)` zurück. Der `character_id`-Teil ist
+/// optional im Dateinamen nicht enthalten (die Mail-Artifact-Tabelle
+/// speichert ihn separat), daher leeren String als Platzhalter für
+/// zukünftige Erweiterung; aktuell nur `commit_id` relevant.
+fn mail_claim_file_header(path: &Path) -> Option<(String, String)> {
+    let name = path.file_name()?.to_str()?;
+    let original = name.split_once("--").map_or(name, |(s, _)| s);
+    let stem = original.strip_suffix(".json")?.strip_prefix("m-")?;
+    let parts: Vec<_> = stem.split('-').collect();
+    if parts.len() != 1 || parts[0].is_empty() || parts[0].len() > 64 {
+        return None;
+    }
+    if !parts[0].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    Some((parts[0].to_string(), String::new()))
+}
+
+/// Same publication primitive as quest completion bytes.
+fn publish_mail_claim_bytes<S>(target: &Path, bytes: &[u8], sync: S) -> Result<(), String>
+where
+    S: FnOnce(&Path) -> Result<(), String>,
+{
+    if target.exists() {
+        if std::fs::read(target).map_err(|e| format!("mail claim confirmation: {e}"))? != bytes {
+            return Err("mail claim content conflict".into());
+        }
+        return sync(target);
+    }
+    let tmp = target.with_file_name(format!(
+        ".tmp-{}",
+        target
+            .file_name()
+            .ok_or("mail claim filename")?
+            .to_string_lossy()
+    ));
+    match publish_new_file_with_sync(&tmp, target, bytes, sync)? {
+        PublishOutcome::Published => Ok(()),
+        PublishOutcome::TargetExists => {
+            if std::fs::read(target).map_err(|e| format!("mail claim confirmation: {e}"))? != bytes {
+                return Err("mail claim content conflict".into());
+            }
+            sync_dir(target)
+        }
+    }
+}
+
 /// `fsync` des Elternverzeichnisses. Fehler werden weitergereicht: die
 /// unterstuetzte Zielplattform (Linux) liefert hier einen echten Fehler, wenn
 /// das Verzeichnis nicht gesichert werden kann.
@@ -2986,6 +3276,7 @@ mod tests {
             in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             held_trade_publications: Arc::new(Mutex::new(Default::default())),
             held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
+            held_mail_claim_publications: Arc::new(Mutex::new(Default::default())),
         }
     }
 
@@ -3199,6 +3490,218 @@ mod tests {
                 Ok(action)
             })
         }
+    }
+
+    /// A Mail-Claim order: full resulting snapshot (revision = base+1) carried
+    /// as canonical JSON, deterministic commit-ID `mc_test`.
+    fn mail_claim_artifact() -> crate::mail::MailClaimArtifact {
+        let snap = snapshot("7", 2, 1.0);
+        let a = crate::mail::MailClaimArtifact {
+            kind: "character_mail_claim".into(),
+            format_version: 1,
+            commit_id: "mc_test".into(),
+            character_id: 7,
+            mail_id: "mail-1".into(),
+            base_revision: 1,
+            target_revision: 2,
+            snapshot_json: serde_json::to_string(&snap).unwrap(),
+            claimed_mail_ids: vec!["mail-1".into()],
+        };
+        a.validate().unwrap();
+        a
+    }
+
+    /// SQL/rollback MODEL only for the single-character mail claim. The real
+    /// drain/format/gates/files and the real revision decision are exercised;
+    /// this adapter does not prove MariaDB.
+    struct MailDbModel {
+        revisions: Mutex<HashMap<String, i64>>,
+        committed: Mutex<HashMap<String, String>>,
+        mail_state: Mutex<HashMap<String, String>>,
+        applies: std::sync::atomic::AtomicUsize,
+        fail: bool,
+        lose_ack: bool,
+    }
+
+    impl MailDbModel {
+        fn new(rev: i64) -> Self {
+            Self {
+                revisions: Mutex::new(HashMap::from([("7".into(), rev)])),
+                committed: Mutex::new(HashMap::new()),
+                mail_state: Mutex::new(HashMap::from([("mail-1".into(), "unread".into())])),
+                applies: std::sync::atomic::AtomicUsize::new(0),
+                fail: false,
+                lose_ack: false,
+            }
+        }
+    }
+
+    impl DrainDb for MailDbModel {
+        fn load_persist_revision<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> BoxFuture<'a, Result<Option<i64>, String>> {
+            Box::pin(async move { Ok(self.revisions.lock().unwrap().get(id).copied()) })
+        }
+        fn apply_snapshot<'a>(
+            &'a self,
+            s: &'a PersistSnapshot,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.revisions.lock().unwrap().insert(s.player_id.clone(), s.persist_revision);
+                Ok(())
+            })
+        }
+        fn apply_trade<'a>(
+            &'a self,
+            _t: &'a crate::persist::TradeArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::persist::TradeApply, String>> {
+            Box::pin(async { Err("no trade in mail model".into()) })
+        }
+        fn apply_quest_completion<'a>(
+            &'a self,
+            _a: &'a crate::persist::QuestCompletionArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::persist::QuestCompletionApply, String>> {
+            Box::pin(async { Err("no quest in mail model".into()) })
+        }
+        fn apply_mail_claim<'a>(
+            &'a self,
+            a: &'a crate::mail::MailClaimArtifact,
+            _: &'a str,
+        ) -> BoxFuture<'a, Result<crate::mail::MailClaimApply, String>> {
+            Box::pin(async move {
+                let mut revisions = self.revisions.lock().unwrap();
+                let mut committed = self.committed.lock().unwrap();
+                let mut mail_state = self.mail_state.lock().unwrap();
+                let cid = a.character_id.to_string();
+                let current = revisions.get(&cid).copied();
+                let proof = committed.get(&a.commit_id).map(String::as_str);
+                let action = crate::mail::mail_claim_revision_action_with_proof(a, current, proof);
+                if action == crate::mail::MailClaimApply::Applied {
+                    if self.fail {
+                        return Err("model: claim rolled back".into());
+                    }
+                    // Escrow consumption is STATE-ORTHOGONAL: the Mail row must be
+                    // present (unread OR read). A read Mail stays claimable. An
+                    // absent (already-claimed) row never re-applies -> no duplication.
+                    if !mail_state.contains_key(&a.mail_id) {
+                        return Ok(crate::mail::MailClaimApply::Conflict);
+                    }
+                    revisions.insert(cid, a.target_revision);
+                    mail_state.remove(&a.mail_id);
+                    committed.insert(a.commit_id.clone(), a.commit_payload()?);
+                    self.applies.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if self.lose_ack {
+                        return Err("model: DB commit ack lost after crash".into());
+                    }
+                }
+                Ok(action)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn mail_claim_drain_applies_snapshot_and_receipt() {
+        let base = temp_dir("mc-drain");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = mail_claim_artifact();
+        s.write_mail_claim(&a).unwrap();
+        let db = MailDbModel::new(1);
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(db.revisions.lock().unwrap()["7"], 2);
+        // Durable receipt written in the same drain step.
+        assert_eq!(s.mail_claim_receipt("mc_test").unwrap().unwrap().commit_id, "mc_test");
+        assert_eq!(s.count_batches().unwrap(), 0);
+        // Crash-after-commit: same file again -> idempotent skip, no second apply.
+        s.write_mail_claim(&a).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_skipped, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mail_claim_drain_db_error_keeps_order_pending() {
+        let base = temp_dir("mc-err");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = mail_claim_artifact();
+        s.write_mail_claim(&a).unwrap();
+        let mut db = MailDbModel::new(1);
+        db.fail = true;
+        let out = s.drain_one_with(&db, "sword").await;
+        // A pre-COMMIT DB error is an error, the order stays in the spool.
+        assert!(out.is_err());
+        assert_eq!(s.count_batches().unwrap(), 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // DB returns: identical order resolves, exactly one apply.
+        let db2 = MailDbModel::new(1);
+        let r = s.drain_one_with(&db2, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mail_claim_drain_older_snapshot_never_overwrites_claim() {
+        let base = temp_dir("mc-order");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = mail_claim_artifact();
+        s.write_mail_claim(&a).unwrap();
+        let db = MailDbModel::new(1);
+        // Apply the claim first (revision -> 2).
+        let _ = s.drain_one_with(&db, "sword").await.unwrap();
+        // A normal snapshot at an OLDER revision must not undo the claim/revision.
+        s.write_batch_run(vec![snapshot("7", 1, 9.0)]).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_superseded, 1);
+        assert_eq!(db.revisions.lock().unwrap()["7"], 2);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mail_claim_drain_read_mail_still_claimable() {
+        let base = temp_dir("mc-read");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = mail_claim_artifact();
+        s.write_mail_claim(&a).unwrap();
+        let db = MailDbModel::new(1);
+        // Mark the Mail as READ (read_at set) — it must remain claimable.
+        db.mail_state.lock().unwrap().insert("mail-1".into(), "read".into());
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(db.revisions.lock().unwrap()["7"], 2);
+        // The read Mail's escrow row is consumed (gone), not blocked by state.
+        assert!(db.mail_state.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mail_claim_drain_double_claim_never_duplicates_items() {
+        let base = temp_dir("mc-double");
+        let s = spool(&base);
+        s.ensure_dirs().unwrap();
+        let a = mail_claim_artifact();
+        s.write_mail_claim(&a).unwrap();
+        let db = MailDbModel::new(1);
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_applied, 1);
+        // A repeated Claim of the SAME order: identical receipt -> AlreadyApplied,
+        // the escrow row is gone -> no second apply, no duplicated items.
+        s.write_mail_claim(&a).unwrap();
+        let r = s.drain_one_with(&db, "sword").await.unwrap().unwrap();
+        assert_eq!(r.entries_skipped, 1);
+        assert_eq!(db.applies.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(db.mail_state.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
@@ -7466,6 +7969,7 @@ mod tests {
                 in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
                 held_trade_publications: Arc::new(Mutex::new(Default::default())),
                 held_quest_completion_publications: Arc::new(Mutex::new(Default::default())),
+                held_mail_claim_publications: Arc::new(Mutex::new(Default::default())),
             },
             weapon_skill_id: "ws".into(),
             status: Arc::new(Mutex::new(PersistStatus::Recovering)),

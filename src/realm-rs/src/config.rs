@@ -171,6 +171,16 @@ pub struct CoordinatorConfig {
     pub secret: String,
 }
 
+/// Realm-Inbound-Verifier für signierte Go-API-Mail-Forwards (docs §2.1).
+/// Der Realm verifiziert die X-Andora-* Signatur des Go-Dienstes und vertraut
+/// darauf, dass der Go-API die Spielersession bereits geprüft hat. Leer =
+/// Inbound deaktiviert (nur WS-Rückfallebene).
+#[derive(Debug, Clone)]
+pub struct MailInboundConfig {
+    pub service_id: String,
+    pub secret: String,
+}
+
 /// Vorläufige NPC/Combat-V2-Mechanikwerte (docs/Kampfsystem.md §§18–21).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -512,6 +522,8 @@ pub struct Config {
     pub auth_api: AuthApiConfig,
     /// Realm -> Coordinator-Anbindung (KI-Jobs; job_type "npc").
     pub coordinator: CoordinatorConfig,
+    /// Realm-Inbound-Verifier für signierte Go-API-Mail-Forwards.
+    pub mail_inbound: MailInboundConfig,
     /// Die EIGENE Realm-Datenbank (realm_state_<realm>).
     pub realm_db: DbConfig,
     /// Migrationsverzeichnis-Override (sonst <bindir>/migrations).
@@ -660,6 +672,10 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
             url: bracket_url_host(&g("COORDINATOR_URL").trim_end_matches('/').to_string()),
             service_id: g("COORDINATOR_SERVICE_ID"),
             secret: g("COORDINATOR_SERVICE_SECRET"),
+        },
+        mail_inbound: MailInboundConfig {
+            service_id: g("MAIL_INBOUND_SERVICE_ID"),
+            secret: g("MAIL_INBOUND_SERVICE_SECRET"),
         },
         realm_db,
         migrations_dir: g("REALM_STATE_MIGRATIONS_DIR"),

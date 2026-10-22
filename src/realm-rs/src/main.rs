@@ -21,6 +21,7 @@ mod item;
 mod item_lifecycle;
 mod loot;
 mod lua;
+mod mail;
 mod migrations;
 mod net;
 mod npc;
@@ -601,6 +602,7 @@ async fn async_main() -> Result<(), String> {
                 let w = quest_retry_shared.lock().await;
                 w.pending_quest_acceptances.values().any(|v| !v.is_empty())
                     || !w.prepared_quest_completions.is_empty()
+                    || !w.prepared_mail_claims.is_empty()
             };
             if !has_pending {
                 continue;
@@ -626,6 +628,15 @@ async fn async_main() -> Result<(), String> {
             )
             .await {
                 log::error!("quest-completion retry: {e}");
+            }
+            if let Err(e) = crate::mail::retry_mail_claims(
+                quest_retry_persist.spool(),
+                &quest_retry_shared,
+                &quest_retry_pool,
+                None,
+            )
+            .await {
+                log::error!("mail-claim retry: {e}");
             }
         }
     });
@@ -753,6 +764,25 @@ async fn async_main() -> Result<(), String> {
         Err(_elapsed) =>
             log::error!("shutdown quest-completion retry exceeded deadline (order stays pending)"),
     }
+    // The SAME bounded Shutdown pass resolves an open mail-claim order over the
+    // existing spool/drain path. Capped by the real Deadline; a still-open order
+    // stays retained (prepared entry + durable spool file) and is reported below.
+    // No false claim, no escrow loss.
+    match tokio::time::timeout(
+        crate::net::SHUTDOWN_LOGOUT_BUDGET,
+        crate::mail::retry_mail_claims(
+            persist.spool(),
+            &shared,
+            &pool,
+            None,
+        ),
+    )
+    .await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::error!("shutdown mail-claim retry: {e}"),
+        Err(_elapsed) =>
+            log::error!("shutdown mail-claim retry exceeded deadline (order stays pending)"),
+    }
     let open_acceptances: usize = {
         let w = shared.lock().await;
         w.pending_quest_acceptances.values().map(|v| v.len()).sum()
@@ -773,6 +803,17 @@ async fn async_main() -> Result<(), String> {
         log::error!(
             "shutdown_open_quest_completions={} (durable spool order/receipt remains authority; next Login re-derives)",
             open_completions
+        );
+    }
+    let open_mail_claims: usize = {
+        let w = shared.lock().await;
+        w.prepared_mail_claims.len()
+    };
+    if open_mail_claims > 0 {
+        persist.set_status(crate::spool::PersistStatus::Degraded);
+        log::error!(
+            "shutdown_open_mail_claims={} (durable spool order/receipt remains authority; next Login re-derives)",
+            open_mail_claims
         );
     }
     if let Err(e) = persist.drain_one(&pool).await {

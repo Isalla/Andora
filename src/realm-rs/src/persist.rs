@@ -822,6 +822,11 @@ where
             {
                 return Err("normal publication pending".into());
             }
+            // Reverse barrier: a pending Mail-Claim for either character must not
+            // be invalidated by a competing Trade at the same target revision.
+            if ids.iter().any(|id| world.mail_claim_pending(id)) {
+                return Err("mail claim pending".into());
+            }
             if world.prepared_trades.contains_key(&request.commit_id)
                 || world.trade_receipts.contains_key(&request.commit_id)
             {
@@ -945,7 +950,7 @@ impl PersistDirty {
     }
 
     /// Entfernt genau die Komponenten von `other` (Post-Save-Cleanup).
-    fn clear_components(&mut self, other: PersistDirty) {
+    pub(crate) fn clear_components(&mut self, other: PersistDirty) {
         self.bits &= !other.bits;
     }
 }
@@ -1038,7 +1043,7 @@ fn now_ms() -> i64 {
 /// Lifecycle-Sicht stempelt die Snapshot-Revision auf alle ausstehenden
 /// Abkopplungen; unbestätigte Entfernungen bleiben dadurch in neueren
 /// Snapshots erhalten, bis der DB-Commit bestätigt ist.
-fn build_snapshot(
+pub(crate) fn build_snapshot(
     player: &Player,
     force: bool,
     lifecycle: &crate::item_lifecycle::ItemLifecycle,
@@ -1222,6 +1227,15 @@ pub async fn persist_player(
     retry_normal_publications(spool, shared, Some(&[player_id.to_string()])).await?;
     let _guard = spool.player_gate(player_id).await.lock_owned().await;
     spool.ensure_trade_save_allowed(player_id)?;
+    // Reverse barrier: a retained (not yet RAM-handed-off) Mail-Claim must not
+    // be invalidated by a competing normal Save at the same target revision.
+    // Defer the Save; the periodic pass retries it once the Claim resolves.
+    {
+        let world = shared.lock().await;
+        if world.mail_claim_pending(player_id) {
+            return Err("mail claim pending".into());
+        }
+    }
     let spool = spool.clone();
     persist_dirty_into(shared, player_id, force, move |snapshot| {
         let spool = spool.clone();
@@ -1262,7 +1276,7 @@ pub(crate) async fn apply_snapshot_to_db(
 
 /// Common full-state writer; lifecycle and revision are deliberately separate
 /// so the pair can establish BOTH inventories before any finalization.
-async fn write_snapshot_fields(
+pub(crate) async fn write_snapshot_fields(
     tx: &mut sqlx::Transaction<'_, MySql>,
     snapshot: &PersistSnapshot,
     weapon_skill_id: &str,
@@ -1617,6 +1631,11 @@ where
             let mut world = shared.lock().await;
             if world.normal_publications.contains_key(id) {
                 return Err("normal publication pending".into());
+            }
+            // Reverse barrier: a pending Mail-Claim for this character must not
+            // be invalidated by a competing Quest-Completion at the same target.
+            if world.mail_claim_pending(id) {
+                return Err("mail claim pending".into());
             }
             if world.prepared_quest_completions.contains_key(&request.commit_id)
                 || world.quest_completion_receipts.contains_key(&request.commit_id)
@@ -2850,6 +2869,109 @@ mod tests {
         assert_eq!(w.players["7"].persist_revision, 1);
         assert!(!w.prepared_quest_completions.contains_key(&req.commit_id));
         assert_eq!(spool.count_batches().unwrap(), 1);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    /// A retained (not yet handed-off) Mail-Claim for a character, used to test
+    /// the reverse barrier. Only the request drives `mail_claim_pending`.
+    fn mail_prepared(char_id: u64, mail_id: String, base: i64) -> crate::mail::PreparedMailClaim {
+        let pid = char_id.to_string();
+        let snap = crate::persist::PersistSnapshot {
+            player_id: pid,
+            persist_revision: base + 1,
+            captured_at_ms: 1_700_000_000_000,
+            x: 1.0,
+            y: 1.0,
+            level: 1,
+            exp: 0,
+            free_attr_points: 0,
+            rested_pool: 0,
+            idia: 0,
+            hp: 10,
+            mana: 0,
+            attributes: Default::default(),
+            char_class: "Adventurer".into(),
+            faction_transition: false,
+            weapon_skill: 0,
+            learned_abilities: Vec::new(),
+            cooldowns: None,
+            item_lifecycle: None,
+            inventory: crate::inventory::InventoryState::default(),
+            generation: 0,
+            dirty: crate::persist::PersistDirty::default(),
+        };
+        let commit_id = crate::mail::mail_claim_id(char_id, &mail_id);
+        let artifact = crate::mail::MailClaimArtifact {
+            kind: "character_mail_claim".into(),
+            format_version: 1,
+            commit_id: commit_id.clone(),
+            character_id: char_id,
+            mail_id: mail_id.clone(),
+            base_revision: base,
+            target_revision: base + 1,
+            snapshot_json: serde_json::to_string(&snap).unwrap(),
+            claimed_mail_ids: vec![mail_id.clone()],
+        };
+        crate::mail::PreparedMailClaim {
+            request: crate::mail::MailClaimRequest {
+                commit_id,
+                character_id: char_id,
+                mail_id,
+            },
+            artifact,
+            snapshot: snap,
+        }
+    }
+
+    #[tokio::test]
+    async fn quest_completion_defers_behind_pending_mail_claim() {
+        let (runtime, path) = trade_runtime("qc-mailbarrier");
+        let (shared, req, svc) = quest_world().await;
+        let spool = runtime.spool();
+        let cfg = &crate::progression::ProgressionCfg::default();
+        {
+            let mut w = shared.lock().await;
+            w.prepared_mail_claims.insert("mc_block".into(), mail_prepared(7, "mail-1".into(), 0));
+        }
+        let _gate = spool.player_gate("7").await.lock_owned().await;
+        let res = finish_quest_completion(spool, &shared, req.clone(), cfg, &svc, |_| async {
+            Ok(())
+        })
+        .await;
+        assert_eq!(res.unwrap_err(), "mail claim pending");
+        let w = shared.lock().await;
+        assert_eq!(w.players["7"].persist_revision, 0);
+        assert_eq!(w.players["7"].quests["q"].state, QuestState::Active);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn normal_save_defers_behind_pending_mail_claim() {
+        let (runtime, path) = trade_runtime("save-mailbarrier");
+        let shared = crate::world::new_shared();
+        let (p, _) = test_player("7");
+        {
+            let mut w = shared.lock().await;
+            w.players.insert("7".into(), p);
+            w.prepared_mail_claims.insert("mc_block".into(), mail_prepared(7, "mail-1".into(), 0));
+        }
+        let res = crate::persist::persist_player(runtime.spool(), &shared, "7", true).await;
+        assert_eq!(res.unwrap_err(), "mail claim pending");
+        let w = shared.lock().await;
+        assert_eq!(w.players["7"].persist_revision, 0);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trade_defers_behind_pending_mail_claim() {
+        let (runtime, path) = trade_runtime("trade-mailbarrier");
+        let (shared, req) = trade_world().await;
+        {
+            let mut w = shared.lock().await;
+            w.prepared_mail_claims.insert("mc_block".into(), mail_prepared(1, "mail-1".into(), 0));
+        }
+        let res = commit_trade(runtime.spool(), &shared, req.clone()).await;
+        assert_eq!(res.unwrap_err(), "mail claim pending");
         std::fs::remove_dir_all(path).unwrap();
     }
 }

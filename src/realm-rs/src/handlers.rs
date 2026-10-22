@@ -673,6 +673,26 @@ pub async fn handle_hello(
         crate::security::log_takeover(account_id, &c.id, old_conn_id, conn_id);
     }
 
+    // Automatic Refund-Pickup (Mail-V1 §23): pending system-refund mails for
+    // this character are delivered via the shared Runtime-Commit-Service under
+    // the held login Gate (Gate-assuming finish_mail_claim). Idempotent across
+    // re-login/recovery (deterministic commit_id + durable receipt). Non-fatal:
+    // a deferred claim converges via the periodic retry / next Login; the refund
+    // (escrow row) is never lost. Runs BEFORE the INVENTORY push so the Client
+    // sees the delivered items.
+    match crate::mail::pickup_refund_mails_for_login(
+        ctx.persist.spool(),
+        &ctx.shared,
+        &ctx.db,
+        char_id_db as u64,
+        &ctx.cfg.combat.weapon_skill_id,
+    )
+    .await {
+        Ok(n) if n > 0 => log::info!("HELLO {char_id}: {n} refund mails delivered"),
+        Ok(_) => {}
+        Err(e) => log::error!("HELLO mail-claim pickup {char_id}: {e}"),
+    }
+
     // Serverseitige Entfernung defekten Equipments beim Einstieg persistent
     // nachschreiben (Fehler nur loggen — kein Login-Abbruch). Nur beim
     // Erstlogin: bei einem Takeover ist der RAM-Inventarstand maßgeblich und
@@ -2308,6 +2328,10 @@ pub(crate) mod tests {
                 service_id: String::new(),
                 secret: String::new(),
             },
+            mail_inbound: crate::config::MailInboundConfig {
+                service_id: String::new(),
+                secret: String::new(),
+            },
             realm_db: crate::config::DbConfig {
                 host: "127.0.0.1".into(),
                 port: 3306,
@@ -3081,6 +3105,10 @@ pub(crate) mod tests {
             },
             coordinator: crate::config::CoordinatorConfig {
                 url: String::new(),
+                service_id: String::new(),
+                secret: String::new(),
+            },
+            mail_inbound: crate::config::MailInboundConfig {
                 service_id: String::new(),
                 secret: String::new(),
             },
