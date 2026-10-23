@@ -54,6 +54,11 @@ const (
 	permParentalPin       = "parental.pin"
 	permParentalStatus    = "parental.status"
 	permParentalNotify    = "parental.notifications"
+	// Mail-System V1 (Realm-side authority; the Go-API-Wrapper forwards).
+	permMailSend         = "mail.send"
+	permMailReceive      = "mail.receive"
+	permMailQuota        = "mail.quota"
+	permMailNotification = "mail.notification"
 )
 
 // authorize checks the service identity and signature of a request.

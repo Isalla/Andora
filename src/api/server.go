@@ -206,6 +206,16 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("/parental/exceptions/remove", s.handleParentalExceptionRemove)
 	mux.HandleFunc("/parental/notifications", s.handleParentalNotifications)
 	mux.HandleFunc("/parental/notifications/deliver", s.handleParentalNotificationsDeliver)
+	// Mail-System V1 (Go-API-Wrapper → Realm; fail-closed without MAIL_FORWARD_URL).
+	// Spieler-Endpunkte validieren die Spielersession; /mail/send bleibt
+	// service-only und ist in V1 unbenutzt (Realm erzeugt Refunds selbst).
+	mux.HandleFunc("/mail/send", s.handleMailSend)
+	mux.HandleFunc("/mail/list", s.handleMailList)
+	mux.HandleFunc("/mail/read", s.handleMailRead)
+	mux.HandleFunc("/mail/claim", s.handleMailClaim)
+	mux.HandleFunc("/mail/quota", s.handleMailQuota)
+	mux.HandleFunc("/mail/receive", s.handleMailReceive)
+	mux.HandleFunc("/mail/notification", s.handleMailNotification)
 	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux)))
 }
 

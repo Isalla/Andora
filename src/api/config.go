@@ -55,6 +55,16 @@ type Config struct {
 	ArgonTime      uint32
 	ArgonMemory    uint32
 	ArgonThreads   uint8
+	// MailForwardURL is the Realm's defined Mail-Interface (V1 wrapper
+	// forwards validated MailRequest there).
+	// Fail-closed: empty = the /mail/* endpoints answer 503. This is NO
+	// DB-Configuration: the Auth-API never touches realm_state.
+	MailForwardURL string
+	// MailForwardServiceID/Secret identify the Go-API to the Realm's internal
+	// inbound verifier (same HMAC scheme as X-Andora-*). Must match the
+	// Realm's MAIL_INBOUND_SERVICE_ID/SECRET.
+	MailForwardServiceID string
+	MailForwardServiceSecret string
 	// Security parameters.
 	SessionTTL      time.Duration
 	HandoffTTL      time.Duration
@@ -209,7 +219,10 @@ func loadConfig(path string) (*Config, error) {
 		Port:            port,
 		BindHost:        bindHost,
 		AuthDB:          db,
-		Services:        svc,
+		MailForwardURL:            strings.TrimSpace(get("MAIL_FORWARD_URL")),
+		MailForwardServiceID:      strings.TrimSpace(get("MAIL_FORWARD_SERVICE_ID")),
+		MailForwardServiceSecret:  strings.TrimSpace(get("MAIL_FORWARD_SERVICE_SECRET")),
+		Services:                  svc,
 		TrustedProxies:  trusted,
 		ArgonTime:       uint32(intEnv(env, "ARGON_TIME", 1)),
 		ArgonMemory:     uint32(intEnv(env, "ARGON_MEMORY", 19456)),
