@@ -134,6 +134,16 @@ func (v *validator) buildMessages(j *Job) ([]chatMessage, validation) {
 	if s := strings.TrimSpace(j.Context.Situation); s != "" {
 		fmt.Fprintf(&user, "[Situation]\n%s\n\n", s)
 	}
+	// Weather is realm-supplied (ANDORA-WEATHER_V1); NPCs may reference it.
+	// Rendered as its own block so the model treats it as world context.
+	if wt := strings.TrimSpace(j.Context.Weather); wt != "" {
+		fmt.Fprintf(&user, "[Weather]\n%s\n\n", wt)
+	}
+	// Season is realm-supplied (ANDORA-WEATHER_V1_1_SEASONS); NPCs may reference
+	// it in conversations and dynamic quest suggestions.
+	if se := strings.TrimSpace(j.Context.Season); se != "" {
+		fmt.Fprintf(&user, "[Season]\n%s\n\n", se)
+	}
 	fmt.Fprintf(&user, "[Spielereingabe]\n%s", strings.TrimSpace(j.Text))
 
 	if v.contextOverBudget(sys.String(), user.String()) {

@@ -425,12 +425,16 @@ pub fn npc_tick(
             let n = world.npcs.get(id).unwrap();
             (n.target_id.is_some(), n.effective_aggressive())
         };
-        // 4a) Neues Aggroziel, falls aggressiv und Spieler im Aggro-Radius.
-        if !has_target && want_aggro {
-            let (px, py, axr) = {
-                let n = world.npcs.get(id).unwrap();
-                (n.x, n.y, n.aggro_range)
-            };
+            // 4a) Neues Aggroziel, falls aggressiv und Spieler im Aggro-Radius.
+            if !has_target && want_aggro {
+                // Kreaturenverhalten (docs/Weltzeit_und_Wettersystem.md §15): the
+                // autoritative weather reduces the detection/aggro range (fog/storm
+                // -> creatures notice the player later). Server-side rule; the
+                // client never decides this.
+                let (px, py, axr) = {
+                    let n = world.npcs.get(id).unwrap();
+                    (n.x, n.y, n.aggro_range * world.weather.aggro_factor())
+                };
             let target: Option<String> = world
                 .players
                 .values()

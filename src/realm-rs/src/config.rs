@@ -239,6 +239,39 @@ impl Default for LootCfg {
     }
 }
 
+/// Vorläufige Wetter-Mechanikwerte (docs/Weltzeit_und_Wettersystem.md §6/§11):
+/// Timing der Weatherwechsel plus die Persistenzinterval. Alle Werte are
+/// per config.env übersteuerbar — NO Balancing/Architektur values.
+#[derive(Debug, Clone)]
+pub struct WeatherCfg {
+    /// Minimum duration (ms) a weather state persists before a change.
+    pub transition_min_ms: u64,
+    /// Maximum duration (ms); the next change is rolled within [min..max].
+    pub transition_max_ms: u64,
+    /// Interval (ms) between periodic persistence flushes of the world state.
+    pub persist_interval_ms: u64,
+}
+
+impl Default for WeatherCfg {
+    fn default() -> Self {
+        WeatherCfg {
+            transition_min_ms: 120_000,
+            transition_max_ms: 600_000,
+            persist_interval_ms: 30_000,
+        }
+    }
+}
+
+pub fn weather_config(env: &HashMap<String, String>) -> WeatherCfg {
+    let min = num1(env, "WEATHER_TRANSITION_MIN_MS", 120_000);
+    let max = num1(env, "WEATHER_TRANSITION_MAX_MS", 600_000);
+    WeatherCfg {
+        transition_min_ms: min,
+        transition_max_ms: max.max(min),
+        persist_interval_ms: num1(env, "WEATHER_PERSIST_INTERVAL_MS", 30_000),
+    }
+}
+
 /// Vorläufige Combat-V1-Balancingwerte (docs/Kampfsystem.md §§4–7, 17).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -545,6 +578,8 @@ pub struct Config {
     pub inventory: InventoryCfg,
     /// Loot System V1 (docs/Lootsystem.md).
     pub loot: LootCfg,
+    /// Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md).
+    pub weather: WeatherCfg,
     /// Progressionssystem V1 (docs/Erfahrung_und_Progressionssystem.md).
     pub progression: ProgressionCfg,
     /// Spieler-Persistenz Stufe B (docs/Player_Persistenz.md).
@@ -688,6 +723,7 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         loot: loot_config(&env),
         progression: progression_config(&env),
         persist: persist_config(&env),
+        weather: weather_config(&env),
         // Audit 4.4, R-6: Ein ungültiger expliziter SEC_-Wert ist ein
         // Startfehler und kein Default. Der Fehler nutzt denselben
         // `Result`-Kanal wie die fehlende Realm-Konfiguration darüber und

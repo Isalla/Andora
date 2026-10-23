@@ -1172,6 +1172,58 @@ pub async fn save_npc_state(
     }
 }
 
+/// Serverautoritatives Wetterzustand (realm-wide, single row id=0).
+/// docs/Weltzeit_und_Wettersystem.md §10/§12: persistent realm/world state,
+/// resumed (not reset) after a Realm-Neustart.
+pub async fn load_weather_state(
+    pool: &Pool<MySql>,
+) -> Result<Option<crate::weather::WeatherRow>, String> {
+    sqlx::query_as::<_, crate::weather::WeatherRow>(
+        "SELECT current, next, intensity, started_at_ms, next_at_ms, revision \
+         FROM weather_state WHERE id = 0",
+    )
+    .persistent(false)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Wetterzustand laden: {e}"))
+}
+
+impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for crate::weather::WeatherRow {
+    fn from_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(crate::weather::WeatherRow {
+            current: row.try_get("current")?,
+            next: row.try_get("next")?,
+            intensity: row.try_get("intensity")?,
+            started_at_ms: row.try_get("started_at_ms")?,
+            next_at_ms: row.try_get("next_at_ms")?,
+            revision: row.try_get("revision")?,
+        })
+    }
+}
+
+/// Schreibt den autoritativen Wetterzustand (single row id=0).
+pub async fn save_weather_state(pool: &Pool<MySql>, row: &crate::weather::WeatherRow) {
+    let result = sqlx::query(
+        "INSERT INTO weather_state (id, current, next, intensity, started_at_ms, \
+         next_at_ms, revision) VALUES (0, ?, ?, ?, ?, ?, ?) \
+         ON DUPLICATE KEY UPDATE current = VALUES(current), next = VALUES(next), \
+         intensity = VALUES(intensity), started_at_ms = VALUES(started_at_ms), \
+         next_at_ms = VALUES(next_at_ms), revision = VALUES(revision)",
+    )
+    .bind(row.current.clone())
+    .bind(row.next.clone())
+    .bind(row.intensity)
+    .bind(row.started_at_ms)
+    .bind(row.next_at_ms)
+    .bind(row.revision)
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        log::error!("{}", db_error_line("save_weather_state", "0", db_error_class(&e)));
+    }
+}
+
 /// Content-Definition einer Fähigkeit (ability_definitions, Migration 010).
 use crate::combat::ability::AbilityDefRow;
 

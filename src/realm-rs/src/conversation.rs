@@ -376,7 +376,7 @@ pub async fn handle(
     let npc_id = data.get("npc_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let raw_text = data.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
 
-    let (pid, lang, npc_name, npc_kind, npc_alive, in_range, too_long, empty) = {
+    let (pid, lang, npc_name, npc_kind, npc_alive, in_range, too_long, empty, weather_ctx, weather_key, season_key) = {
         let world = ctx.shared.lock().await;
         let Some(pid) = world.by_conn
             .get(&conn_id)
@@ -410,7 +410,13 @@ pub async fn handle(
         let chars = raw_text.chars().count();
         let too_long = chars > MAX_INPUT_CHARS;
         let empty = raw_text.trim().is_empty();
-        (pid.clone(), lang, npc_name, npc_kind, npc_alive, in_range, too_long, empty)
+        // Realm-decided weather context (docs/Weltzeit_und_Wettersystem.md §16/
+        // §17): NPCs may READ the autoritative weather in conversation; the
+        // Coordinator/NPC-KI never changes it. Fills jobContext.world.
+        let weather_ctx = world.weather.coordinator_context();
+        let weather_key = world.weather.current.key().to_string();
+        let season_key = world.weather.season.key().to_string();
+        (pid.clone(), lang, npc_name, npc_kind, npc_alive, in_range, too_long, empty, weather_ctx, weather_key, season_key)
     };
 
     if empty {
@@ -442,6 +448,9 @@ pub async fn handle(
         "locale": lang,
         "npc": format!("{} ({})", npc_name, npc_kind),
         "situation": "the player starts a free-text conversation with this NPC",
+        "world": weather_ctx,
+        "weather": weather_key,
+        "season": season_key,
     });
 
     // B — bounded roundtrip under a REAL total deadline (submit + polling).

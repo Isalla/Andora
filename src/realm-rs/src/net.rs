@@ -1323,6 +1323,7 @@ mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
+            weather: crate::config::WeatherCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
@@ -4191,6 +4192,7 @@ mod tests {
                 }],
                 min_level: 1,
                 requires: vec![],
+                weather: Vec::new(),
                 repeatable: false,
             })
                 .unwrap();

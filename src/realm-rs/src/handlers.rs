@@ -736,6 +736,14 @@ pub async fn handle_hello(
         let _ = tx.send(Frame::new(0, s2c::INVENTORY, payload).encode());
     }
 
+    // Current autoritative weather (S2C 26 WEATHER, Push seq 0): the joining
+    // player receives the confirmed realm state on world-join (docs §13). The
+    // client only represents it; it never decides the state.
+    {
+        let world = ctx.shared.lock().await;
+        let _ = tx.send(world.weather.frame().encode());
+    }
+
     // Own HP initial state (S2C 4 STATE, owner only): HP comes ONLY via STATE
     // (WELCOME/VITALS never carry HP) — without this push the Client would
     // show uninitialized values after login. Push (seq 0), same frame shape
@@ -1468,13 +1476,23 @@ pub async fn handle_pickup(
         return;
     };
     let groups = ctx.groups.lock().await;
+    // Serverseitig Sammel-/Pickupreach (docs/Weltzeit_und_Wettersystem.md §15):
+    // the autoritative weather scales the loot pickup radius (rain/fog/storm
+    // reduce gathering reach). The client never decides this; the server checks
+    // it against its own RAM state. A local LootCfg copy carries the effective
+    // radius so the global config stays untouched.
+    let loot_cfg = {
+        let mut c = ctx.cfg.loot.clone();
+        c.pickup_radius = c.pickup_radius * world.weather.pickup_factor();
+        c
+    };
     let result = crate::loot::attempt_pickup(
         &mut world,
         &pid,
         &groups,
         &loot_id,
         Instant::now(),
-        &ctx.cfg.loot,
+        &loot_cfg,
     );
     if !world.players.contains_key(&pid) {
         return;
@@ -2349,6 +2367,7 @@ pub(crate) mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
+            weather: crate::config::WeatherCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
@@ -3129,6 +3148,7 @@ pub(crate) mod tests {
             loot: crate::config::loot_config(&env),
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
+            weather: crate::config::WeatherCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
@@ -4239,6 +4259,7 @@ pub(crate) mod tests {
                 }],
                 min_level: 1,
                 requires: vec![],
+                weather: Vec::new(),
                 repeatable: false,
             }).unwrap();
             svc

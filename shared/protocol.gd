@@ -25,8 +25,14 @@ const S2C = {
 	"ABILITY": 16, "EFFECT": 17,
 	"GROUP_INFO": 18, "GROUP_INVITE_S2C": 19, "GROUP_TOAST": 20,
 	"ATTRIBUTE_RESULT": 21, "PLAYER_TRADE": 22, "INVENTORY": 23,
-	"VITALS": 24, "INVENTORY_RESULT": 25
+	"VITALS": 24, "INVENTORY_RESULT": 25,
+	"WEATHER": 26
 }
+# WEATHER (26) Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md):
+# Push (seq 0) to all online players on join (after WELCOME) and on change.
+# {weather: sunny|rain|fog|storm|snow|cloudy, intensity, sight_factor,
+#  season: spring|summer|autumn|winter, revision}. The client only REPRESENTS it
+# (visuals + sight-limited rendering); it never decides it.
 # Gruppensystem V1 (docs/Gruppensystem.md §§1–9, server: group.rs/handlers.rs):
 # C2S 13 GROUP_INVITE {target_id}; 14 GROUP_INVITE_REACT {group_id, accept};
 # 15 GROUP_SUGGEST {target_id}; 16 GROUP_SUGGEST_DECIDE {target_id, accept};

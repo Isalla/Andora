@@ -295,6 +295,10 @@ pub struct World {
     pub persistent_cooldown_ids: HashSet<String>,
     pub tick: TickStat,
     pub started: Instant,
+    /// Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md). Realm-
+    /// wide current state; loaded from realm_state at startup, advanced per
+    /// Tick, persisted periodically. The client only represents it.
+    pub weather: crate::weather::Weather,
 }
 
 impl World {
@@ -327,6 +331,7 @@ impl World {
             persistent_cooldown_ids: HashSet::new(),
             tick: TickStat::default(),
             started: Instant::now(),
+            weather: crate::weather::Weather::initial(0, &crate::config::WeatherCfg::default()),
         }
     }
 
@@ -627,6 +632,11 @@ pub fn ensure_visible(o: &mut Player, p: &Player) {
 /// keine Borrow-Konflikte zwischen Leser (p) und Schreiber (q) entstehen.
 pub fn world_tick(world: &mut World, aofb_radius: f64) {
     let t0 = Instant::now();
+    // Serverseitig Sicht-Rule (docs/Weltzeit_und_Wettersystem.md §15): the
+    // autoritative weather reduces the AOFB broadcast radius (Fog/Storm ->
+    // fewer entities visible). The client never decides this; it only renders
+    // the resulting visibility. Weather NEVER extends beyond the config radius.
+    let aofb_radius = aofb_radius * world.weather.sight_factor();
     // Entity-Snapshot: Spieler + lebende/kehrende NPCs (tote sind unsichtbar).
     let mut snap: Vec<(String, String, f64, f64, f64, i32, i32)> = Vec::new();
     for p in world.players.values() {
@@ -792,6 +802,16 @@ pub fn push_own_state(world: &World, pid: &str) {
         p.send(&own_state_frame(p));
     }
 }
+/// Send the current WEATHER state to every online player (docs §13: the
+/// confirmed realm state reaches all who are in the world; realm-wide weather,
+/// so all share it). Called only on an actual change (revision bumped).
+pub fn broadcast_weather(world: &World) {
+    let f = world.weather.frame();
+    for p in world.players.values() {
+        p.send(&f);
+    }
+}
+
 /// HP-/Mana-Regeneration pro Tick (docs/Attribute_und_Regeneration.md
 /// (Kampf 15 %, stehend 100 %, sitzend 125 % — Sitzbonus nie im Kampf),
 /// intern f64 mit Carry je Ressource; gedeckelt auf 0 bzw. max. Tote
@@ -986,6 +1006,41 @@ mod tests {
     fn chat_truncated_to_240_chars() {
         assert_eq!(truncate_chat(&"x".repeat(300)).chars().count(), 240);
         assert_eq!(truncate_chat("hi"), "hi");
+    }
+
+    /// Serverseitig Sicht-Rule (docs/Weltzeit_und_Wettersystem.md §15): the
+    /// autoritative weather reduces the AOFB broadcast radius. A player at 15 m
+    /// is seen at aofb 20 in clear weather but NOT in dense fog (factor ~0.55
+    /// -> effective ~11 m). The client never decides this.
+    #[test]
+    fn fog_reduces_visible_radius() {
+        let mk = |id: &str, x: f64| {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut p = test_player(id, x, 0.0).0;
+            p.tx = tx;
+            p
+        };
+        // Clear: a sees b at 15 m (aofb 20).
+        {
+            let mut w = World::new();
+            w.players.insert("a".to_string(), mk("a", 0.0));
+            w.players.insert("b".to_string(), mk("b", 15.0));
+            world_tick(&mut w, 20.0);
+            assert!(w.players.get("a").unwrap().entities.contains("b"));
+        }
+        // Fog (intensity 0 -> factor 0.55 -> effective 11 m): a does NOT see b.
+        {
+            let mut w = World::new();
+            w.weather.current = crate::weather::WeatherState::Fog;
+            w.weather.intensity = 0;
+            w.players.insert("a".to_string(), mk("a", 0.0));
+            w.players.insert("b".to_string(), mk("b", 15.0));
+            world_tick(&mut w, 20.0);
+            assert!(
+                !w.players.get("a").unwrap().entities.contains("b"),
+                "fog must reduce server-side sight below 15 m"
+            );
+        }
     }
 
     // ── AUTH-03: Verbindungs-Einzigkeit, Takeover, owner-sicheres Cleanup ──

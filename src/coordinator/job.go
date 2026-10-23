@@ -49,6 +49,14 @@ type jobContext struct {
 	World        string `json:"world,omitempty"`
 	NPC          string `json:"npc,omitempty"`
 	Situation    string `json:"situation,omitempty"`
+	// Weather is the realm-decided current weather (ANDORA-WEATHER_V1,
+	// docs/Weltzeit_und_Wettersystem.md §16/§17). The realm supplies it; the
+	// coordinator never derives world state of its own. NPCs may reference it
+	// in conversations and dynamic quest suggestions.
+	Weather string `json:"weather,omitempty"`
+	// Season is the realm-decided calendar season (ANDORA-WEATHER_V1_1_SEASONS):
+	// spring|summer|autumn|winter, derived from the UTC calendar. Realm-supplied.
+	Season string `json:"season,omitempty"`
 	// AllowActionJSON requests a structured action answer (docs/
 	// ai_system.md section 9). The coordinator validates it against
 	// AllowedActionKeys and treats it strictly as a suggestion.

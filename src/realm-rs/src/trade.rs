@@ -974,6 +974,7 @@ mod tests {
             ],
             min_level: 1,
             requires: vec![],
+            weather: Vec::new(),
             repeatable: false,
         }
     }

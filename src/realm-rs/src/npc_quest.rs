@@ -185,11 +185,15 @@ pub async fn handle(
             };
             let player = &world.players[&pid];
             let done = completed(player);
+            // Autoritative current weather (docs/Weltzeit_und_Wettersystem.md
+            // §15/§16): weather-dependent Quest-Conditions are checked SERVER-
+            // side against the realm state, never a client claim.
+            let cw = world.weather.current.key();
             if action == "quest_offers" {
                 let offers: Vec<Value> = service.definitions()
                     .filter(|def| def.giver.as_deref() == Some(npc.content_id.as_str()))
                     .filter(|def| !pending_has(&world, &pid, &def.id))
-                    .filter(|def| service.state_for(def, player.quests.get(&def.id), player.level, &done) == QuestState::Available)
+                    .filter(|def| service.state_for_at(def, player.quests.get(&def.id), player.level, &done, Some(cw)) == QuestState::Available)
                     .map(|def| json!({"quest_id": def.id, "title_key": def.title_key,
                         "description_key": def.description_key, "state": "AVAILABLE", "can_accept": true,
                         "turn_in": def.turn_in,
@@ -225,7 +229,7 @@ pub async fn handle(
             }
             // No Repeatable-Erweiterung: NPC-Offers/Annahme only for the
             // actually derived AVAILABLE, never COMPLETED.
-            if service.state_for(def, player.quests.get(&quest_id), player.level, &done)
+            if service.state_for_at(def, player.quests.get(&quest_id), player.level, &done, Some(cw))
                 != QuestState::Available
             {
                 let reason = match player.quests.get(&quest_id).map(|q| q.state) {
@@ -236,7 +240,7 @@ pub async fn handle(
                 reject(&tx, seq, &action, &npc_id, reason);
                 return;
             }
-            match service.accept(&quest_id, player.quests.get(&quest_id), player.level, &done) {
+            match service.accept_at(&quest_id, player.quests.get(&quest_id), player.level, &done, Some(cw)) {
                 Ok(state) => state,
                 Err(error) => {
                     reject(&tx, seq, &action, &npc_id, quest_reason(&error));
@@ -706,6 +710,7 @@ pub(crate) mod tests {
                     description_key: format!("quest.{id}.description"),
                     min_level: level,
                     requires,
+                    weather: Vec::new(),
                     repeatable: false,
                     objectives: vec![crate::quest::QuestObjective {
                         id: "kill".into(),

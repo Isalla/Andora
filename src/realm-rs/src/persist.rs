@@ -2806,6 +2806,7 @@ mod tests {
             }],
             min_level: 1,
             requires: Vec::new(),
+            weather: Vec::new(),
             repeatable: false,
             rewards: crate::quest::RewardBundle { exp: 11, idia: 7 },
         };

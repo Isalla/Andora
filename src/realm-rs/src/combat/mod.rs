@@ -414,8 +414,13 @@ pub fn combat_tick(
                             n.target_id = None;
                             n.no_link_since = None;
                             // Respawn: Contentwert (§21) — Definition-Wert
-                            // oder Default je Kategorie.
-                            let respawn_ms = n.respawn_ms.max(0) as u64;
+                            // oder Default je Kategorie, scaled by the autoritative
+                            // weather (docs/Weltzeit_und_Wettersystem.md §15: a
+                            // Spawn-Condition; storm/fog only DELAY respawns,
+                            // never instant-spawn — factor >= 1.0).
+                            let respawn_ms =
+                                (n.respawn_ms.max(0) as f64 * world.weather.respawn_factor())
+                                    .round() as u64;
                             n.respawn_after = Some(wall_now + Duration::from_millis(respawn_ms));
                             // Monster-Tod: Claim ungültig.
                             n.claimed_by = None;
@@ -1286,6 +1291,7 @@ mod tests {
             }],
             min_level: 1,
             requires: Vec::new(),
+            weather: Vec::new(),
             repeatable: false,
         })
             .unwrap();

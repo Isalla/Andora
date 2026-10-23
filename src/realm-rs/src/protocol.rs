@@ -98,6 +98,12 @@ pub mod s2c {
     /// bestätigt; Ablehnung (ok:false + stabiler reason) verändert nichts.
     /// `seq` ist ausschließlich Korrelation und wird zurückgespiegelt.
     pub const INVENTORY_RESULT: i64 = 25;
+    /// Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md). Push
+    /// (seq 0) to all online players on join (after WELCOME) and on change.
+    /// {weather: sunny|rain|fog|storm|snow|cloudy, intensity, sight_factor,
+    ///  season: spring|summer|autumn|winter, revision}. The client only
+    /// represents it; it never decides the state.
+    pub const WEATHER: i64 = 26;
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -169,6 +175,7 @@ mod tests {
         assert_eq!(s2c::INVENTORY, 23);
         assert_eq!(s2c::VITALS, 24);
         assert_eq!(s2c::INVENTORY_RESULT, 25);
+        assert_eq!(s2c::WEATHER, 26);
     }
 
     #[test]

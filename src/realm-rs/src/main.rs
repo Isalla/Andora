@@ -37,6 +37,7 @@ mod security;
 mod session_watch;
 mod spool;
 mod trade;
+mod weather;
 mod world;
 
 use std::path::PathBuf;
@@ -247,7 +248,9 @@ async fn async_main() -> Result<(), String> {
     let npc_cfg = cfg.npc.clone();
     let loot_cfg = cfg.loot.clone();
     let prog_cfg = cfg.progression.clone();
+    let weather_cfg = cfg.weather.clone();
     let mut combat_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
+    let mut weather_rng = combat::SplitMix64::new(combat::SplitMix64::time_seed());
 
     // NPC-/Monster-Instanzen aus Content + persistentem Zustand laden
     // (Migration 009). Ein Ladefehler bremst den Start (kein halber Realm).
@@ -359,8 +362,33 @@ async fn async_main() -> Result<(), String> {
         w.merchant_catalog = merchant_catalog;
     }
 
+    // Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md §10/§12):
+    // the persisted realm-wide state is RESUMED at startup (never reset to a
+    // fixed standard). A missing/unknown row falls back to a safe initial
+    // state; a load error does NOT abort the start (weather is atmospheric and
+    // the realm must stay playable — unlike Content registries, which abort).
+    {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let weather = match db::load_weather_state(&pool).await {
+            Ok(Some(row)) => crate::weather::from_row(&row, now_ms, &cfg.weather),
+            Ok(None) => crate::weather::Weather::initial(now_ms, &cfg.weather),
+            Err(e) => {
+                log::warn!("Wetter-Startup-Load: {e} — safe initial state (atmospheric, non-fatal)");
+                crate::weather::Weather::initial(now_ms, &cfg.weather)
+            }
+        };
+        log::info!("Wetter geladen: {} (rev {})", weather.current.key(), weather.revision);
+        let mut w = tick_shared.lock().await;
+        w.weather = weather;
+    }
+
     let persist_interval = std::time::Duration::from_millis(cfg.npc.persist_interval_ms);
+    let weather_persist_interval = std::time::Duration::from_millis(cfg.weather.persist_interval_ms.max(1));
     let persist_pool = pool.clone();
+    let weather_pool = pool.clone();
     // Ability-Registry (Content, Migration 010) für den Tick.
     let mut ability_registry = combat::ability::AbilityRegistry::new();
     for row in db::load_ability_definitions(&persist_pool).await? {
@@ -370,11 +398,26 @@ async fn async_main() -> Result<(), String> {
     let ticker = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(tick_ms));
         let mut last_persist = std::time::Instant::now();
+        let mut last_weather_persist = std::time::Instant::now();
         loop {
             interval.tick().await;
             let mut world = tick_shared.lock().await;
             world::world_regen_tick(&mut world, tick_ms);
             world::world_tick(&mut world, aofb);
+            // Serverautoritatives Wetter-Wechsel (docs §3/§9): advance the
+            // realm-wide state; on a genuine change broadcast the confirmed
+            // state to all online players (docs §13). No Tick-spam: only on
+            // revision bump.
+            {
+                let wnow_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                if crate::weather::advance(&mut world, &weather_cfg, &mut weather_rng, wnow_ms) {
+                    world::broadcast_weather(&world);
+                    log::debug!("Wetter change: {} (rev {})", world.weather.current.key(), world.weather.revision);
+                }
+            }
             let now = std::time::Instant::now();
             let wall_now = std::time::SystemTime::now();
             let mut groups_guard = tick_groups.lock().await;
@@ -494,6 +537,17 @@ async fn async_main() -> Result<(), String> {
                     }
                 });
                 log::debug!("NPC-Zustand persistiert");
+            }
+            // Periodische Persistenz des autoritativen Wetterzustand (docs
+            // §10/§12): survives a Realm-Neustart; a save error is logged, the
+            // in-RAM state stays authoritative (same direction as NPC states).
+            if now.duration_since(last_weather_persist) >= weather_persist_interval {
+                last_weather_persist = now;
+                let row = crate::weather::to_row(&world.weather);
+                let wp = weather_pool.clone();
+                tokio::spawn(async move {
+                    db::save_weather_state(&wp, &row);
+                });
             }
         }
     });

@@ -206,6 +206,12 @@ pub struct QuestDefinition {
     /// Dokumentierte Voraussetzung „vorherige Quest" (§14): Quest-IDs,
     /// die vor der Annahme abgeschlossen sein müssen.
     pub requires: Vec<String>,
+    /// Wetterabhängige Questcondition (ANDORA-WEATHER_V1, docs/Weltzeit_und
+    /// Wettersystem.md §15/§16): leer = any weather. Otherwise the Quest is
+    /// AVAILABLE/acceptable only while the autoritative realm weather is one
+    /// of these keys (sunny|rain|fog|storm). Server-checked, never client-
+    /// decided; reuses the existing availability path (prerequisites_met).
+    pub weather: Vec<String>,
     /// V1-Quest ist grundsätzlich nicht wiederholbar; `true` erlaubt eine
     /// erneute Annahme nach COMPLETED (sofern eine Definition dies
     /// ausdrücklich vorsieht, §17-Testliste).
@@ -558,7 +564,18 @@ impl QuestService {
         character_level: u32,
         completed_quests: &HashSet<String>,
     ) -> QuestState {
-        if prerequisites_met(def, character_level, completed_quests) {
+        self.derive_availability_at(def, character_level, completed_quests, None)
+    }
+
+    /// Wetter-aware availability (see derive_availability).
+    pub fn derive_availability_at(
+        &self,
+        def: &QuestDefinition,
+        character_level: u32,
+        completed_quests: &HashSet<String>,
+        current_weather: Option<&str>,
+    ) -> QuestState {
+        if prerequisites_met(def, character_level, completed_quests, current_weather) {
             QuestState::Available
         } else {
             QuestState::Hidden
@@ -575,16 +592,28 @@ impl QuestService {
         character_level: u32,
         completed_quests: &HashSet<String>,
     ) -> QuestState {
+        self.state_for_at(def, current, character_level, completed_quests, None)
+    }
+
+    /// Wetter-aware effective state (see state_for).
+    pub fn state_for_at(
+        &self,
+        def: &QuestDefinition,
+        current: Option<&CharacterQuestState>,
+        character_level: u32,
+        completed_quests: &HashSet<String>,
+        current_weather: Option<&str>,
+    ) -> QuestState {
         match current {
             Some(c) => match c.state {
                 QuestState::Active | QuestState::Completed | QuestState::Failed => c.state,
                 // Persistierte HIDDEN/AVAILABLE-Zeilen sind kein Wahrheits-
                 // wert (§27.5) → weiterhin sauber ableiten.
                 QuestState::Hidden | QuestState::Available => {
-                    self.derive_availability(def, character_level, completed_quests)
+                    self.derive_availability_at(def, character_level, completed_quests, current_weather)
                 }
             },
-            None => self.derive_availability(def, character_level, completed_quests),
+            None => self.derive_availability_at(def, character_level, completed_quests, current_weather),
         }
     }
 
@@ -606,6 +635,20 @@ impl QuestService {
         character_level: u32,
         completed_quests: &HashSet<String>,
     ) -> Result<CharacterQuestState, QuestError> {
+        self.accept_at(quest_id, current, character_level, completed_quests, None)
+    }
+
+    /// Wetter-aware Annahme (ANDORA-WEATHER_V1): `current_weather` = Some(cw)
+    /// evaluates the Quest's weather requirement against the autoritative realm
+    /// weather; None ignores the gate (weather-agnostic caller).
+    pub fn accept_at(
+        &self,
+        quest_id: &str,
+        current: Option<&CharacterQuestState>,
+        character_level: u32,
+        completed_quests: &HashSet<String>,
+        current_weather: Option<&str>,
+    ) -> Result<CharacterQuestState, QuestError> {
         let def = self
             .find_definition(quest_id)
             .ok_or(QuestError::UnknownQuest)?;
@@ -623,7 +666,7 @@ impl QuestService {
                 _ => {}
             }
         }
-        if !prerequisites_met(def, character_level, completed_quests) {
+        if !prerequisites_met(def, character_level, completed_quests, current_weather) {
             return Err(QuestError::NotAvailable);
         }
         let now = now_ms();
@@ -1049,8 +1092,18 @@ fn prerequisites_met(
     def: &QuestDefinition,
     character_level: u32,
     completed_quests: &HashSet<String>,
+    current_weather: Option<&str>,
 ) -> bool {
-    character_level >= def.min_level && def.requires.iter().all(|q| completed_quests.contains(q))
+    // current_weather = None → the weather gate is NOT evaluated (used by the
+    // weather-agnostic convenience callers/tests). Some(cw) → the Quest is
+    // available only if it has no weather requirement or cw is among them.
+    character_level >= def.min_level
+        && def.requires.iter().all(|q| completed_quests.contains(q))
+        && (
+            current_weather.is_none()
+                || def.weather.is_empty()
+                || def.weather.iter().any(|w| w == current_weather.unwrap())
+        )
 }
 
 /// The actually loaded Content-Registries (Monster-/NPC-`content_id` from
@@ -1223,9 +1276,9 @@ fn build_quest_definition(
         return Err(QuestLoadError::Invalid("field 'requirements' missing or not a Table".into()));
     };
     for k in req.keys() {
-        if k != "level" && k != "requires" {
+        if k != "level" && k != "requires" && k != "weather" {
             return Err(QuestLoadError::Invalid(
-                format!("unknown field 'requirements.{}' (V1: level, requires)", k)
+                format!("unknown field 'requirements.{}' (V1: level, requires, weather)", k)
             ));
         }
     }
@@ -1255,6 +1308,30 @@ fn build_quest_definition(
                 match q.as_str() {
                     Some(s) if !s.is_empty() => out.push(s.to_string()),
                     _ => return Err(QuestLoadError::Invalid("'requirements.requires' entries must be non-empty Strings".into()
+                    )),
+                }
+            }
+            out
+        }
+    };
+
+    let weather: Vec<String> = match req.get("weather") {
+        None => Vec::new(),
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return Err(QuestLoadError::Invalid("'requirements.weather' must be an Array".into()
+                ));
+            };
+            let mut out = Vec::with_capacity(arr.len());
+            for s in arr {
+                match s.as_str() {
+                    Some(k) if crate::weather::WeatherState::from_key(k).is_some() =>
+                        out.push(k.to_string()),
+                    Some(_) => return Err(QuestLoadError::Invalid(
+                        "'requirements.weather' entries must be sunny|rain|fog|storm".into()
+                    )),
+                    None => return Err(QuestLoadError::Invalid(
+                        "'requirements.weather' entries must be Strings".into()
                     )),
                 }
             }
@@ -1351,6 +1428,7 @@ fn build_quest_definition(
         objectives,
         min_level,
         requires,
+        weather,
         repeatable,
         rewards,
     };
@@ -1467,6 +1545,7 @@ mod tests {
             objectives,
             min_level,
             requires: requires.iter().map(|s| s.to_string()).collect(),
+            weather: Vec::new(),
             repeatable: false,
         }
     }
@@ -2807,6 +2886,7 @@ return quest
                 objectives: Vec::new(),
                 min_level: 1,
                 requires: Vec::new(),
+                weather: Vec::new(),
                 repeatable: false,
             }),
             Err(QuestError::InvalidDefinition(_))
@@ -2847,5 +2927,57 @@ return quest
             )),
             Err(QuestError::InvalidDefinition(_))
         ));
+    }
+
+    /// Wetter-dependent Quest-Condition (ANDORA-WEATHER_V1, docs/Weltzeit_und
+    /// Wettersystem.md §15/§16): a Quest requiring rain is AVAILABLE only while
+    /// the autoritative realm weather is rain. Checked SERVER-side via the
+    /// existing availability path; never a client claim.
+    #[test]
+    fn weather_gated_quest_available_only_in_matching_weather() {
+        let mut svc = QuestService::new();
+        svc.register(quest_def(
+            "rain_q",
+            1,
+            &[],
+            vec![QuestObjective {
+                id: "a".into(),
+                kind: ObjectiveType::Kill,
+                target: "wolf".into(),
+                required: 1,
+            }],
+        ));
+        // Re-register the SAME id with a rain requirement so the registry entry
+        // itself carries the weather gate (accept_at reads the registry).
+        let base = svc.find_definition("rain_q").unwrap().clone();
+        let mut gated = base;
+        gated.weather = vec!["rain".into()];
+        // Replace via unregister+register is not exposed; instead build a fresh
+        // service that holds the gated definition directly.
+        let mut svc2 = QuestService::new();
+        svc2.register(gated);
+        let def2 = svc2.find_definition("rain_q").unwrap();
+        let empty = completed_set(&[]);
+        // Sunny -> Hidden.
+        assert_eq!(
+            svc2.derive_availability_at(def2, 1, &empty, Some("sunny")),
+            QuestState::Hidden
+        );
+        // Rain -> Available.
+        assert_eq!(
+            svc2.derive_availability_at(def2, 1, &empty, Some("rain")),
+            QuestState::Available
+        );
+        // Accept is gated identically (server-side, reads the registry entry).
+        assert!(
+            svc2.accept_at("rain_q", None, 1, &empty, Some("sunny")).is_err(),
+            "sunny must not allow accepting a rain-gated quest"
+        );
+        assert!(
+            svc2.accept_at("rain_q", None, 1, &empty, Some("rain")).is_ok(),
+            "rain allows accepting"
+        );
+        // Weather-agnostic convenience caller (None) ignores the gate.
+        assert_eq!(svc2.state_for(def2, None, 1, &empty), QuestState::Available);
     }
 }
