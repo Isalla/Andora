@@ -147,76 +147,102 @@ func (s *Server) close() {
 }
 
 // ratePreAuth applies the per-client rate limit before service
-// authentication (caller unknown, so the key is IP + path).
-func (s *Server) ratePreAuth(next http.Handler) http.Handler {
+// authentication (caller unknown, so the key is IP + the matched route).
+// The route is resolved through the registered mux patterns: a request
+// path that no route serves collapses into one fixed bucket, so varying
+// the path can no longer mint a fresh, never-limited counter per unique
+// path (H-2). The IP stays part of the key, so the per-client bound and
+// the proxy/IP trust rules are unchanged.
+func (s *Server) ratePreAuth(mux http.Handler, routes map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := "ip:" + clientIP(r, s.cfg.TrustedProxies) + ":" + r.URL.Path
+		key := "ip:" + clientIP(r, s.cfg.TrustedProxies) + ":" + rateLimitPathKey(routes, r.URL.Path)
 		if ok, retry := s.rl.allow(key); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
-		next.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
 	})
+}
+
+// rateLimitPathKey maps a request path to a bounded rate-limit key
+// segment: a path served by a registered route keeps its route as key,
+// every other path collapses into one fixed bucket. The per-IP limit
+// therefore stays effective when an attacker varies the path, instead of
+// minting a fresh, never-limited counter per unique path (H-2).
+func rateLimitPathKey(routes map[string]bool, path string) string {
+	if routes[path] {
+		return path
+	}
+	return "*"
 }
 
 // handler assembles the complete middleware + routing chain of the
 // service. Tests build a Server directly and use the same chain.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/auth/verify", s.handleAuthVerify)
-	mux.HandleFunc("/account/register", s.handleAccountRegister)
-	mux.HandleFunc("/account/password/change", s.handlePasswordChange)
-	mux.HandleFunc("/account/recovery/request", s.handleRecoveryRequest)
-	mux.HandleFunc("/account/recovery/confirm", s.handleRecoveryConfirm)
-	mux.HandleFunc("/account/permissions", s.handleAccountPermissions)
-	mux.HandleFunc("/session/create", s.handleSessionCreate)
-	mux.HandleFunc("/session/validate", s.handleSessionValidate)
-	mux.HandleFunc("/session/revoke", s.handleSessionRevoke)
+	// routes records every registered pattern so the pre-auth rate limiter
+	// can key a request by its matched route instead of the raw, attacker-
+	// controlled path (H-2). reg keeps registration and the route table in
+	// one place so the two can never drift apart.
+	routes := map[string]bool{}
+	reg := func(pattern string, h func(http.ResponseWriter, *http.Request)) {
+		mux.HandleFunc(pattern, h)
+		routes[pattern] = true
+	}
+	reg("/health", s.handleHealth)
+	reg("/status", s.handleStatus)
+	reg("/auth/verify", s.handleAuthVerify)
+	reg("/account/register", s.handleAccountRegister)
+	reg("/account/password/change", s.handlePasswordChange)
+	reg("/account/recovery/request", s.handleRecoveryRequest)
+	reg("/account/recovery/confirm", s.handleRecoveryConfirm)
+	reg("/account/permissions", s.handleAccountPermissions)
+	reg("/session/create", s.handleSessionCreate)
+	reg("/session/validate", s.handleSessionValidate)
+	reg("/session/revoke", s.handleSessionRevoke)
 	// Batch-Statusabfrage fuer den Realm-Revocation-Poller (AUTH-02b).
 	// Nutzt dieselbe Berechtigung wie /session/validate.
-	mux.HandleFunc("/session/status/batch", s.handleSessionStatusBatch)
-	mux.HandleFunc("/realms", s.handleRealms)
-	mux.HandleFunc("/handoff/create", s.handleHandoffCreate)
-	mux.HandleFunc("/handoff/validate", s.handleHandoffValidate)
+	reg("/session/status/batch", s.handleSessionStatusBatch)
+	reg("/realms", s.handleRealms)
+	reg("/handoff/create", s.handleHandoffCreate)
+	reg("/handoff/validate", s.handleHandoffValidate)
 	// LEGACY: kein separater Worldserver mehr (Kette Auth/API → Login → Realm).
-	mux.HandleFunc("/world/authenticate", s.handleWorldAuthenticate)
-	mux.HandleFunc("/world/heartbeat", s.handleWorldHeartbeat)
-	mux.HandleFunc("/twofactor/status", s.handleTwofactorStatus)
-	mux.HandleFunc("/twofactor/setup", s.handleTwofactorSetup)
-	mux.HandleFunc("/twofactor/enable", s.handleTwofactorEnable)
-	mux.HandleFunc("/twofactor/disable", s.handleTwofactorDisable)
-	mux.HandleFunc("/twofactor/reset", s.handleTwofactorReset)
-	mux.HandleFunc("/devices/list", s.handleDevicesList)
-	mux.HandleFunc("/devices/revoke", s.handleDevicesRevoke)
-	mux.HandleFunc("/security/events", s.handleSecurityEvents)
-	mux.HandleFunc("/parental/status", s.handleParentalStatus)
-	mux.HandleFunc("/parental/setup", s.handleParentalSetup)
-	mux.HandleFunc("/parental/update", s.handleParentalUpdate)
-	mux.HandleFunc("/parental/remove", s.handleParentalRemove)
-	mux.HandleFunc("/parental/pin/change", s.handleParentalPinChange)
-	mux.HandleFunc("/parental/pin/verify", s.handleParentalPinVerify)
-	mux.HandleFunc("/parental/extension", s.handleParentalExtension)
-	mux.HandleFunc("/parental/periods", s.handleParentalPeriods)
-	mux.HandleFunc("/parental/periods/add", s.handleParentalPeriodAdd)
-	mux.HandleFunc("/parental/periods/remove", s.handleParentalPeriodRemove)
-	mux.HandleFunc("/parental/exceptions/add", s.handleParentalExceptionAdd)
-	mux.HandleFunc("/parental/exceptions/remove", s.handleParentalExceptionRemove)
-	mux.HandleFunc("/parental/notifications", s.handleParentalNotifications)
-	mux.HandleFunc("/parental/notifications/deliver", s.handleParentalNotificationsDeliver)
+	reg("/world/authenticate", s.handleWorldAuthenticate)
+	reg("/world/heartbeat", s.handleWorldHeartbeat)
+	reg("/twofactor/status", s.handleTwofactorStatus)
+	reg("/twofactor/setup", s.handleTwofactorSetup)
+	reg("/twofactor/enable", s.handleTwofactorEnable)
+	reg("/twofactor/disable", s.handleTwofactorDisable)
+	reg("/twofactor/reset", s.handleTwofactorReset)
+	reg("/devices/list", s.handleDevicesList)
+	reg("/devices/revoke", s.handleDevicesRevoke)
+	reg("/security/events", s.handleSecurityEvents)
+	reg("/parental/status", s.handleParentalStatus)
+	reg("/parental/setup", s.handleParentalSetup)
+	reg("/parental/update", s.handleParentalUpdate)
+	reg("/parental/remove", s.handleParentalRemove)
+	reg("/parental/pin/change", s.handleParentalPinChange)
+	reg("/parental/pin/verify", s.handleParentalPinVerify)
+	reg("/parental/extension", s.handleParentalExtension)
+	reg("/parental/periods", s.handleParentalPeriods)
+	reg("/parental/periods/add", s.handleParentalPeriodAdd)
+	reg("/parental/periods/remove", s.handleParentalPeriodRemove)
+	reg("/parental/exceptions/add", s.handleParentalExceptionAdd)
+	reg("/parental/exceptions/remove", s.handleParentalExceptionRemove)
+	reg("/parental/notifications", s.handleParentalNotifications)
+	reg("/parental/notifications/deliver", s.handleParentalNotificationsDeliver)
 	// Mail-System V1 (Go-API-Wrapper → Realm; fail-closed without MAIL_FORWARD_URL).
 	// Spieler-Endpunkte validieren die Spielersession; /mail/send bleibt
 	// service-only und ist in V1 unbenutzt (Realm erzeugt Refunds selbst).
-	mux.HandleFunc("/mail/send", s.handleMailSend)
-	mux.HandleFunc("/mail/list", s.handleMailList)
-	mux.HandleFunc("/mail/read", s.handleMailRead)
-	mux.HandleFunc("/mail/claim", s.handleMailClaim)
-	mux.HandleFunc("/mail/quota", s.handleMailQuota)
-	mux.HandleFunc("/mail/receive", s.handleMailReceive)
-	mux.HandleFunc("/mail/notification", s.handleMailNotification)
-	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux)))
+	reg("/mail/send", s.handleMailSend)
+	reg("/mail/list", s.handleMailList)
+	reg("/mail/read", s.handleMailRead)
+	reg("/mail/claim", s.handleMailClaim)
+	reg("/mail/quota", s.handleMailQuota)
+	reg("/mail/receive", s.handleMailReceive)
+	reg("/mail/notification", s.handleMailNotification)
+	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux, routes)))
 }
 
 // listeners opens one or more TCP listeners according to the

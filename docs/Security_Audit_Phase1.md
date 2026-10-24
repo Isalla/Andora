@@ -11,7 +11,7 @@
 | # | Class | Finding | Location |
 |---|---|---|---|
 | H-1 | HOCH | TOTP replay race: replay-check is a pre-read, `SetLastTOTP` unconditional (TOCTOU) | `src/api/handlers.go:154`, `src/api/store.go:1192-1199` |
-| H-2 | HOCH | Rate-Limit-Key embeds attacker-controlled Path → per-IP limit bypassable via unique paths, `rl.hits` grows within sweep window | `src/api/auth.go:115,182-220`, `src/api/server.go:153`, `src/login/server.go:59` |
+| H-2 | HOCH (FIXED) | Rate-Limit-Key embeds attacker-controlled Path → per-IP limit bypassable via unique paths, `rl.hits` grows within sweep window | `src/api/auth.go:115,182-220`, `src/api/server.go:153`, `src/login/server.go:59` |
 | H-3 | HOCH | Realm health/internal-mail listener defaults to public bind (`0.0.0.0`); trust boundary is HMAC only | `src/realm-rs/src/config.rs:96-102`, `:694-696` |
 | M-1 | MITTEL | HMAC signature compare in Go `authorize()` not constant-time (`hmacEqual` exists, unused there) | `src/api/auth.go:107`, `src/api/crypto.go:125-127` |
 | M-2 | MITTEL | `security_events` unbounded: `ListSecurityEvents` without LIMIT, no retention (cf. `docs/Security.md` P-33) | `src/api/store.go:1830-1847` |
@@ -194,6 +194,12 @@ Page-level citations were not extracted from the EPUBs in this phase; references
 - **Fix:** `SetLastTOTP` (`store.go`) is now a conditional atomic UPDATE `WHERE id = ? AND (last_totp_counter IS NULL OR last_totp_counter < ?)` + `RowsAffected`→`sql.ErrNoRows` (`errWrapNoRows`). Handler (`handlers.go`) maps `sql.ErrNoRows` to the indistinguishable `two_factor_required` fail shape; other DB errors stay 500. FakeStore (`fakestore_test.go:503`) mirrors the condition.
 - **Tests:** `TestTwoFactorTOTPConcurrentReplay` (20 rounds × 2 concurrent goroutines, same step, fresh account per round – exactly one winner; `-count=20` re-runs green), `TestSetLastTOTPAtomicStep` (NULL/equal/older/newer/reset semantics). Sequential replay tests still pass; full Go suite green, `gofmt -l` clean.
 - **Limits:** verified on FakeStore only – no live-MariaDB proof (same boundary as P-34). No changes to H-2/H-3 or other findings.
+
+### H-2 – Rate-Limit-Key umgehung via URL-Pfade (FIXED, offline-verified)
+- **Root cause:** the pre-auth limiter keyed on the raw, attacker-controlled path: `ratePreAuth` key = `"ip:" + clientIP + ":" + r.URL.Path` (`src/api/server.go:153`, `src/login/server.go:59`). Every unique path minted a fresh limiter entry that passed once, so the per-IP burst limit was bypassable for unknown paths (they 404 at the mux but the limiter never bound them), and `rl.hits` grew with the number of distinct paths per ~3 min sweep window → memory pressure.
+- **Fix (targeted, existing middleware/routing kept):** the pre-auth middleware now keys a request by its **matched registered route**, not the raw path. `handler()` builds a `routes` set through a `reg`-closure that registers on the mux and records the pattern in one place (no drift); `ratePreAuth(mux, routes)` maps the path via `rateLimitPathKey`: a registered route keeps its route as key segment, every path no route serves collapses into ONE fixed bucket `"*"`. The IP stays in the key (`"ip:" + clientIP + ":" + routeKey`), so the per-client bound and the TrustedProxies/`clientIP` trust rules are unchanged; burst/perMin and the sweep are untouched. The post-auth key (`src/api/auth.go:115`, `"svc:"+cred.ID+":"+path`) is inherently bounded (only registered routes reach a handler) and was left unchanged.
+- **Tests:** `TestRateLimitPreAuthUnknownPathBypass` (same IP, burst+1 unique unknown paths → 429 and exactly 1 live limiter key, proving the per-IP bound is not bypassed and the key space does not grow with path count), `TestRateLimitPreAuthProtectedEndpoint` (repeated unauthenticated hits on a protected endpoint reach 429), `TestRateLimitPreAuthEndpointSeparation` (exhausting `/status` does not block `/health`), `TestRateLimitPreAuthDistinctIPs` (per-IP independence of the fixed bucket) — added in both `api_test.go` and `login_test.go`. Existing `TestRateLimitPreAuth` still passes; full Go suites green (`go test ./...`), `gofmt -l` clean.
+- **Limits:** verified on the in-process limiter only (same shape as production, one auth service per process); no live-MariaDB proof (not needed here). No changes to H-1/H-3 or other findings.
 
 ## 11. Status of related known points
 

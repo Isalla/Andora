@@ -2663,3 +2663,107 @@ func TestSessionStatusBatchLookupTimingIsConcurrencySafe(t *testing.T) {
 		t.Fatalf("measurement after concurrent lookups: last=%v max=%v ok=%v", last, max, ok)
 	}
 }
+
+// --- H-2: the rate-limit key must not be multiplied by attacker-chosen paths ---
+
+// rawGet runs an unauthenticated GET with an explicit client IP through the
+// full handler chain (pre-auth rate limit, then routing/authorization).
+func rawGet(t *testing.T, srv *Server, remoteAddr, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// heldKeys counts the limiter's live key entries (test seam: same package).
+// It proves the key space stays bounded when the path varies.
+func heldKeys(t *testing.T, srv *Server) int {
+	t.Helper()
+	srv.rl.mu.Lock()
+	defer srv.rl.mu.Unlock()
+	return len(srv.rl.hits)
+}
+
+// (1) repeated requests from the same IP against the same protected endpoint
+// must reach the per-IP limit even though the endpoint is never authorized.
+func TestRateLimitPreAuthProtectedEndpoint(t *testing.T) {
+	srv := testServer(t)
+	ip := "10.0.0.8:80"
+	burst := srv.cfg.RateLimitBurst
+	for i := 0; i < burst; i++ {
+		if r := rawGet(t, srv, ip, "/auth/verify"); r.Code != http.StatusUnauthorized {
+			t.Fatalf("pre-auth request %d to protected endpoint: want 401, got %d", i, r.Code)
+		}
+	}
+	last := rawGet(t, srv, ip, "/auth/verify")
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("repeated same protected endpoint must hit the limit, got %d", last.Code)
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header missing")
+	}
+}
+
+// (2) varying unknown paths from the same IP must NOT bypass the per-IP
+// limit and must NOT mint one counter per unique path.
+func TestRateLimitPreAuthUnknownPathBypass(t *testing.T) {
+	srv := testServer(t)
+	ip := "10.0.0.9:80"
+	burst := srv.cfg.RateLimitBurst
+	var last *httptest.ResponseRecorder
+	for i := 0; i <= burst; i++ {
+		last = rawGet(t, srv, ip, "/nope/"+strconv.Itoa(i))
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("varying unknown paths must still hit the per-IP limit, got %d", last.Code)
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header missing")
+	}
+	// all unknown paths collapsed into ONE counter: the key space did not grow
+	// with the number of distinct paths (H-2).
+	if n := heldKeys(t, srv); n != 1 {
+		t.Fatalf("expected exactly 1 rate-limit key for %d unknown paths, got %d", burst+1, n)
+	}
+}
+
+// (3) legitimate endpoint groups stay correctly separated: exhausting one
+// endpoint's counter must not block a different endpoint.
+func TestRateLimitPreAuthEndpointSeparation(t *testing.T) {
+	srv := testServer(t)
+	ip := "10.0.0.7:80"
+	burst := srv.cfg.RateLimitBurst
+	for i := 0; i < burst; i++ {
+		if r := rawGet(t, srv, ip, "/status"); r.Code != http.StatusOK {
+			t.Fatalf("status request %d: want 200, got %d", i, r.Code)
+		}
+	}
+	if r := rawGet(t, srv, ip, "/status"); r.Code != http.StatusTooManyRequests {
+		t.Fatalf("status bucket exhausted: want 429, got %d", r.Code)
+	}
+	if r := rawGet(t, srv, ip, "/health"); r.Code != http.StatusOK {
+		t.Fatalf("separate endpoint group must not be blocked by /status: got %d", r.Code)
+	}
+}
+
+// (4) different client IPs keep independent limits: the fixed unknown-path
+// bucket is still per-IP, not global.
+func TestRateLimitPreAuthDistinctIPs(t *testing.T) {
+	srv := testServer(t)
+	burst := srv.cfg.RateLimitBurst
+	var last *httptest.ResponseRecorder
+	for i := 0; i <= burst; i++ {
+		last = rawGet(t, srv, "10.0.0.1:80", "/x")
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("IP A unknown bucket: want 429, got %d", last.Code)
+	}
+	if r := rawGet(t, srv, "10.0.0.2:80", "/x"); r.Code == http.StatusTooManyRequests {
+		t.Fatalf("IP B must not inherit IP A's limit")
+	}
+	if n := heldKeys(t, srv); n != 2 {
+		t.Fatalf("expected 2 per-IP keys, got %d", n)
+	}
+}

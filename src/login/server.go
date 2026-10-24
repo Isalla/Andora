@@ -42,27 +42,53 @@ func newServer(cfg *Config) *Server {
 // chain against a fake Auth-API.
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/status", s.handleStatus)
-	mux.HandleFunc("/login", s.handleLogin)
-	mux.HandleFunc("/logout", s.handleLogout)
-	mux.HandleFunc("/realms", s.handleRealms)
-	mux.HandleFunc("/handoff", s.handleHandoff)
-	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux)))
+	// routes records every registered pattern so the pre-auth rate limiter
+	// can key a request by its matched route instead of the raw, attacker-
+	// controlled path (H-2). reg keeps registration and the route table in
+	// one place so the two can never drift apart.
+	routes := map[string]bool{}
+	reg := func(pattern string, h func(http.ResponseWriter, *http.Request)) {
+		mux.HandleFunc(pattern, h)
+		routes[pattern] = true
+	}
+	reg("/health", s.handleHealth)
+	reg("/status", s.handleStatus)
+	reg("/login", s.handleLogin)
+	reg("/logout", s.handleLogout)
+	reg("/realms", s.handleRealms)
+	reg("/handoff", s.handleHandoff)
+	reg("/parental", s.handleParental)
+	return loggingMiddleware(noCacheHandler(s.ratePreAuth(mux, routes)))
 }
 
 // ratePreAuth applies the per-client rate limit (caller unknown, so the
-// key is IP + path). Same shape as the Auth/API-Service.
-func (s *Server) ratePreAuth(next http.Handler) http.Handler {
+// key is IP + the matched route). The route is resolved through the
+// registered mux patterns: a path that no route serves collapses into
+// one fixed bucket, so varying the path can no longer mint a fresh,
+// never-limited counter per unique path (H-2). The IP stays part of the
+// key, so the per-client bound and the proxy/IP trust rules are unchanged.
+func (s *Server) ratePreAuth(mux http.Handler, routes map[string]bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := "ip:" + clientIP(r, s.cfg.TrustedProxies) + ":" + r.URL.Path
+		key := "ip:" + clientIP(r, s.cfg.TrustedProxies) + ":" + rateLimitPathKey(routes, r.URL.Path)
 		if ok, retry := s.rl.allow(key); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
-		next.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
 	})
+}
+
+// rateLimitPathKey maps a request path to a bounded rate-limit key
+// segment: a path served by a registered route keeps its route as key,
+// every other path collapses into one fixed bucket. The per-IP limit
+// therefore stays effective when an attacker varies the path, instead of
+// minting a fresh, never-limited counter per unique path (H-2).
+func rateLimitPathKey(routes map[string]bool, path string) string {
+	if routes[path] {
+		return path
+	}
+	return "*"
 }
 
 // listeners opens one or more TCP listeners according to the

@@ -26,9 +26,11 @@ const (
 // scheme (same construction as src/api/auth.go) and answers canned
 // payloads. seen records the decoded request bodies per path.
 type fakeAuth struct {
-	t      *testing.T
-	seen   map[string][]map[string]any
-	verify map[string]any
+	t         *testing.T
+	seen      map[string][]map[string]any
+	verify    map[string]any
+	parStatus int
+	parBody   map[string]any
 }
 
 func newFakeAuth(t *testing.T) (*fakeAuth, *httptest.Server) {
@@ -81,6 +83,18 @@ func newFakeAuth(t *testing.T) (*fakeAuth, *httptest.Server) {
 			write(map[string]any{"handoff_token": "ho-1", "expires_at": "2030-01-01T00:01:00Z"})
 		case "/session/revoke":
 			write(map[string]any{"revoked": true})
+		case "/parental/status", "/parental/setup", "/parental/update", "/parental/remove",
+			"/parental/pin/change", "/parental/pin/verify", "/parental/periods",
+			"/parental/periods/add", "/parental/periods/remove",
+			"/parental/exceptions/add", "/parental/exceptions/remove":
+			if f.parStatus != 0 {
+				w.WriteHeader(f.parStatus)
+				if f.parBody != nil {
+					write(f.parBody)
+				}
+				return
+			}
+			write(map[string]any{"canned": true})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -256,5 +270,205 @@ func TestHealth(t *testing.T) {
 		if rec.Code != 200 {
 			t.Fatalf("%s: want 200, got %d", p, rec.Code)
 		}
+	}
+}
+
+// --- parental proxy tests (POST /parental) ---
+
+func hasKey(m map[string]any, k string) bool {
+	_, ok := m[k]
+	return ok
+}
+
+func hasPath(seen map[string][]map[string]any, k string) bool {
+	_, ok := seen[k]
+	return ok
+}
+
+func TestParentalStatusPassthrough(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	code, out := doPost(t, srv, "/parental", `{"session_id":"good","action":"status"}`)
+	if code != 200 || out["canned"] != true {
+		t.Fatalf("parental status: code=%d body=%v", code, out)
+	}
+	seen := f.seen["/parental/status"]
+	if seen == nil || len(seen) != 1 || seen[0]["account_id"] != float64(7) {
+		t.Fatalf("forwarded account_id wrong: %v", seen)
+	}
+}
+
+func TestParentalAccountOverride(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	code, _ := doPost(t, srv, "/parental",
+		`{"session_id":"good","action":"setup","account_id":999,"parent_pin":"1234","evil":"x"}`)
+	if code != 200 {
+		t.Fatalf("setup: code=%d", code)
+	}
+	seen := f.seen["/parental/setup"]
+	if seen == nil || len(seen) != 1 {
+		t.Fatalf("setup not forwarded once: %v", seen)
+	}
+	var fwd map[string]any = seen[0]
+	if fwd["account_id"] != float64(7) || hasKey(fwd, "evil") || hasKey(fwd, "session_id") {
+		t.Fatalf("forwarded body wrong: %v", fwd)
+	}
+}
+
+func TestParentalUnknownAction(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	code, out := doPost(t, srv, "/parental", `{"session_id":"good","action":"notifications"}`)
+	if code != 400 || out["error"] != "unknown action" {
+		t.Fatalf("unknown action: code=%d body=%v", code, out)
+	}
+	if hasPath(f.seen, "/session/validate") || hasPath(f.seen, "/parental/notifications") {
+		t.Fatalf("auth called for unknown action")
+	}
+}
+
+func TestParentalInvalidSession(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	code, out := doPost(t, srv, "/parental", `{"session_id":"bad","action":"status"}`)
+	if code != 401 || out["error"] != "invalid session" {
+		t.Fatalf("invalid session: code=%d body=%v", code, out)
+	}
+	if hasPath(f.seen, "/parental/status") {
+		t.Fatalf("parental called with invalid session")
+	}
+}
+
+func TestParentalPinMismatch(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	f.parStatus = 401
+	code, out := doPost(t, srv, "/parental", `{"session_id":"good","action":"pin_verify","parent_pin":"9999"}`)
+	if code != 401 || out["error"] != "parent pin does not match" {
+		t.Fatalf("pin mismatch: code=%d body=%v", code, out)
+	}
+}
+
+func TestParentalConflict(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	f.parStatus = 409
+	code, _ := doPost(t, srv, "/parental",
+		`{"session_id":"good","action":"periods_add","parent_pin":"1234","starts_at":"2026-10-01","ends_at":"2026-10-08"}`)
+	if code != 409 {
+		t.Fatalf("conflict: code=%d", code)
+	}
+}
+
+func TestParentalFieldFilter(t *testing.T) {
+	f, auth := newFakeAuth(t)
+	defer auth.Close()
+	srv := testServer(t, auth.URL)
+	code, _ := doPost(t, srv, "/parental",
+		`{"session_id":"good","action":"exceptions_add","parent_pin":"1234","date":"2026-10-20","extra_minutes":60,"handoff_token":"steal"}`)
+	if code != 200 {
+		t.Fatalf("exceptions_add: code=%d", code)
+	}
+	seen := f.seen["/parental/exceptions/add"]
+	if seen == nil || len(seen) != 1 {
+		t.Fatalf("exceptions_add not forwarded once: %v", seen)
+	}
+	var fwd map[string]any = seen[0]
+	if hasKey(fwd, "handoff_token") || hasKey(fwd, "session_id") || fwd["account_id"] != float64(7) {
+		t.Fatalf("forwarded body wrong: %v", fwd)
+	}
+}
+
+func TestParentalAuthDown(t *testing.T) {
+	srv := testServer(t, "http://127.0.0.1:9")
+	code, out := doPost(t, srv, "/parental", `{"session_id":"good","action":"status"}`)
+	if code != 503 || out["error"] != "auth service unavailable" {
+		t.Fatalf("auth down: code=%d body=%v", code, out)
+	}
+}
+
+// --- H-2: the rate-limit key must not be multiplied by attacker-chosen paths ---
+
+// rawGet runs an unauthenticated GET with an explicit client IP through the
+// full handler chain (pre-auth rate limit, then routing).
+func rawGet(t *testing.T, srv *Server, remoteAddr, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = remoteAddr
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// heldKeys counts the limiter's live key entries (test seam: same package).
+func heldKeys(t *testing.T, srv *Server) int {
+	t.Helper()
+	srv.rl.mu.Lock()
+	defer srv.rl.mu.Unlock()
+	return len(srv.rl.hits)
+}
+
+// (2) varying unknown paths from the same IP must NOT bypass the per-IP
+// limit and must NOT mint one counter per unique path.
+func TestRateLimitPreAuthUnknownPathBypass(t *testing.T) {
+	srv := testServer(t, "http://127.0.0.1:1")
+	ip := "10.0.0.9:80"
+	burst := srv.cfg.RateLimitBurst
+	var last *httptest.ResponseRecorder
+	for i := 0; i <= burst; i++ {
+		last = rawGet(t, srv, ip, "/nope/"+strconv.Itoa(i))
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("varying unknown paths must still hit the per-IP limit, got %d", last.Code)
+	}
+	if last.Header().Get("Retry-After") == "" {
+		t.Fatal("Retry-After header missing")
+	}
+	if n := heldKeys(t, srv); n != 1 {
+		t.Fatalf("expected exactly 1 rate-limit key for %d unknown paths, got %d", burst+1, n)
+	}
+}
+
+// (3) legitimate endpoint groups stay correctly separated.
+func TestRateLimitPreAuthEndpointSeparation(t *testing.T) {
+	srv := testServer(t, "http://127.0.0.1:1")
+	ip := "10.0.0.7:80"
+	burst := srv.cfg.RateLimitBurst
+	for i := 0; i < burst; i++ {
+		if r := rawGet(t, srv, ip, "/status"); r.Code != http.StatusOK {
+			t.Fatalf("status request %d: want 200, got %d", i, r.Code)
+		}
+	}
+	if r := rawGet(t, srv, ip, "/status"); r.Code != http.StatusTooManyRequests {
+		t.Fatalf("status bucket exhausted: want 429, got %d", r.Code)
+	}
+	if r := rawGet(t, srv, ip, "/health"); r.Code != http.StatusOK {
+		t.Fatalf("separate endpoint group must not be blocked by /status: got %d", r.Code)
+	}
+}
+
+// (4) different client IPs keep independent limits.
+func TestRateLimitPreAuthDistinctIPs(t *testing.T) {
+	srv := testServer(t, "http://127.0.0.1:1")
+	burst := srv.cfg.RateLimitBurst
+	var last *httptest.ResponseRecorder
+	for i := 0; i <= burst; i++ {
+		last = rawGet(t, srv, "10.0.0.1:80", "/x")
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("IP A unknown bucket: want 429, got %d", last.Code)
+	}
+	if r := rawGet(t, srv, "10.0.0.2:80", "/x"); r.Code == http.StatusTooManyRequests {
+		t.Fatalf("IP B must not inherit IP A's limit")
+	}
+	if n := heldKeys(t, srv); n != 2 {
+		t.Fatalf("expected 2 per-IP keys, got %d", n)
 	}
 }
