@@ -507,6 +507,11 @@ func (f *fakeStore) SetLastTOTP(_ context.Context, accountID int, counter int, a
 	if acc == nil {
 		return sql.ErrNoRows
 	}
+	// mirrors the conditional UPDATE in store.go (H-1): strictly increasing
+	// step, NULL allowed once; equal/older steps and race losers get ErrNoRows.
+	if acc.LastTOTPCounter != nil && *acc.LastTOTPCounter >= counter {
+		return sql.ErrNoRows
+	}
 	acc.LastTOTPCounter = &counter
 	ts := at
 	acc.LastTOTPAt = &ts

@@ -157,6 +157,13 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if err := s.store.SetLastTOTP(ctx, acc.ID, int(counter), now); err != nil {
+				if err == sql.ErrNoRows {
+					// atomic single-use consumption lost: equal or older step, or
+					// the loser of a concurrent race (H-1). Same indistinguishable
+					// second-factor fail shape as a stale/replayed code.
+					need()
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "totp state update failed")
 				return
 			}

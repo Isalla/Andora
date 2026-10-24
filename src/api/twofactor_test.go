@@ -3,9 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base32"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -223,6 +228,101 @@ func TestTwoFactorTOTPReplay(t *testing.T) {
 	body = tfVerify(t, client, map[string]any{"username": "replay", "password": "correct-horse", "totp_code": valid})
 	if body["valid"] != false || body["two_factor_required"] != true {
 		t.Fatalf("replay should be rejected: %v", body)
+	}
+}
+
+// --- H-1: TOTP single-use must be atomic (docs/Security_Audit_Phase1.md) ---
+
+// tfVerifyRaw runs one /auth/verify request through the full handler chain
+// WITHOUT test-thread assertions, so it is safe to call from goroutines.
+// Returns the HTTP status and whether the answer says valid:true.
+func tfVerifyRaw(srv *Server, cred ServiceCred, payload map[string]any) (int, bool) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, false
+	}
+	ts := time.Now().Unix()
+	req := httptest.NewRequest("POST", "/auth/verify", bytes.NewReader(body))
+	req.Header.Set("X-Andora-Service", cred.ID)
+	req.Header.Set("X-Andora-Timestamp", strconv.FormatInt(ts, 10))
+	req.Header.Set("X-Andora-Signature", signPayload(cred.Secret, "POST", "/auth/verify", "", ts, body))
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		return rec.Code, false
+	}
+	return rec.Code, out["valid"] == true
+}
+
+func TestTwoFactorTOTPConcurrentReplay(t *testing.T) {
+	srv := tfTestServer(t)
+	cred := srv.cfg.Services["svc-all"]
+
+	// Many rounds: every round enrolls its own account and fires two
+	// concurrent verifications with the SAME valid TOTP step. Whichever
+	// interleaving occurs (both pre-reads pass = the confirmed race, or a
+	// fully sequential order caught by the pre-read), at most one request
+	// may receive valid:true. The atomic DB-side consumption guarantees
+	// this; the test reproduces it reproducibly across 20 independent
+	// accounts.
+	for round := 0; round < 20; round++ {
+		name := "raceuser" + strconv.Itoa(round)
+		_, raw, _ := tfEnroll(t, srv, name, "correct-horse")
+		code := tfTotpNow(raw)
+		var results [2]bool
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				_, ok := tfVerifyRaw(srv, cred, map[string]any{
+					"username": name, "password": "correct-horse", "totp_code": code,
+				})
+				results[idx] = ok
+				wg.Done()
+			}(i)
+		}
+		wg.Wait()
+		accepted := 0
+		for _, ok := range results {
+			if ok {
+				accepted++
+			}
+		}
+		if accepted != 1 {
+			t.Fatalf("round %d: exactly one may succeed, got %d", round, accepted)
+		}
+	}
+}
+
+func TestSetLastTOTPAtomicStep(t *testing.T) {
+	srv := tfTestServer(t)
+	fs := srv.store.(*fakeStore)
+	acc := addAccount(t, fs, "atomicstep", "correct-horse", "atomicstep@example.com", false)
+	ctx := context.Background()
+
+	// NULL -> first consumption succeeds
+	if err := fs.SetLastTOTP(ctx, acc.ID, 100, time.Now()); err != nil {
+		t.Fatalf("first step must succeed: %v", err)
+	}
+	// identical step -> rejected (race loser / replay)
+	if err := fs.SetLastTOTP(ctx, acc.ID, 100, time.Now()); err != sql.ErrNoRows {
+		t.Fatalf("identical step must get ErrNoRows, got %v", err)
+	}
+	// older step -> rejected
+	if err := fs.SetLastTOTP(ctx, acc.ID, 99, time.Now()); err != sql.ErrNoRows {
+		t.Fatalf("older step must get ErrNoRows, got %v", err)
+	}
+	// strictly newer step -> succeeds
+	if err := fs.SetLastTOTP(ctx, acc.ID, 101, time.Now()); err != nil {
+		t.Fatalf("newer step must succeed: %v", err)
+	}
+	// reset (2FA secret save clears the counter) -> NULL again allowed
+	if err := fs.SaveTwoFactorSecret(ctx, acc.ID, []byte("x")); err != nil {
+		t.Fatalf("save secret failed: %v", err)
+	}
+	if err := fs.SetLastTOTP(ctx, acc.ID, 1, time.Now()); err != nil {
+		t.Fatalf("NULL counter must allow consumption: %v", err)
 	}
 }
 

@@ -1189,13 +1189,26 @@ func (s *sQLStore) ClearTwoFactorSecret(ctx context.Context, accountID int) erro
 	return nil
 }
 
+// SetLastTOTP consumes the TOTP step atomically (H-1, docs/Security_Audit_Phase1.md):
+// the UPDATE applies only if the stored counter is NULL or STRICTLY smaller
+// than the presented counter. Two concurrent requests presenting the same
+// step cannot both succeed: exactly one UPDATE reports RowsAffected == 1,
+// every other request (equal or older step, or a lost race) gets sql.ErrNoRows
+// and the handler rejects it as replay. The handler's pre-read stays a fast
+// path only; the DB-side condition is the authoritative single-use guard.
 func (s *sQLStore) SetLastTOTP(ctx context.Context, accountID int, counter int, at time.Time) error {
-	if _, err := s.db.ExecContext(ctx,
-		"UPDATE accounts SET last_totp_counter = ?, last_totp_at = ? WHERE id = ?",
-		counter, at, accountID); err != nil {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE accounts SET last_totp_counter = ?, last_totp_at = ?
+		 WHERE id = ? AND (last_totp_counter IS NULL OR last_totp_counter < ?)`,
+		counter, at, accountID, counter)
+	if err != nil {
 		return fmt.Errorf("set last_totp: %w", err)
 	}
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set last_totp: %w", err)
+	}
+	return errWrapNoRows(n)
 }
 
 // --- P-34: transactional helpers for the business 2FA operations ---
