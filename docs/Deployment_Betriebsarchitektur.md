@@ -263,3 +263,81 @@ Die Vorlagen unter `deploy/` (systemd-Unit-Vorlagen usw.) beschreiben den bisher
 > Realm-Versionen (Live, Classic, Test, Event) können parallel und unabhängig betrieben werden.
 
 > Client-Plattformen ändern die Server-Zielarchitektur nicht: alle offiziellen Clients verbinden sich mit denselben Realms (`Mehrere_Offizielle_Clients.md`).
+
+## 10. Netzwerkgrenzen der Realm-Listener (Audit H-3)
+
+Der Realm-Server betreibt zwei getrennte TCP-Listener mit unterschiedlichen
+Defaults:
+
+| Listener | Port-Variable | Default-Port | Inhalt | Bindung bei leerem Bind-Host |
+|---|---|---|---|---|
+| WebSocket-Weltserver (Spielclients) | `PORT_WS` | 3001 | Spielprotokoll (HELLO, MOVE, …) | alle Interfaces — **unverändert** |
+| Health-/Status-/Mail-Inbound | `PORT_HTTP` | 3002 | `/health`, `/status`, `/players`, `/characters`, `POST /internal/mail/*` | **nur `127.0.0.1`** (H-3) |
+
+### Endpunkte des Health-Listeners und ihre Preisgabe
+
+| Endpunkt | Authentifizierung | Gezeigte Daten |
+|---|---|---|
+| `GET /health` | keine | realm_id, Laufzeit |
+| `GET /status` | keine | **Software-Version**, Spielerzahl, Tick-Latenzen, Persistenzstatus, Quarantänebestand |
+| `GET /players` | keine | **Name, Charakter-ID, Zone, Ping und Inaktivitätszeit jeder online spielenden Person** |
+| `GET /characters` | gültige Login-Session (Validierung über die Auth-API) | ausschließlich eigene Charaktere (id + Name) |
+| `POST /internal/mail/*` | Service-HMAC (`MAIL_INBOUND_*`), ±300 s-Zeitfenster, Eigentumsprüfung gegen die Realm-DB | Mail-Bestand des betroffenen Charakters |
+
+`/status` und `/players` sind nicht harmlos: die Versionsnummer erlaubt einen
+Fingerabdruck der eingesetzten Realm-Version, `/players` gibt Anwesenheit und
+Aktivitätsverhalten online spielender Personen preis. Beide Antworten bleiben
+unverändert (keine API-Änderung); die Begrenzung erfolgt über Bind-Adresse
+und Netzwerk.
+
+### Bindung und Startwarnung
+
+* Kein oder leerer `HEALTH_BIND_HOST` → der Health-Listener lauscht
+  ausschließlich auf `127.0.0.1`.
+* Ausdrücklich gesetzte Werte behalten ihre Bedeutung: `0.0.0.0`, `::`,
+  `auto`, `ipv4`, `ipv6`, `dual`, IP-Literale (auch private) und Hostnamen.
+* Eine ausdrücklich konfigurierte **Wildcard-Bindung** (`0.0.0.0` oder `[::]`)
+  wird beim Start mit deutlicher Warnung protokolliert: Nennung der
+  betroffenen Bind-Adresse und Hinweis, dass `/health`, `/status` und
+  `/players` ohne Authentifizierung erreichbar sind. Secrets, Header oder
+  Konfigurationswerte erscheinen im Log nicht. Loopback-Bindungen erzeugen
+  keine Warnung.
+* Ein unauflösbarer Host ist ein Fehler des Health-Starts. Es wird nicht
+  still auf eine – erst recht nicht auf eine unsichere – Ersatzadresse
+  zurückgefallen.
+
+### Externe Aufrufer: Go-Mail-Forward und Charakterliste
+
+Auf den Health-Port (`PORT_HTTP`, Default 3002) richten sich zwei
+Ausnahmen von der Loopback-Betrachtung:
+
+* **Go-Mail-Forward:** `MAIL_FORWARD_URL` des Go-API zeigt auf
+  `POST /internal/mail/*` dieses Listeners.
+* **Charakterwahl der Spielclients:** `GET /characters` liegt auf demselben
+  Listener und wird vom Client über die Realm-`http_url` erreicht, die der
+  Login-Dienst aus `REALM_HTTP_URLS` liefert.
+
+Laufen Go-API und Realm auf verschiedenen Hosts oder in verschiedenen
+Containern, muss `HEALTH_BIND_HOST` ausdrücklich auf eine **interne**, dem
+Go-API erreichbare Adresse gesetzt werden (zum Beispiel `192.168.10.5` oder
+ein interner Hostname); der neue Loopback-Default würde diese Verbindungen
+abschneiden. Soll die Charakterliste Clients unmittelbar erreichbar sein,
+ist ebenfalls eine ausdrückliche Bindung (interne Adresse des Client-Netzes)
+oder ein Reverse-Proxy auf diesen Port zu wählen. Panel und Agent rufen
+`127.0.0.1:3002` auf (`deploy/conf/monitor.conf`, `deploy/conf/agent.conf`)
+und bleiben vom neuen Default unberührt.
+
+Empfohlen: Bindung an das interne Interface **und** netzwerkseitige
+Beschränkung des Health-Ports auf die Absender von Go-API und Panel
+(Firewall, Security Group oder Container-Netz). Die HMAC-Prüfung bleibt
+unverändert bestehen und ist die inhaltliche Trust-Grenze; sie ersetzt keine
+Netzwerksegmentierung.
+
+### Migration bestehender Installationen
+
+Installationen, die den Health-Listener bisher über den leeren Wert an alle
+Interfaces gebunden haben, lauschen nach diesem Stand nur noch auf dem
+Loopback. Für das bisherige Verhalten wird `HEALTH_BIND_HOST=0.0.0.0`
+ausdrücklich gesetzt; produktiv ist eine interne Adresse oder ein interner
+Hostname der bessere Wert. Der WebSocket-Listener (`WS_BIND_HOST`) bleibt
+vom Umstieg unberührt.

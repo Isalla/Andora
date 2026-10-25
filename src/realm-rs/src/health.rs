@@ -316,13 +316,42 @@ fn hmac_verify(a: &str, b: &str) -> bool {
     result == 0
 }
 
+/// Audit H-3: welche der aufgelösten Bind-Adressen sind **Wildcard**-
+/// Bindungen (`0.0.0.0` bzw. `[::]`)? Reine Entscheidungsfunktion, damit
+/// die Schwelle der Startwarnung ohne echte Bindung testbar ist. Loopback-,
+/// Einzel- und private Adressen ergeben eine leere Liste.
+fn wildcard_binds(addrs: &[std::net::SocketAddr]) -> Vec<std::net::SocketAddr> {
+    addrs
+        .iter()
+        .copied()
+        .filter(|a| a.ip().is_unspecified())
+        .collect()
+}
+
 async fn serve_with_characters(
     cfg: Arc<Config>,
     shared: Shared,
     persist: Arc<PersistRuntime>,
     characters: Option<CharacterListContext>,
 ) -> Result<(), String> {
-    let addrs = crate::config::bind_addrs(&cfg.health_bind_host, cfg.health_port)?;
+    // H-3: health-spezifische Auflösung. Ohne gesetztes HEALTH_BIND_HOST
+    // wird nur an Loopback gebunden; ausdruecklich gesetzte Werte
+    // (0.0.0.0, private IP, Hostname, IPv6) behalten ihre Semantik. Ein
+    // Aufloesungsfehler bleibt ein Fehler — keine stille Ersatzadresse.
+    let addrs = crate::config::health_bind_addrs(&cfg.health_bind_host, cfg.health_port)?;
+    // Eine ausdruecklich konfigurierte Wildcard-Bindung ist erlaubt, aber
+    // nicht still: deutliche Startwarnung je betroffener Adresse. Ins Log
+    // kommen ausschliesslich die Adresse und die betroffenen Endpunkte —
+    // keine Secrets, keine Header, keine Konfigurationswerte.
+    for addr in wildcard_binds(&addrs) {
+        log::warn!(
+            "health: WARNUNG - ausdruecklich an Wildcard-Adresse {addr} gebunden; \
+             /health, /status und /players sind ohne Authentifizierung erreichbar \
+             (POST /internal/mail/* nur mit gueltiger Service-Signatur). \
+             HEALTH_BIND_HOST auf eine interne Adresse beschraenken (Standard: \
+             127.0.0.1) oder die Adresse netzwerkseitig (Firewall / interne Zone) absichern."
+        );
+    }
     let mut listeners = Vec::with_capacity(addrs.len());
     for addr in &addrs {
         let listener = tokio::net::TcpListener::bind(addr)
@@ -635,6 +664,28 @@ mod tests {
 
     fn cfg() -> Config {
         test_config()
+    }
+
+    // Audit H-3: Die Startwarnung darf ausschließlich bei Wildcard-Bindungen
+    // (0.0.0.0 / [::]) ausgelöst werden — nie bei Loopback oder Einzeladresse.
+    #[test]
+    fn wildcard_binds_flags_only_unspecified_addresses() {
+        use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+        let all = vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 3002)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, 3002)),
+            "192.168.10.5:3002".parse::<SocketAddr>().unwrap(),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 3002)),
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 3002)),
+        ];
+        let w = wildcard_binds(&all);
+        assert_eq!(w.len(), 2, "nur 0.0.0.0 und [::] sind Wildcard-Bindungen");
+        assert!(w.iter().all(|a| a.ip().is_unspecified()));
+        assert!(
+            wildcard_binds(&[SocketAddr::from((Ipv4Addr::LOCALHOST, 3002))]).is_empty(),
+            "Loopback darf keine Warnung ausloesen"
+        );
+        assert!(wildcard_binds(&[]).is_empty());
     }
 
     #[tokio::test]

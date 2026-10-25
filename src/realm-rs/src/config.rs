@@ -87,6 +87,10 @@ pub fn bracket_url_host(raw: &str) -> String {
 
 /// Bind-Adressen aus einem Bind-Host-Wert (ein oder zwei SocketAddr).
 ///
+/// Hinweis H-3: Der Health-Listener ruft nicht dieses, sondern
+/// [`health_bind_addrs`] auf (eigener Loopback-Default). Die Semantik dieser
+/// Funktion — und damit der WebSocket-Listener — bleibt unverändert.
+///
 ///   "" | "auto"   -> 0.0.0.0 (IPv4, bisheriges Verhalten)
 ///   "ipv4" | "4"  -> 0.0.0.0
 ///   "ipv6" | "6"  -> [::] (IPv6-only)
@@ -116,6 +120,34 @@ pub fn bind_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
             resolve_addrs(other.trim(), port)
         }
     }
+}
+
+/// Bind-Adressen des **Health-/Status-/Mail-Inbound-Listeners** (Audit H-3).
+///
+/// Anders als [`bind_addrs`] bindet der Health-Listener bei **nicht
+/// gesetztem oder leerem** `HEALTH_BIND_HOST` an Loopback (`127.0.0.1`),
+/// nicht an alle Interfaces: `/health`, `/status` und `/players` sind ohne
+/// Authentifizierung erreichbar und `POST /internal/mail/*` vertraut allein
+/// der Service-Signatur. Die Absicherung soll nicht vom Zufall des
+/// Netzwerkdeployments abhängen.
+///
+/// Jeder **ausdrücklich** gesetzte Wert behält die bisherige Semantik von
+/// [`bind_addrs`] unverändert bei: `0.0.0.0`/`auto`/`ipv4`/`ipv6`/`dual`,
+/// IP-Literale (privat wie öffentlich, IPv4 und IPv6, geklammert oder
+/// ungeklammert) und Hostnamen. Ein Auflösungsfehler bleibt ein `Err` —
+/// es wird **nicht** still auf eine (unsichere) Ersatzadresse zurückgefallen.
+///
+/// Der WebSocket-Listener (Spielclients) nutzt weiterhin direkt
+/// [`bind_addrs`]; sein Verhalten („leer = alle Interfaces“) ist von H-3
+/// bewusst nicht betroffen.
+pub fn health_bind_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    if host.trim().is_empty() {
+        return Ok(vec![SocketAddr::from((
+            std::net::Ipv4Addr::LOCALHOST,
+            port,
+        ))]);
+    }
+    bind_addrs(host, port)
 }
 
 /// Löse einen Hostnamen auf und melde höchstens EINE Adresse pro Family.
@@ -541,8 +573,12 @@ pub struct Config {
     pub realm_id: u32,
     pub ws_port: u16,
     pub health_port: u16,
-    /// Bind-Hosts für WebSocket- und Health-Listener (siehe bind_addrs).
+    /// Bind-Host des WebSocket-Listeners für Spielclients (Semantik wie
+    /// `bind_addrs`: leer = alle Interfaces — von H-3 bewusst unberührt).
     pub ws_bind_host: String,
+    /// Bind-Host des Health-/Mail-Inbound-Listeners (Semantik wie
+    /// `health_bind_addrs`: leer/nicht gesetzt = Loopback `127.0.0.1`;
+    /// ausdrücklich gesetzte Werte verhalten sich wie `bind_addrs`).
     pub health_bind_host: String,
     pub tick_ms: u64,
     pub aofb_radius: f64,
@@ -900,6 +936,112 @@ mod tests {
         assert!(v6lit[0].is_ipv6());
         let v6litb = bind_addrs("[::1]", 3001).unwrap();
         assert_eq!(v6lit, v6litb);
+    }
+
+    // ── Audit H-3: sicherer Default des Health-Listeners ──────────────────
+    //
+    // Der Health-Listener (/health, /status, /players ohne Authentifizierung;
+    // POST /internal/mail/* nur per Service-HMAC) soll ohne ausdrückliche
+    // Betreiberentscheidung ausschließlich auf Loopback lauschen.
+
+    #[test]
+    fn health_bind_default_is_loopback() {
+        use std::net::Ipv4Addr;
+        let want = vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 3002u16))];
+        // nicht gesetzt / leer -> Loopback, gerade NICHT 0.0.0.0
+        assert_eq!(health_bind_addrs("", 3002).unwrap(), want);
+        assert_eq!(health_bind_addrs("   ", 3002).unwrap(), want);
+        // Das gemeinsame bind_addrs (WebSocket-Listener) bleibt unveraendert:
+        // leer = alle Interfaces wie bisher.
+        assert_eq!(
+            bind_addrs("", 3002).unwrap(),
+            vec![SocketAddr::from((Ipv4Addr::UNSPECIFIED, 3002))]
+        );
+    }
+
+    #[test]
+    fn health_bind_explicit_values_keep_their_semantics() {
+        use std::net::Ipv4Addr;
+        // ausdruecklicher Loopback
+        assert_eq!(
+            health_bind_addrs("127.0.0.1", 3002).unwrap(),
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 3002))]
+        );
+        // ausdrueckliche Wildcards bleiben erlaubt (der Listener warnt nur)
+        assert_eq!(
+            health_bind_addrs("0.0.0.0", 3002).unwrap(),
+            vec![SocketAddr::from((Ipv4Addr::UNSPECIFIED, 3002))]
+        );
+        let w6 = health_bind_addrs("::", 3002).unwrap();
+        assert!(w6[0].is_ipv6() && w6[0].ip().is_unspecified());
+        // Aliaswerte verhalten sich wie vor H-3
+        assert!(health_bind_addrs("auto", 3002).unwrap()[0]
+            .ip()
+            .is_unspecified());
+        assert_eq!(health_bind_addrs("dual", 3002).unwrap().len(), 2);
+        // ausdrueckliche private Adresse (getrennte Go-/Rust-Hosts)
+        let priv4 = health_bind_addrs("192.168.10.5", 3002).unwrap();
+        assert_eq!(priv4[0].ip().to_string(), "192.168.10.5");
+        assert!(!priv4[0].ip().is_unspecified());
+        // IPv6-Loopback, gecklammert und ungeklammert
+        let v6 = health_bind_addrs("::1", 3002).unwrap();
+        assert_eq!(v6.len(), 1);
+        assert!(v6[0].is_ipv6() && !v6[0].ip().is_unspecified());
+        assert_eq!(health_bind_addrs("[::1]", 3002).unwrap(), v6);
+    }
+
+    #[test]
+    fn health_bind_invalid_host_never_falls_back_to_wildcard() {
+        // Ein Konfigurationsfehler bleibt ein Fehler — keine stille,
+        // erst recht keine unsichere (Wildcard-)Ersatzadresse.
+        for bad in ["not a valid host", "realm.invalid."] {
+            let r = health_bind_addrs(bad, 3002);
+            assert!(
+                r.is_err(),
+                "unloesbarer Bind-Host {bad:?} muss fehlschlagen"
+            );
+        }
+    }
+
+    /// End-to-End am echten `load_config`: ohne `HEALTH_BIND_HOST`-Eintrag
+    /// bleibt das Feld leer, und die Health-Auflösung ergibt Loopback.
+    #[test]
+    fn load_config_without_health_bind_host_yields_loopback() {
+        let dir = std::env::temp_dir().join(format!("realmrs-cfgh1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.env");
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\nREALM_STATE_DB_NAME=realm_state_de2\n",
+        )
+        .unwrap();
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(cfg.ws_bind_host, "", "WS-Default bleibt unveraendert leer");
+        assert_eq!(cfg.health_bind_host, "");
+        let addrs = health_bind_addrs(&cfg.health_bind_host, cfg.health_port).unwrap();
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0].ip().to_string(), "127.0.0.1");
+        assert!(!addrs[0].ip().is_unspecified());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// End-to-End am echten `load_config`: ein ausdrücklicher Wert bleibt
+    /// unverändert maßgeblich (getrennte Go-/Rust-Hosts).
+    #[test]
+    fn load_config_keeps_explicit_health_bind_host() {
+        let dir = std::env::temp_dir().join(format!("realmrs-cfgh2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.env");
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\nREALM_STATE_DB_NAME=realm_state_de2\nHEALTH_BIND_HOST=192.0.2.10\n",
+        )
+        .unwrap();
+        let cfg = load_config(&p).unwrap();
+        assert_eq!(cfg.health_bind_host, "192.0.2.10");
+        let addrs = health_bind_addrs(&cfg.health_bind_host, cfg.health_port).unwrap();
+        assert_eq!(addrs[0].ip().to_string(), "192.0.2.10");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // ── Audit 4.4, R-6: geprüfte SEC_*-Felder gegen den echten Parser ────
