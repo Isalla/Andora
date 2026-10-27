@@ -26,3 +26,5 @@ src/agent/config.env
 src/realm-rs/target/
 src/realm-rs/config.env
 web/andora-monitor/data/
+realm-diag.pid
+spool-data/
