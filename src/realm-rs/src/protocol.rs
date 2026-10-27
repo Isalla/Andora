@@ -50,7 +50,14 @@ pub mod c2s {
 ///
 #[allow(dead_code)]
 pub mod s2c {
-    pub const WELCOME: i64 = 1; // {you:{id,name,x,y,mana,max_mana,level}}
+    /// Einstieg nach HELLO: {you:{id,name,x,y,mana,max_mana,level}, mailboxes:[{id,x,y},...]}.
+    /// WELCOME-Ausbau (M2, additiv): `mailboxes` sind reine Positionsangaben
+    /// (Meter) aus `mailbox_locations` (Migration 028), beim Start geladen,
+    /// danach unveränderlich. Bei leerer Tabelle leere Liste — das Feld wird
+    /// nie weggelassen. Kein neuer Frame, keine neue Protokoll-ID;
+    /// Reichweite/Bestand/Berechtigung bleiben ungeprüft (Mail-Inhalte laufen
+    /// über die bestehende Mail-API, 18g).
+    pub const WELCOME: i64 = 1;
     pub const SPAWN: i64 = 2; // {id, kind, x, y, face}; kind player|npc; npc: extra {status, aggro, claimed, name}
     pub const DESPAWN: i64 = 3; // {id}
     pub const STATE: i64 = 4; // {id, x, y, face}; Spieler + {hp, max_hp}; NPC zusätzlich {kind, status, aggro, claimed}

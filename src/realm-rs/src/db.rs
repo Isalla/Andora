@@ -2310,6 +2310,176 @@ pub async fn load_merchant_catalog(
     Ok(catalog)
 }
 
+// ===== Briefkasten-Positionen (Migration 028, M2 Mailbox Position Delivery) =====
+// Content-Schicht je RealmDB: reine Positionsangaben (Meter) ohne Beziehung zu
+// anderen Tabellen — kein NPC-Zweig, keine Welt-Entität, kein Reichweiten-/
+// Berechtigungsthema. Nach dem Start unveränderlich; der Client erhält die
+// Liste additiv im WELCOME (`mailboxes`, handlers.rs).
+
+/// Überführt geladene Zeilen `(id, pos_x, pos_y)` in die Positionsliste.
+/// Reine Abbildung ohne DB-Zugriff — dieselbe Route nutzen die Offline-Tests
+/// mit den Seed-Zeilen der Migrationsdatei (Nachweis ohne Datenbank).
+pub fn mailbox_locations_from_rows(
+    rows: Vec<(String, f64, f64)>,
+) -> Vec<crate::world::MailboxLocation> {
+    rows.into_iter()
+        .map(|(id, pos_x, pos_y)| crate::world::MailboxLocation {
+            id,
+            x: pos_x,
+            y: pos_y,
+        })
+        .collect()
+}
+
+/// Lädt die Briefkasten-Positionen (id + Koordinaten in Metern). Fehler
+/// verhalten sich wie bei den übrigen Content-Loadern: `Err` bricht den
+/// Start ab (kein halber Realm). Die Reihenfolge ist deterministisch
+/// (`ORDER BY id`), identisch zur seedfesten Offline-Prüfung.
+pub async fn load_mailbox_locations(
+    pool: &Pool<MySql>,
+) -> Result<Vec<crate::world::MailboxLocation>, String> {
+    let rows: Vec<(String, f64, f64)> =
+        sqlx::query_as("SELECT id, pos_x, pos_y FROM mailbox_locations ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| format!("Briefkasten-Positionen laden: {e}"))?;
+    Ok(mailbox_locations_from_rows(rows))
+}
+
+#[cfg(test)]
+pub(crate) mod mailbox_seed_tests {
+    //! Offline-Nachweis (D1) ohne Datenbank, am Muster der Datei-Tests aus
+    //! `migrations.rs`: Die ausgelieferte Migration 028 wird auf Dateiebene
+    //! gelesen — keine DB, kein Statement läuft. Aus dem Seed-INSERT werden
+    //! die Zeilen extrahiert und durch denselben Code (`mailbox_locations_from_rows`)
+    //! geschickt, den `load_mailbox_locations` für DB-Zeilen nutzt. Wird auch
+    //! von den WELCOME-Payload-Tests in `handlers.rs` genutzt.
+
+    use super::*;
+
+    /// Die Seed-Zeilen MÜSSEN wortgleich zu `DECO_MAILBOXES` im Testclient
+    /// (testclient/tc_world.gd) sein: Koordinaten unverändert, nichts ergänzt,
+    /// weggelassen oder gerundet.
+    pub(crate) const DECO_SEED: [(&str, f64, f64); 4] = [
+        ("mailbox-platz", 1.6, -3.4),
+        ("mailbox-west-1", -6.2, -2.6),
+        ("mailbox-west-2", -6.2, 7.6),
+        ("mailbox-ost", 20.2, 6.0),
+    ];
+
+    fn migration_body() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations")
+            .join("028_mailbox_locations.sql");
+        std::fs::read_to_string(&path).expect("Migration 028 liegt ausgeliefert")
+    }
+
+    /// Minimaler, absichtlich strenger Parser des Seed-INSERTs: jedes
+    /// unerwartete Format bricht den Test ab (fail-closed statt stiller Lücke).
+    fn parse_seed_values(body: &str) -> Vec<(String, f64, f64)> {
+        let stmts = crate::migrations::split_statements(body);
+        assert_eq!(stmts.len(), 2, "Migration 028: genau CREATE TABLE + INSERT");
+        let create = &stmts[0];
+        assert!(
+            create.starts_with("CREATE TABLE mailbox_locations"),
+            "CREATE TABLE ohne IF NOT EXISTS (Konflikt muss als Fehler sichtbar werden)"
+        );
+        assert!(
+            !crate::migrations::is_destructive(body),
+            "028 ist nicht destruktiv"
+        );
+        let insert = &stmts[1];
+        assert!(
+            insert.starts_with("INSERT INTO mailbox_locations"),
+            "Seed per normalem INSERT"
+        );
+        let rest = &insert[insert.find("VALUES").expect("INSERT VALUES vorhanden")
+            + "VALUES".len()..];
+        // Tuples klammerweise austasten (Quotes beachten — `split_statements`
+        // fuellt Zeilen mit Leerzeichen zusammen, Trenner sind nicht fix).
+        let chars: Vec<char> = rest.chars().collect();
+        let mut groups: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '(' {
+                let mut g = String::new();
+                let mut in_quote = false;
+                i += 1;
+                loop {
+                    assert!(i < chars.len(), "unabgeschlossene Seed-Tuple");
+                    let c = chars[i];
+                    if c == '\'' {
+                        in_quote = !in_quote;
+                        g.push(c);
+                    } else if c == ')' && !in_quote {
+                        break;
+                    } else {
+                        g.push(c);
+                    }
+                    i += 1;
+                }
+                groups.push(g);
+            }
+            i += 1;
+        }
+        assert!(!groups.is_empty(), "Seed enthaelt mindestens eine Tuple");
+        groups
+            .into_iter()
+            .map(|g| {
+                // Form: 'id', x, y — id quotesiert, Koordinaten nackte Zahlen.
+                let parts: Vec<&str> = g.split(',').map(|p| p.trim()).collect();
+                assert_eq!(parts.len(), 3, "genau id, pos_x und pos_y je Zeile");
+                let id = parts[0]
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                    .unwrap_or_else(|| panic!("id ist quotesiert: {:?}", parts[0]))
+                    .to_string();
+                let x = parts[1].parse::<f64>().expect("pos_x lesbar");
+                let y = parts[2].parse::<f64>().expect("pos_y lesbar");
+                (id, x, y)
+            })
+            .collect()
+    }
+
+    /// Die Seed-Zeilen der ausgelieferten Migration 028 (Dateiebene, ohne DB) —
+    /// Nachbarsquelle für Loader- und WELCOME-Payload-Tests.
+    pub(crate) fn shipped_seed_rows() -> Vec<(String, f64, f64)> {
+        parse_seed_values(&migration_body())
+    }
+
+    #[test]
+    fn seed_rows_match_deco_mailboxes_exactly() {
+        let rows = parse_seed_values(&migration_body());
+        assert_eq!(rows.len(), DECO_SEED.len(), "genau so viele Zeilen wie DECO_MAILBOXES");
+        for (want_id, want_x, want_y) in DECO_SEED {
+            let hit = rows
+                .iter()
+                .find(|(id, _, _)| id == want_id)
+                .unwrap_or_else(|| panic!("Seed-Zeile {want_id:?} fehlt"));
+            assert_eq!(hit.1, want_x, "{want_id:?} pos_x wortgleich");
+            assert_eq!(hit.2, want_y, "{want_id:?} pos_y wortgleich");
+        }
+    }
+
+    #[test]
+    fn loader_maps_all_seed_rows_completely() {
+        // D1: `load_mailbox_locations` liefert die Seed-Zeilen vollständig —
+        // offline über dieselbe Zeilen-Abbildung, die der DB-Loader nutzt.
+        let mut rows = parse_seed_values(&migration_body());
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut locs = mailbox_locations_from_rows(rows.clone());
+        locs.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(locs.len(), DECO_SEED.len());
+        for (loc, want) in locs.iter().zip(rows.iter()) {
+            assert_eq!(loc.id, want.0);
+            assert_eq!(loc.x, want.1);
+            assert_eq!(loc.y, want.2);
+        }
+        // Leere Tabelle → leere Liste (kein Feld-Weglassen, kein Fehler).
+        assert!(mailbox_locations_from_rows(Vec::new()).is_empty());
+    }
+}
+
 /// Quest-Zeile aus der Tabelle `quests` (docs/Quest-System.md §27/Quest V1,
 /// Migration 004_quests.sql). Die rohe TINYINT-Spalte `state` wird erst im
 /// QuestService auf den Questzustand abgebildet (ACTIVE=1, COMPLETED=2,

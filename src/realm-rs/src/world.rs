@@ -193,6 +193,18 @@ pub struct TickStat {
     pub count: u64,
 }
 
+/// Position eines Briefkastens (Migration 028, M2 Mailbox Position Delivery):
+/// reine Positionsangabe in Metern — keine Welt-Entität, kein NPC-Zweig, keine
+/// Reichweite, keine Beziehung zu anderen Tabellen. Wird beim Start aus der
+/// RealmDB geladen und ist danach unveränderlich; der Client erhält die Liste
+/// additiv im WELCOME (`mailboxes`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MailboxLocation {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
 pub struct World {
     pub players: HashMap<String, Player>,
     /// Prepared economic changes, retained verbatim across an uncertain spool
@@ -247,6 +259,11 @@ pub struct World {
     /// Händlerrolle je NPC-Spawn plus Sortiment mit Kauf-/Verkaufspreisen.
     /// Wird beim Start aus der RealmDB geladen (docs/Handelssystem.md).
     pub merchant_catalog: crate::trade::MerchantCatalog,
+    /// Briefkasten-Positionen des Realms (Content-Schicht, Migration 028):
+    /// reine Positionsangaben, beim Start geladen, danach unveränderlich
+    /// (analog `merchant_catalog`). Kein Tick-Eingriff, keine Reichweite.
+    /// Weitergabe additiv im WELCOME (`mailboxes`, handlers.rs).
+    pub mailbox_locations: Vec<MailboxLocation>,
     /// Spielerhandel-Dialoge (docs/Handelssystem.md §15): charaktergebundene
     /// Runtime-Dialoge (Dialog-ID → Dialog), höchstens einer je Charakter
     /// (Charakter → Dialog-ID, Einladung zählt mit). Keine Persistenz
@@ -322,6 +339,7 @@ impl World {
             sell_history: HashMap::new(),
             item_lifecycle: HashMap::new(),
             merchant_catalog: crate::trade::MerchantCatalog::default(),
+            mailbox_locations: Vec::new(),
             player_trade_dialogs: HashMap::new(),
             player_trade_by_char: HashMap::new(),
             player_trade_next_id: 1,

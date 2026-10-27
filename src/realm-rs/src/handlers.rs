@@ -294,6 +294,24 @@ fn welcome_you(p: &crate::world::Player) -> serde_json::Value {
     })
 }
 
+/// WELCOME-`mailboxes`-Anteil (additiv, Migration 028): die beim Start
+/// geladenen, danach unveränderlichen Briefkasten-Positionen
+/// (`[{id,x,y},...]`). Reine Positionsangabe — der Server prüft weiterhin
+/// keine Reichweite, keinen Bestand und keine Berechtigung, Mail-Inhalte
+/// laufen ausschließlich über die bestehende Mail-API (18g). Bei leerer
+/// Tabelle ist die Liste leer; das Feld wird nie weggelassen, damit der
+/// Client die Quellenregel eindeutig anwenden kann (leer/fehlend → lokaler
+/// `DECO_MAILBOXES`-Fallback des Testclients).
+fn welcome_mailboxes(world: &crate::world::World) -> serde_json::Value {
+    serde_json::json!(
+        world
+            .mailbox_locations
+            .iter()
+            .map(|m| serde_json::json!({ "id": m.id, "x": m.x, "y": m.y }))
+            .collect::<Vec<_>>()
+    )
+}
+
 /// HELLO: Einstieg mit Handoff-Token (Zielkette), Charakter laden,
 /// Elternkontrolle anhängen, WELCOME + Nachbar-Spawns.
 ///
@@ -711,17 +729,19 @@ pub async fn handle_hello(
     }
 
     // WELCOME aus dem autoritativen RAM-Zustand (nicht aus dem DB-Kandidaten):
-    // beim Takeover ist der RAM-Stand maßgeblich.
-    let you = {
+    // beim Takeover ist der RAM-Stand maßgeblich. `mailboxes` ist das additive
+    // Positions-Feld (Migration 028): dieselbe World-Sicht, kein zusätzlicher
+    // Frame, keine neue Protokoll-ID; bei leerer Tabelle eine leere Liste.
+    let (you, mailboxes) = {
         let world = ctx.shared.lock().await;
         let p = world.players.get(&c.id).ok_or("gone".to_string())?;
-        welcome_you(p)
+        (welcome_you(p), welcome_mailboxes(&world))
     };
     tx.send(
         Frame::new(
             seq,
             s2c::WELCOME,
-            serde_json::json!({"you": you}),
+            serde_json::json!({"you": you, "mailboxes": mailboxes}),
         )
         .encode(),
     )
@@ -3288,6 +3308,68 @@ pub(crate) mod tests {
         assert_eq!(v["mana"], 30, "Start-Mana aus dem RAM-Stand");
         assert_eq!(v["max_mana"], 60);
         assert_eq!(v["level"], 4, "Stufe aus dem RAM-Stand");
+    }
+
+    /// D1 (alleiniger Offline-Nachweis der WELCOME-Erzeugung): Der
+    /// WELCOME-`mailboxes`-Anteil enthält genau die Seed-Positionen der
+    /// ausgelieferten Migration 028 — ohne Datenbank über denselben Pfad wie
+    /// der Start (Seed-Zeilen → `mailbox_locations_from_rows` → World-Feld →
+    /// `welcome_mailboxes`).
+    #[test]
+    fn welcome_mailboxes_carries_exactly_the_seed_positions() {
+        let mut world = crate::world::World::new();
+        let rows = crate::db::mailbox_seed_tests::shipped_seed_rows();
+        assert_eq!(rows.len(), 4, "Seed = 4 Zeilen wie DECO_MAILBOXES");
+        world.mailbox_locations = crate::db::mailbox_locations_from_rows(rows);
+        let v = welcome_mailboxes(&world);
+        let arr = v.as_array().expect("mailboxes ist eine Liste");
+        assert_eq!(arr.len(), 4);
+        for (id, x, y) in crate::db::mailbox_seed_tests::DECO_SEED {
+            let hit = arr
+                .iter()
+                .find(|e| e["id"] == id)
+                .unwrap_or_else(|| panic!("Seed-Position {id:?} im WELCOME-Anteil"));
+            assert_eq!(hit["x"], x, "{id:?} pos_x wortgleich");
+            assert_eq!(hit["y"], y, "{id:?} pos_y wortgleich");
+            assert_eq!(hit.as_object().map(|o| o.len()), Some(3), "nur id/x/y");
+        }
+    }
+
+    /// Leere Tabelle: `mailboxes` ist die leere Liste — das Feld wird nicht
+    /// weggelassen, sonst könnte der Client die Quellenregel nicht von
+    /// „Server ohne Bestand“ unterscheiden.
+    #[test]
+    fn welcome_mailboxes_empty_table_sends_empty_list() {
+        let world = crate::world::World::new();
+        assert!(world.mailbox_locations.is_empty());
+        let v = welcome_mailboxes(&world);
+        assert_eq!(v, serde_json::json!([]), "leere Liste, kein Feldweglassen");
+        // Und im Rahmenpayload: Feld vorhanden, `you` unberührt.
+        let payload = serde_json::json!({"you": {"id": "1"}, "mailboxes": v});
+        assert!(payload.get("mailboxes").is_some());
+        assert_eq!(payload["mailboxes"].as_array().unwrap().len(), 0);
+    }
+
+    /// Struktur-Invariante (Produktionsquelle, Muster `include_str!`): Der
+    /// WELCOME-Frame in `handle_hello` setzt exakt `you` + `mailboxes`
+    /// zusammen — kein dritter Frame, keine neue Protokoll-ID, keine weitere
+    /// WELCOME-Komposition.
+    #[test]
+    fn welcome_frame_payload_composes_you_and_mailboxes() {
+        let src = include_str!("handlers.rs");
+        assert!(
+            src.contains(
+                "s2c::WELCOME,\n            serde_json::json!({\"you\": you, \"mailboxes\": mailboxes})"
+            ),
+            "WELCOME-Payload = {{you, mailboxes}} im bestehenden s2c::WELCOME-Frame"
+        );
+        // Genau eine solche Komposition in der Produktionsquelle (der
+        // Test-Find-String ist escaped und zählt nicht mit).
+        assert_eq!(
+            src.matches("\"mailboxes\": mailboxes").count(),
+            1,
+            "genau eine WELCOME-Komposition mit mailboxes"
+        );
     }
 
     #[tokio::test]

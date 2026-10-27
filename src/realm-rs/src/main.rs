@@ -362,6 +362,18 @@ async fn async_main() -> Result<(), String> {
         w.merchant_catalog = merchant_catalog;
     }
 
+    // Briefkasten-Positionen (Migration 028, M2 Mailbox Position Delivery):
+    // reine Positionsangaben je RealmDB, nach dem Start unveränderlich
+    // (analog Händlerkatalog). Kein Tick-Eingriff, keine Welt-Entität. Ein
+    // Ladefehler bremst den Start (kein halber Realm); die Liste geht additiv
+    // im WELCOME an den Client (`mailboxes`, handlers.rs).
+    let mailbox_locations = db::load_mailbox_locations(&pool).await?;
+    log::info!("{} Briefkasten-Positionen geladen", mailbox_locations.len());
+    {
+        let mut w = tick_shared.lock().await;
+        w.mailbox_locations = mailbox_locations;
+    }
+
     // Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md §10/§12):
     // the persisted realm-wide state is RESUMED at startup (never reset to a
     // fixed standard). A missing/unknown row falls back to a safe initial

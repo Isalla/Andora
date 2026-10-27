@@ -28,6 +28,14 @@ const S2C = {
 	"VITALS": 24, "INVENTORY_RESULT": 25,
 	"WEATHER": 26
 }
+# WELCOME (1) Payload: {you:{id,name,x,y,mana,max_mana,level}, mailboxes:[...]}.
+# `mailboxes` ist ein ADDITIVES Feld (Realm Migration 028, M2): reine
+# Positionsangaben {id,x,y} in Metern aus der RealmDB, einmalig beim
+# Charaktereinstieg; bei leerer Tabelle leere Liste. Kein neuer Frame, keine
+# neue Protokoll-ID, kein Decoder-Zwang: fehlendes oder leeres Feld laesst den
+# lokalen DECO_MAILBOXES-Fallback des Testclients unveraendert gelten.
+# Serverautoritaet unveraendert — keine Reichweiten-, Bestands- oder
+# Berechtigungspruefung; Mail-Inhalte kommen weiterhin nur ueber die Mail-API.
 # WEATHER (26) Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md):
 # Push (seq 0) to all online players on join (after WELCOME) and on change.
 # {weather: sunny|rain|fog|storm|snow|cloudy, intensity, sight_factor,
