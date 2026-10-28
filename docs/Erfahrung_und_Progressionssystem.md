@@ -10,8 +10,9 @@ Sammeln und Crafting besitzen eigene Progressionen (siehe `Handwerks_und_Sammels
 
 ### Implementierungsstand (Rust-Realm)
 
-- EXP wird gespeichert (`characters.exp`, Migration 001) und bei Gegner-Toden verteilt: 100 % an die berechtigten Gruppenmitglieder bzw. Claim-Spieler (Gruppensystem V1 §7, Migration 013, `combat/mod.rs` `award_monster_exp`), Persistenz bei Disconnect (`db::save_exp`).
-- **Nicht eingebaut:** EXP-Kurve/Levelaufstieg, Attributpunkte durch Levelaufstieg, Level-Cap-Verhalten, Levelunterschied-Anpassung der Gegner-EXP, Entdeckungs-EXP, Quest-EXP, Rested-EXP (das Offline-Zeitstempel wird derzeit nicht gespeichert, nur Position + EXP + Gold + Inventar).
+- EXP wird gespeichert (`characters.exp`, Migration 001) und bei Gegner-Toden verteilt: 100 % an die berechtigten Gruppenmitglieder bzw. Claim-Spieler (Gruppensystem V1 §7, Migration 013, `combat/mod.rs` `award_monster_exp`), Persistenz ueber den Spool-/Revisionspfad (Drain, Komponente `Progression`).
+- **Eingebaut** (`progression.rs`, Spalten `free_attr_points`, `rested_pool`, `logout_at` via Migration 018): EXP-Kurve (§3), Level-Cap (§1/§4), Levelaufstieg einschließlich mehrfacher Stufen je Belohnung (§6), Attributpunkte (§5), Levelunterschied-Anpassung (§7), Gruppen-EXP mit Restverteilung (§8/§8.1), Rested-EXP einschließlich Login-Verbrauch und Crash-Ausnahme (§12), Quest-EXP ueber denselben Kern ohne Rested-Anteil (§10).
+- **Noch offen:** Endgültige Balancing-Werte für Kurve, Cap und Levelunterschied (§3/§7, derzeit provisorisch und per `PROG_*` übersteuerbar); Gegner-Level in den Inhalten (derzeit durchgängig Default 1, dadurch greift §7 praktisch nicht); Entdeckungs-EXP (§9, kein Implementierungszweig); Unterwelt-Progression (§13, Exp1).
 - Der aktuelle Implementierungsstand wird in `Projekt-Status.md` geführt.
 
 ---
