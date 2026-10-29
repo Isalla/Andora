@@ -209,44 +209,124 @@ Ist nicht genügend Platz vorhanden:
 
 ## 7. Equipment- und Funktionsslots
 
-Für V1 sind folgende **21 Slots** vorgesehen:
+Für V1 sind **21 Slots** vorgesehen. Die Frage, welcher Gegenstand in welchen
+Slot darf, ist entschieden. Es entstehen keine neuen Item-Kategorien und keine
+neuen Slots — nur zwei erweiterbare Definitionseigenschaften
+(`equip_subtype`, `handling`, siehe `item_properties.md`).
 
-| Nr | Slot |
-|----|------|
-| 1 | Kopf |
-| 2 | Ohrring 1 |
-| 3 | Ohrring 2 |
-| 4 | Hals |
-| 5 | Schultern |
-| 6 | Arme |
-| 7 | Hände |
-| 8 | Brust |
-| 9 | Taille |
-| 10 | Beine |
-| 11 | Füße |
-| 12 | Rücken |
-| 13 | Hauptwaffe |
-| 14 | Nebenhand |
-| 15 | Ring 1 |
-| 16 | Ring 2 |
-| 17 | Lichtquelle |
-| 18 | Distanzwaffe |
-| 19 | Köcher / Munition |
-| 20 | Essen |
-| 21 | Trinken |
+> **Der Server bestimmt die Slot-Zulässigkeit aus der Gegenstandsdefinition.
+> Der vom Client gesendete Slot ist eine Absicht ohne Autorität.**
+
+### 7.1 Slot-Zuordnung (verbindliche Zielregel – Umsetzung folgt)
+
+**Kodierungshinweis (BESTAND):** `try_equip` prüft derzeit nur Grobkategorie,
+`min_level`/Klasse und Defekt; eine Slot-gegen-Definition-Prüfung existiert
+nicht und ist Gegenstand eines Umsetzungsauftrags.
+
+Zuordnung Subtyp + Handhabung → Slot:
+
+| Nr | Slot | Subtyp | category | handling |
+|----|------|--------|----------|----------|
+| 1 | Kopf | helm | armor | none |
+| 2, 3 | Ohrring 1/2 | earring | accessory | none |
+| 4 | Hals | amulet | accessory | none |
+| 5 | Schultern | shoulder | armor | none |
+| 6 | Arme | arms | armor | none |
+| 7 | Hände | gloves | armor | none |
+| 8 | Brust | chest | armor | none |
+| 9 | Taille | belt | armor | none |
+| 10 | Beine | legs | armor | none |
+| 11 | Füße | boots | armor | none |
+| 12 | Rücken | back | accessory | none |
+| 13 | Hauptwaffe | Waffe (sword, dagger, axe, mace, staff …) | weapon | one_handed, two_handed |
+| 14 | Nebenhand | shield | armor | off_hand |
+| 15, 16 | Ring 1/2 | ring | accessory | none |
+| 17 | Lichtquelle | lantern | accessory | none |
+| 18 | Distanzwaffe | bow, crossbow | weapon | ranged |
+| 19 | Köcher / Munition | ammo | accessory | none |
+| 20 | Essen | food | food | none |
+| 21 | Trinken | drink | drink | none |
+
+Heil-/Manatränke (`Potion`) besitzen keinen Ausrüstungs-Slot; sie bleiben
+normale Inventargegenstände. Slots 20/21 dienen ausschließlich der
+Auto-Consumable-Vorbereitung für Essen und Getränke (§8).
+
+Die Zuordnung ist eine **zentral hinterlegte Regel** und kein festes
+Slot-Einzelwert-Feld pro Gegenstandsdefinition. Die Achsen selbst
+(`category` als Tragbarkeitsklasse, `equip_subtype`, `handling`, Anforderung der
+Erweiterbarkeit ohne Rust-Kern-Änderung) sind in `item_properties.md`, Abschnitt
+„Ausrüstungs-Achsen", festgelegt.
+
+**Kanonische Subtypwerte:** Diese Tabelle ist die einzige Quelle der Schreibweise
+(kleingeschrieben, kein Leerzeichen, Kopfschutz = `helm`). Eine Kombination aus
+Subtyp und Handhabung ohne Eintrag hier ist ein Definitionsfehler und wird
+**fail-closed** mit `wrong_slot` abgelehnt — nicht ausrüstbar.
+
+**Bestand (Slot-Nummern):** Die Nummerierung entspricht unverändert der
+Reihenfolge von `EquipSlot` (`src/realm-rs/src/inventory.rs`) und damit den
+kanonischen DB-Schlüsseln in `character_equipment.slot`: `head`, `earring1`,
+`earring2`, `neck`, `shoulders`, `arms`, `hands`, `chest`, `waist`, `legs`,
+`feet`, `back`, `main_hand`, `off_hand`, `ring1`, `ring2`, `light_source`,
+`ranged_weapon`, `quiver_ammo`, `food`, `drink`.
 
 Anmerkungen:
 
-* „Lichtquelle" soll technisch nicht ausschließlich auf Fackeln beschränkt sein.
-  Später können beispielsweise Fackeln, Laternen oder andere passende
-  Lichtquellen verwendet werden.
-* Der Distanzwaffen-Slot ist vom Haupt- / Nebenhand-System getrennt.
-* Der Köcher- / Munitionsslot ist für die zur Distanzwaffe gehörende
-  Munition vorgesehen.
+* Der Distanzwaffen-Slot bleibt vom Haupt- / Nebenhand-System getrennt; der
+  Köcher- / Munitionsslot gehört zur Distanzwaffe.
+* Die Subtyp- und Handhabungslisten sind **erweiterbar** (Content-Entscheidung,
+  kein Code-Hardcoding). „Lichtquelle" ist technisch nicht auf eine feste Bauart
+  beschränkt; V1 kennt die befestigte Laterne (§7.4).
 
-Die konkrete Prüfung, welche Item-Kategorien / Definitionen in welchen
-Equipment-Slot passen, muss später mit Item System und Equipment-Logik
-verbunden werden. Es werden keine neuen Itemtypen erfunden.
+### 7.2 Kombinationsregeln (verbindliche Zielregel)
+
+Geprüft wird nicht der Einzel-Slot, sondern ob die **gesamte resultierende
+Ausrüstung** zulässig ist. Normales **Ablegen ist unabhängig von der
+Kombinationsprüfung zulässig**; die Prüfung gilt nur beim Ausrüsten.
+
+| Kombination | Ergebnis | Grund (stabil) |
+|---|---|---|
+| zwei einhändige Waffen gleichzeitig | **abgelehnt** | `dual_wield_not_allowed` |
+| Zweihandwaffe in Hauptwaffe, Nebenhand belegt | **abgelehnt** | `two_handed_needs_offhand_free` |
+| Waffe ausschließlich in Nebenhand | **abgelehnt** | `single_weapon_needs_mainhand` *(Zukunftsregel, siehe unten)* |
+| einhändige Waffe + Schild | erlaubt | — |
+| Distanzwaffe + Nahkampfwaffe | erlaubt | — |
+| Distanzwaffe + Schild | erlaubt | — |
+| Laterne + Waffe | erlaubt | Laterne belegt keine Hand |
+| Gegenstandstyp passt nicht zum Slot | abgelehnt | `wrong_slot` |
+
+- **Zweihandwaffen:** Eine Zweihand-Nahkampfwaffe wird ausschließlich im
+  Hauptwaffenslot (13) gespeichert und **beansprucht beide Hände**. Für ihre
+  Wirkung ist kein Gegenstand im Nebenhandslot vorgesehen oder erlaubt.
+- `single_weapon_needs_mainhand` ist für V1 eine **Zukunftsregel für
+  Dual-Wielding**: Bereits §7.1 erlaubt derzeit nur `shield` in der Nebenhand,
+  sodass eine Waffe dort ohnehin mit `wrong_slot` abgelehnt wird. Die Regel wird
+  ausdrücklich festgehalten, damit sie bei Einführung von Dual-Wielding greift.
+- Bei Regelkonflikt wird **nichts automatisch abgelegt**. Der Spieler entscheidet.
+- Alle Prüfungen erfolgen vor jeder Mutation; Ablehnung ohne Zustandsänderung,
+  ohne Dirty-State (fail-closed).
+
+**Kodierungshinweis (BESTAND):** Die Gründe `wrong_slot`,
+`dual_wield_not_allowed`, `two_handed_needs_offhand_free` und
+`single_weapon_needs_mainhand` sind die verbindlichen Zielnamen; sie gehören bei
+der Umsetzung als stabile Gründe in die Ablehnungsliste von
+`InventoryReject::reason()` (`src/realm-rs/src/inventory_actions.rs`) und sind
+dort noch nicht vorhanden.
+
+### 7.3 Ausgerüstet ist nicht geführt
+
+Ausrüstung kann vorhanden sein, ohne zu wirken. Ob ein ausgerüsteter Gegenstand
+aktiv zählt, entscheidet ausschließlich die Ausrüstungsführung
+(`Ausruestungsfuehrung.md`, dort §1–§3). Diese Slot-Zuordnung regelt nur die
+**Zulässigkeit**.
+
+### 7.4 Ausdrücklich nicht Teil dieser Regelung
+
+* Dual-Wielding-Freigabe je Klasse/Spezialisierung — folgt mit dem Klassensystem
+  (Teil B, siehe `Klassensystem.md`); bis dahin bleibt `dual_wield_not_allowed`.
+* Handgehaltene Lichtquellen (Fackel, Nebenhand) erst ab Expansion 1 (Dungeon);
+  V1 kennt nur die befestigte Laterne.
+* Welche ausgerüstete Waffe geführt wird und wann Werte zählen
+  (`Ausruestungsfuehrung.md`).
 
 ---
 
@@ -285,7 +365,10 @@ Beim normalen manuellen Ablegen / Ausziehen muss das Inventory-System
 entsprechend einen Zielplatz verwalten und prüfen.
 
 Equipment-Boni dürfen ausschließlich von tatsächlich aktiven und
-funktionsfähigen ausgerüsteten Items stammen.
+funktionsfähigen ausgerüsteten Items stammen. „Aktiv" im Sinne der
+Ausrüstungsführung (`Ausruestungsfuehrung.md` §1–§3: nur die geführte Last,
+Körperrüstung ausgenommen), „funktionsfähig" im Sinne der Haltbarkeit
+(Abschnitt 12).
 
 ---
 
@@ -498,6 +581,7 @@ verbindlichen Entscheidungen nicht widersprechen.
 | System | Bezug |
 |---|---|
 | Item System V1 | Stack-Regeln, Gewicht, Bindung, Haltbarkeit, Kategorien, Seltenheiten, numerische Quality (`item_properties.md`) |
+| Ausrüstungsführung | Welche ausgerüstete Last wirkt und wann Werte zählen; Führungswechsel mit 2-Sekunden-Cooldown (`Ausruestungsfuehrung.md`, Zielregel – Umsetzung offen). Regelstelle für Führung und Cooldown, nicht für Slot-Zulässigkeit (§7) |
 | Attribute und Regeneration | Essen / Getränke / Tränke – konzeptionelle Abgrenzung (`Attribute_und_Regeneration.md`, Abschnitt 9) |
 | Tier-Progression | Rucksackgrößen und deren Erwerb als Content-Frage (`Tier-Progression.md`) |
 | Quest-System | Questbelohnungen folgen dem normalen Inventarprinzip |
@@ -774,7 +858,8 @@ count?}`, danach der bestätigte Folgestand per S2C 23 `INVENTORY` (`seq`
   `unknown_slot`): vorhandene Regeln (`try_equip`: Kategorie
   Weapon/Armor/Accessory, `min_level`/Klasse aus dem Serverstand,
   Defekt-Schutz) → `not_equippable`/`cannot_equip`/`broken_item`,
-  belegt → `slot_occupied`.
+  belegt → `slot_occupied`. Die Slot-Zulässigkeit aus der Definition
+  (§7.1/§7.2) ist beschlossen, aber hier noch **nicht** eingebaut.
 * `unequip` (`slot`): leer → `slot_empty`; Zielplatz nach vorhandener
   Regel (passender Stack, sonst freier Slot), voll → `inventory_full`.
 * `use` (Heil-/Manaverbrauchsgegenstände, IMPLEMENTIERT — siehe Projekt-Status 15i):
