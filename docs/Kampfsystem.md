@@ -124,6 +124,8 @@ Konkrete Wahrscheinlichkeiten und Formeln werden nicht endgültig festgelegt und
 
 Der Grundschaden wird durch die verwendete Waffe vorgegeben.
 
+**Verwendet** ist die aktuell geführte Last (`Ausruestungsfuehrung.md` §1 und §2): eine geführte Nahkampfwaffe in der Hauptwaffe oder eine geführte Distanzwaffe. Nicht geführte Waffen liefern keinen Grundschaden und keine Duration.
+
 Jede Waffe besitzt außerdem eine **Duration**, welche die Zeit zwischen automatischen Grundangriffen bestimmt (siehe Abschnitt 3).
 
 Langsame Waffen wie Zweihandschwerter können höheren Grundschaden besitzen.
@@ -137,6 +139,8 @@ Konkrete Schadenswerte und Durationswerte sind Balancingdaten.
 ## 7. Rüstung und physische Schadensreduktion
 
 Ausrüstung liefert Rüstungswerte.
+
+Körperrüstung wirkt unabhängig davon, welche Last geführt wird. Der Rüstungswert eines **Schilds** zählt nur, solange die zugehörige Last geführt wird (`Ausruestungsfuehrung.md` §1 und §2; kein gleichzeitiger Bogen- und Schildwert, §3).
 
 Aus dem gesamten relevanten Rüstungswert wird eine prozentuale physische Schadensreduktion berechnet.
 
