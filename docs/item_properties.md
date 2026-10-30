@@ -32,6 +32,10 @@ Progressionsgrenzen sind Content-/Progressionsfragen (siehe `Tier-Progression.md
 
 ## Ausrüstungsspezifische Eigenschaften
 
+> **Welche dieser Werte gerade wirken, entscheidet die Ausrüstungsführung**
+> (`Ausruestungsfuehrung.md` §1–§3): nur die geführte Last liefert Waffen- und
+> Schildwerte; normale Körperrüstung wirkt unabhängig von der Führung. Die
+> Slot-Zulässigkeit regelt `inventory_system.md` §7.
 
 ### Waffen
 - **damage**: Durch die Waffe vorgegebener Grundschaden (siehe Kampfsystem.md Abschnitt 6; Grundschaden bestimmt die Schadenshöhe eines Treffers)
@@ -162,6 +166,9 @@ Das Item-System trennt **statische Definitionen** (Basiswerte, Content) von **in
 - **Modifier-Satelliten**: `item_instance_modifiers` (damage/armor/weight/quality_modifier), `item_instance_attribute_modifiers`, `item_instance_resistance_modifiers`
 - **Definition-Satelliten**: `item_definition_classes` (erlaubte Klassen), `item_definition_attributes` (Attributboni), `item_definition_resistances` (Resistenzboni)
 
+`equip_subtype` und `handling` (siehe „Ausrüstungs-Achsen") sind als Achsen
+beschlossen, aber **noch keine Spalten** dieser Tabelle.
+
 Effektiver Wert = Basiswert (Definition) + Modifier (Instanz). Das Ändern von Basiswerten in der Definition beeinflusst alle betroffenen Instanzen.
 
 ### Kategorien und Stack-Regeln
@@ -220,6 +227,11 @@ Bindungsregel wird in der Definition gesetzt; Seltenheit erzwingt keine Änderun
 - `min_level: Option<i64>` (Minimal-Level des Charakters)
 - `allowed_classes: Vec<ClassStatus>` (leer = alle Klassen; DB via `item_definition_classes`)
 - **Keine Attributanforderungen** (V1 bewusst offen)
+- **Slot-Zulässigkeit aus der Definition** (`equip_subtype` + `handling`,
+  `category` als Tragbarkeitsklasse): verbindliche Zielregel in
+  `inventory_system.md` §7, Achsenbeschreibung oben („Ausrüstungs-Achsen"); die
+  Prüfung ist als Umsetzungsauftrag offengehalten und aktuell noch nicht
+  eingebaut
 
 ### Waffen-Spezifika (Datenfelder, keine Balance-Formel)
 
