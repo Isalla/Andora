@@ -143,6 +143,43 @@ type HandoffAnswer struct {
 	ExpiresAt    string `json:"expires_at"`
 }
 
+// postRaw sends a signed POST and returns status plus raw JSON answer
+// (size-limited) without decoding into a typed struct, so the caller can
+// pass the answer through unchanged. Used by the parental proxy: the
+// Auth-API parental answers never carry PINs, tokens or e-mail
+// (notifications/deliver is not proxied); error bodies are static.
+func (a *AuthAPI) postRaw(path string, in any) (int, []byte, error) {
+	var body []byte
+	if in == nil {
+		body = []byte("{}")
+	} else {
+		var err error
+		body, err = json.Marshal(in)
+		if err != nil {
+			return 0, nil, fmt.Errorf("encode request: %w", err)
+		}
+	}
+	ts := time.Now().Unix()
+	req, err := http.NewRequest(http.MethodPost, a.base+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Andora-Service", a.svcID)
+	req.Header.Set("X-Andora-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Andora-Signature", signPayload(a.secret, http.MethodPost, path, "", ts, body))
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return 0, nil, &AuthAPIError{}
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return resp.StatusCode, nil, &AuthAPIError{Status: resp.StatusCode}
+	}
+	return resp.StatusCode, raw, nil
+}
+
 // Verify forwards a login check (password, 2FA fields) to /auth/verify.
 func (a *AuthAPI) Verify(in map[string]any) (*VerifyAnswer, error) {
 	var out VerifyAnswer

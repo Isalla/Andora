@@ -1238,3 +1238,82 @@ func TestP35ParentalNoRecipientStaysSilent(t *testing.T) {
 		t.Fatalf("security_events write is independent of the recipient, got %d", n)
 	}
 }
+
+// TestParentalWrongPinOnManageActions: the concrete authorization gap of
+// the new Login-Proxy surface — every PIN-required management action must
+// reject a wrong PIN (401) BEFORE any state change, and the correct PIN
+// must actually apply (gate is the PIN, not a blanket denial).
+func TestParentalWrongPinOnManageActions(t *testing.T) {
+	srv := testServer(t)
+	client := &apiClient{s: srv, cred: srv.cfg.Services["svc-all"]}
+	addAccount(t, srv.store.(*fakeStore), "kid9", "longenough1", "k9@example.com", false)
+	setupParental(t, client, 1, 60, "")
+
+	// wrong PIN on update: 401 and week unchanged
+	rec := client.post(t, "/parental/update", map[string]any{
+		"account_id": 1, "parent_pin": "0000", "warning_minutes": 30,
+		"chat_enabled": true, "voice_enabled": false,
+		"monday_minutes": 0, "tuesday_minutes": 0, "wednesday_minutes": 0,
+		"thursday_minutes": 0, "friday_minutes": 0, "saturday_minutes": 0, "sunday_minutes": 0,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("update wrong pin: expected 401, got %d", rec.Code)
+	}
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1})
+	if decode(t, rec)["week_minutes"] != float64(60) {
+		t.Fatal("wrong-pin update must not change the week")
+	}
+
+	// wrong PIN on periods_add: 401 and no period stored
+	rec = client.post(t, "/parental/periods/add", map[string]any{
+		"account_id": 1, "parent_pin": "0000", "starts_at": "2026-11-01", "ends_at": "2026-11-08",
+		"monday_minutes": 0, "tuesday_minutes": 0, "wednesday_minutes": 0,
+		"thursday_minutes": 0, "friday_minutes": 0, "saturday_minutes": 0, "sunday_minutes": 0,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("periods_add wrong pin: expected 401, got %d", rec.Code)
+	}
+	rec = client.post(t, "/parental/periods", map[string]any{"account_id": 1})
+	var plist struct {
+		Periods []map[string]any `json:"periods"`
+	}
+	if err := jsonUnmarshal(t, rec, &plist); err != nil {
+		t.Fatal(err)
+	}
+	if len(plist.Periods) != 0 {
+		t.Fatal("wrong-pin periods_add must store nothing")
+	}
+
+	// wrong PIN on periods_remove / exceptions_add / exceptions_remove: 401
+	rec = client.post(t, "/parental/periods/remove", map[string]any{"account_id": 1, "parent_pin": "0000", "id": 1})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("periods_remove wrong pin: expected 401, got %d", rec.Code)
+	}
+	rec = client.post(t, "/parental/exceptions/add", map[string]any{"account_id": 1, "parent_pin": "0000", "date": "2026-10-20", "extra_minutes": 60})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("exceptions_add wrong pin: expected 401, got %d", rec.Code)
+	}
+	rec = client.post(t, "/parental/exceptions/remove", map[string]any{"account_id": 1, "parent_pin": "0000", "date": "2026-10-20"})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("exceptions_remove wrong pin: expected 401, got %d", rec.Code)
+	}
+
+	// correct PIN actually applies (gate is the PIN, not blanket denial)
+	up := map[string]any{
+		"account_id": 1, "parent_pin": "1234", "warning_minutes": 30,
+		"chat_enabled": true, "voice_enabled": false,
+		"monday_minutes": 0, "tuesday_minutes": 0, "wednesday_minutes": 0,
+		"thursday_minutes": 0, "friday_minutes": 0, "saturday_minutes": 0, "sunday_minutes": 0,
+	}
+	today := []string{"monday_minutes", "tuesday_minutes",
+		"wednesday_minutes", "thursday_minutes", "friday_minutes", "saturday_minutes", "sunday_minutes"}
+	up[today[weekIndexOf(time.Now())]] = 120
+	rec = client.post(t, "/parental/update", up)
+	if rec.Code != http.StatusOK || decode(t, rec)["updated"] != true {
+		t.Fatalf("correct-pin update must apply: %d", rec.Code)
+	}
+	rec = client.post(t, "/parental/status", map[string]any{"account_id": 1})
+	if decode(t, rec)["week_minutes"] != float64(120) {
+		t.Fatal("correct-pin update changed week must be visible")
+	}
+}
