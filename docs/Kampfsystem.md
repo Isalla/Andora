@@ -269,6 +269,15 @@ Der Spieler kann sich für einen Respawn entscheiden.
 
 Der Charakter wird anschließend zum nächstgelegenen Respawnpunkt versetzt.
 
+**Umsetzung V1 (Abweichung, dokumentiert):** Der Respawn ist als manuelle
+Anforderung eingebaut (C2S 23 `REVIVE`, leeres Payload; Antwort S2C 27
+`REVIVE_RESULT`, maßgebliche Position/HP ausschließlich über das eigene STATE).
+Maßstab ist ein realmweiter, serverseitig konfigurierter Rückkehrpunkt
+(`RESPAWN_X`/`RESPAWN_Y`, Default (0, 0) = Startpunkt der `characters`-Tabelle),
+weil gebietsweite Respawnpunkte als Content noch nicht existieren (siehe §14).
+Die Auswahl des nächstgelegenen Punktes folgt, sobald Respawnpunkte Content sind.
+Das weiße Licht und die Heiler-Wiederbelebung sind noch nicht implementiert.
+
 ---
 
 ## 14. Respawnpunkte
@@ -280,6 +289,13 @@ Beim Respawn wird der Spieler zum nächstgelegenen geeigneten Respawnpunkt gebra
 Dadurch sollen unnötig lange Laufwege nach einem Tod vermieden werden.
 
 Respawnpunkte werden entsprechend über die Gebiete verteilt und sind Teil der jeweiligen Gebietsgestaltung.
+
+**Stand:** Es existiert noch keine Respawnpunkt-Grundlage im Bestand — weder eine
+eigene Tabelle noch Content-Einträge, und die `zone_id` aller bestehenden Inhalte
+ist 0. V1 weicht deshalb auf einen realmweiten Konfigurationswert aus (§13).
+Diese Ersetzung ist ausdrücklich befristet: mit Gebiets-Respawnpunkten wird der
+eine Wert durch die Auswahl aus den Content-Punkten ersetzt, die
+Wiederbelebungsregel selbst bleibt unverändert.
 
 ---
 
