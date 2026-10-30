@@ -122,6 +122,13 @@ Konkrete Wahrscheinlichkeiten und Formeln werden nicht endgültig festgelegt und
 
 ## 6. Waffenschaden und Angriffsgeschwindigkeit
 
+> **Stand:** Die Abschnitte 6 und 7 beschreiben die **Zielregel** der geführten
+> Last (`Ausruestungsfuehrung.md`, beschlossen, noch nicht implementiert).
+> **Bestand:** Aktuell wirkt keine Ausrüstung im Kampf – Grundschaden, Duration
+> und Reichweite kommen aus `CombatCfg`, der Rüstungswert aus
+> `characters.combat_armor` beziehungsweise `npcs.armor`
+> (`Ausruestungsfuehrung.md` §8, `Projekt-Status.md` Eintrag 20).
+
 Der Grundschaden wird durch die verwendete Waffe vorgegeben.
 
 **Verwendet** ist die aktuell geführte Last (`Ausruestungsfuehrung.md` §1 und §2): eine geführte Nahkampfwaffe in der Hauptwaffe oder eine geführte Distanzwaffe. Nicht geführte Waffen liefern keinen Grundschaden und keine Duration.
