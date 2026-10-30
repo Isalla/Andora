@@ -176,3 +176,13 @@ Betreffe.
 Ein Konflikt zwischen Diktat und Stilvorgabe wird vor dem Commit gemeldet und
 nicht eigenmächtig aufgelöst. Bestehende Commits werden ohne ausdrückliche
 Freigabe nicht umgeschrieben.
+
+GIT-AUSWAHL BEI GEMISCHTEM ARBEITSBAUM
+
+Bei Hunks eines gemischten Arbeitsbaums wird niemals git commit -- <pfad>
+verwendet. Dieses Vorgehen committet den Arbeitsbaum statt des Index und nimmt
+dadurch fremde Hunks mit.
+
+Erlaubt ist ausschließlich: git apply --cached mit dem selektierten Patch,
+anschließend git commit ohne Pfadargument. Der gestagte Inhalt wird vor dem
+Commit mit git diff --cached geprüft.
