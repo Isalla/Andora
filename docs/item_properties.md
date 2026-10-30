@@ -1,20 +1,20 @@
-# Item Properties Documentation
+# Dokumentation der Gegenstandseigenschaften
 
-## Overview
-This document describes all properties and characteristics of items in the game inventory system.
+## Überblick
+Dieses Dokument beschreibt alle Eigenschaften und Merkmale der Gegenstände im Inventarsystem des Spiels.
 
-## Basic Item Properties
+## Grundlegende Gegenstandseigenschaften
 
-### Core Attributes
-- **name**: Unique identifier for the item
-- **type**: Category of the item (weapon, armor, accessory, consumable, crafting material)
-- **quality**: numerische Quality (getrennt von Seltenheit; siehe Abschnitt „Item System V1")
-- **weight**: Item weight affecting player movement and carrying capacity
-- **description**: Detailed description of the item's purpose and properties
+### Grundattribute
+- **name**: Eindeutige Kennung des Gegenstands
+- **type**: Kategorie des Gegenstands (Waffe, Rüstung, Zubehör, Verbrauchsgegenstand, Handwerksmaterial)
+- **quality**: numerische Qualität (getrennt von Seltenheit; siehe Abschnitt „Gegenstandssystem V1")
+- **weight**: Gegenstandsgewicht, das die Bewegung und Tragfähigkeit des Spielers beeinflusst
+- **description**: Ausführliche Beschreibung des Zwecks und der Eigenschaften des Gegenstands
 
-### Quality und Rarity (V1 – verbindlich)
+### Qualität und Seltenheit (V1 – verbindlich)
 
-Numerische Quality und Rarity sind **getrennte Eigenschaften** (siehe Abschnitt „Item System V1 – Implementierungsstand").
+Numerische Qualität und Seltenheit sind **getrennte Eigenschaften** (siehe Abschnitt „Gegenstandssystem V1 – Implementierungsstand").
 
 Die nachfolgend beschriebene ehemalige Verknüpfung von Quality-Stufen mit Rarity-Farben (Quality 1 Gray … 5 Purple) und die alten %igen Stat-Boni je Quality-Stufe sind **veraltet** und wurden durch die V1-Regelung ersetzt:
 
@@ -30,24 +30,25 @@ Die ehemalige Zuordnung von Quality-Stufen zu minimalen Levelanforderungen
 einzeln hinterlegt (`item_definitions.min_level`). Tier- und
 Progressionsgrenzen sind Content-/Progressionsfragen (siehe `Tier-Progression.md`).
 
-## Equipment-Specific Properties
+## Ausrüstungsspezifische Eigenschaften
 
-### Weapons
-- **damage**: Base damage, specified by the weapon (siehe Kampfsystem.md Abschnitt 6; Grundschaden bestimmt die Schadenshöhe eines Treffers)
-- **duration**: Time between automatic basic attacks (siehe Kampfsystem.md Abschnitt 3 und 6; entspricht der Angriffsgeschwindigkeit bzw. der Zeit zwischen zwei Grundangriffen)
-- **range**: Attack range in tiles
-- **durability**: Maximum uses before breaking
-- **enchantments**: Special effects or bonuses
 
-### Armor
-- **defense**: Armor value provided by the equipment; the total relevant armor value is converted into a percentage-based physical damage reduction (siehe Kampfsystem.md Abschnitt 7). The exact conversion formula and the class-specific maximum reduction are balancing values.
-- **resistance**: Resistance to specific damage types
-- **movement_speed**: Effect on player movement speed
-- **weight_reduction**: Reduces overall item weight burden
+### Waffen
+- **damage**: Durch die Waffe vorgegebener Grundschaden (siehe Kampfsystem.md Abschnitt 6; Grundschaden bestimmt die Schadenshöhe eines Treffers)
+- **duration**: Zeit zwischen automatischen Grundangriffen (siehe Kampfsystem.md Abschnitt 3 und 6; entspricht der Angriffsgeschwindigkeit bzw. der Zeit zwischen zwei Grundangriffen)
+- **range**: Angriffsreichweite in Kacheln
+- **durability**: Maximale Anzahl an Benutzungen bis zum Defekt
+- **enchantments**: Besondere Effekte oder Boni
 
-### Accessories
-- **stat_bonus**: Primary stat modification
-- **special_ability**: Unique passive or active abilities
+### Rüstung
+- **defense**: Durch die Ausrüstung bereitgestellter Rüstungswert; der gesamte relevante Rüstungswert wird in eine prozentuale physische Schadensreduktion umgerechnet (siehe Kampfsystem.md Abschnitt 7). Die genaue Umrechnungsformel und die klassenspezifische maximale Reduktion sind Werte der Spielbalance.
+- **resistance**: Widerstand gegen bestimmte Schadensarten
+- **movement_speed**: Einfluss auf die Bewegungsgeschwindigkeit des Spielers
+- **weight_reduction**: Verringert die gesamte Gewichtsbelastung durch Gegenstände
+
+### Zubehör
+- **stat_bonus**: Änderung des primären Attributs
+- **special_ability**: Einzigartige passive oder aktive Fähigkeiten
 
 ### Ausrüstungs-Achsen: `equip_subtype` und `handling` (Zielregel – Umsetzung folgt)
 
@@ -116,27 +117,27 @@ im Content ebenso kleingeschrieben und ohne Leerzeichen eingetragen.
   `wrong_slot` abgelehnt. Details der Slot- und Kombinationsregeln:
   `inventory_system.md` §7.1 und §7.2.
 
-### Attribute Bonuses on Equipment
-Weapons, armor, and accessories can increase the seven basic attributes (Kraft, Konstitution, Geschicklichkeit, Intelligenz, Weisheit, Glück, Ausdauer). Equipment is intended to provide a large part of the actual attribute growth and fine-tuning in the later game: the race remains the base imprinting, while the player can strongly influence his character through equipment. Crafted items may receive different or additional attribute values depending on the crafting/quality system. Whether attribute bonuses remain exclusively integer-valued in the long term is to be decided through playtesting. Details and the current balance values: `Attribute_und_Regeneration.md`.
+### Attributboni auf Ausrüstung
+Waffen, Rüstung und Zubehör können die sieben Grundattribute (Kraft, Konstitution, Geschicklichkeit, Intelligenz, Weisheit, Glück, Ausdauer) erhöhen. Ausrüstung soll im späteren Spiel einen großen Teil des tatsächlichen Attributwachstums und der Feinabstimmung ermöglichen: Die Rasse bleibt die Grundprägung, während der Spieler seinen Charakter durch Ausrüstung stark beeinflussen kann. Hergestellte Gegenstände können je nach Handwerks-/Qualitätssystem andere oder zusätzliche Attributwerte erhalten. Ob Attributboni langfristig ausschließlich ganzzahlig bleiben, soll durch Spieltests entschieden werden. Details und aktuelle Werte der Spielbalance: `Attribute_und_Regeneration.md`.
 
-## Item Lifecycle
+## Lebenszyklus von Gegenständen
 
-### Acquisition
-- Monster drops (quality based on monster level)
-- Quest rewards
-- Crafting results
-- Shop purchases (ausschließlich Ingame-Händler, die Ingame-Währung annehmen; keine Echtgeld-Käufe, siehe `Monetarisierung_und_Donations.md`)
+### Erwerb
+- Monsterbeute (Qualität abhängig von der Monsterstufe)
+- Questbelohnungen
+- Handwerksergebnisse
+- Händlerkäufe (ausschließlich Händler im Spiel, die Spielwährung annehmen; keine Echtgeld-Käufe, siehe `Monetarisierung_und_Donations.md`)
 
-### Storage
-- Inventory slots (1 Item / 1 Stack = 1 Slot; keine Item-Größe)
+### Aufbewahrung
+- Inventarplätze (1 Gegenstand / 1 Stapel = 1 Platz; keine Gegenstandsgröße)
 - Ausrüstbare Rucksäcke / Taschen (eigene Inventarbereiche, siehe `inventory_system.md`)
-- Equipment slots
+- Ausrüstungsplätze
 
-### Usage
-- Equipping to character
-- Consuming consumable items
-- Selling or trading
-- Crafting with materials
+### Verwendung
+- Anlegen am Charakter
+- Verbrauchen von Verbrauchsgegenständen
+- Verkaufen oder Handeln
+- Handwerk mit Materialien
 
 ### Bindung
 
@@ -150,7 +151,7 @@ Rohstoffe, hergestellte Gegenstände und andere für die Spielerwirtschaft vorge
 
 Welche Gegenstände gebunden sind, wird über die jeweilige Gegenstandsdefinition festgelegt.
 
-## Item System V1 – Implementierungsstand (Migrationen 014/015)
+## Gegenstandssystem V1 – Implementierungsstand (Migrationen 014/015)
 
 ### Datenmodell
 
@@ -177,9 +178,9 @@ Effektiver Wert = Basiswert (Definition) + Modifier (Instanz). Das Ändern von B
 
 ### Gewichtsberechnung
 
-- **Stackable**: Stack-Gewicht = `full_stack_weight` (unabhängig von `count` im Inventar)
-- **Partial**: `full_stack_weight × count / max_stack`
-- **Crafted Non-Stackable**: `75 %` der verbrauchten Materialmasse (berechnet beim Crafting, als `weight` in die Instanz geschrieben)
+- **Stapelbar**: Stapelgewicht = `full_stack_weight` (unabhängig von `count` im Inventar)
+- **Teilstapel**: `full_stack_weight × count / max_stack`
+- **Hergestellt, nicht stapelbar**: `75 %` der verbrauchten Materialmasse (beim Handwerk berechnet, als `weight` in die Instanz geschrieben)
 
 `full_stack_weight` = Gewicht einer Definition (`item_definitions.weight`), nicht veränderlich pro Instanz.
 
@@ -201,20 +202,20 @@ Die Quality-Metriken für Crafting:
 | Zustand | Erlaubnis |
 |---|---|
 | `Tradeable` | Frei handelbar |
-| `BindOnPickup` | Sofort bound beim Aufheben |
-| `BindOnEquip` | Bound beim ersten Tragen |
+| `BindOnPickup` | Sofort gebunden beim Aufheben |
+| `BindOnEquip` | Gebunden beim ersten Tragen |
 | `Bound` | Nicht handelbar (Quest/Event) |
 
 Bindungsregel wird in der Definition gesetzt; Seltenheit erzwingt keine Änderung.
 
-### Haltbarkeit (Durability)
+### Haltbarkeit
 
 `durability_current: Option<i64>` / `durability_max: Option<i64>` (None = unbegrenzt):
 - `is_broken()` = `current == Some(0)` → Stats inaktiv
 - `stats_active()` = nicht defekt (kein current=0)
 - Defekt zerstört das Item **nicht**; es bleibt im Inventar
 
-### Equip-Voraussetzungen
+### Voraussetzungen zum Anlegen
 
 - `min_level: Option<i64>` (Minimal-Level des Charakters)
 - `allowed_classes: Vec<ClassStatus>` (leer = alle Klassen; DB via `item_definition_classes`)
