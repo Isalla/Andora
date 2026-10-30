@@ -165,3 +165,14 @@ OpenCode-Sessions sind temporäre Arbeitsdaten, keine dauerhafte Projektdokument
   nicht sessionspezifische Daten werden durch die Bereinigung nicht entfernt.
 
 Details: `docs/OpenCode_Session_Pflege.md`.
+
+## Commit-Betreffe
+
+Wörtlich diktierte Commit-Betreffe werden byte-genau übernommen, auch wenn sie
+von dauerhaften Stilvorgaben abweichen. Dauerhafte Stilvorgaben, zum Beispiel
+deutsche Umlaute statt ASCII-Ersatzschreibung, gelten nur für frei formulierte
+Betreffe.
+
+Ein Konflikt zwischen Diktat und Stilvorgabe wird vor dem Commit gemeldet und
+nicht eigenmächtig aufgelöst. Bestehende Commits werden ohne ausdrückliche
+Freigabe nicht umgeschrieben.
