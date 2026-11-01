@@ -97,6 +97,16 @@ impl ItemCategory {
             _ => 1,
         }
     }
+
+    /// Ausrüstbare Tragbarkeitsklasse (weapon/armor/accessory nach
+    /// docs/item_properties.md „Drei Tragbarkeitsklassen")? Nur für diese
+    /// Kategorien gilt die Achsenpflicht (equip_subtype + handling).
+    pub fn is_equippable(self) -> bool {
+        matches!(
+            self,
+            ItemCategory::Weapon | ItemCategory::Armor | ItemCategory::Accessory
+        )
+    }
 }
 
 /// Die fünf Seltenheitsstufen (docs/item_properties.md).
@@ -263,6 +273,19 @@ pub struct ItemDefinition {
     /// kein Wirkung. Additive Spalte (Migration 024 `mana_amount`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_amount: Option<i64>,
+    // --- Ausrüstungs-Achsen (additiv, Migration 029) ---
+    /// Slot-relevante Art gemäß docs/inventory_system.md §7.1 (kanonisch
+    /// kleingeschrieben, Kopfschutz = `helm`). Pflicht für die ausrüstbaren
+    /// Kategorien Weapon/Armor/Accessory; sonst `None`. serde-Default `None`
+    /// → Altbestände ohne Feld bleiben lesbar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equip_subtype: Option<String>,
+    /// Handhabung: `one_handed|two_handed|off_hand|ranged|none`
+    /// (docs/item_properties.md „Ausrüstungs-Achsen"). Pflicht für
+    /// ausrüstbare Kategorien; sonst `None`. `none` bedeutet NOT „kein
+    /// Slot" — entschieden wird über category + equip_subtype nach §7.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handling: Option<String>,
 }
 
 impl Default for ItemDefinition {
@@ -295,6 +318,8 @@ impl ItemDefinition {
             resistances: BTreeMap::new(),
             heal_amount: None,
             mana_amount: None,
+            equip_subtype: None,
+            handling: None,
         }
     }
 
@@ -386,6 +411,52 @@ impl ItemDefinition {
         if self.heal_amount.is_some() && self.mana_amount.is_some() {
             errors.push("heal_amount und mana_amount nicht gleichzeitig".to_string());
         }
+        // Ausrüstungs-Achsen (additive Spalten, Migration 029): geprüft wird
+        // NUR für die ausrüstbaren Kategorien Weapon/Armor/Accessory. Beide
+        // Achsen sind dort Pflicht (NULL nur bei nicht ausrüstbaren
+        // Kategorien zulässig); Wertedomains und zulässige Kombinationen
+        // exakt docs/inventory_system.md §7.1 — unbekannte Einzelwerte und
+        // Kombinationen ohne §7.1-Eintrag sind Definitionsfehler
+        // (fail-closed). Die Slot-Ableitung in try_equip bleibt Auftrag A2
+        // vorbehalten; weapon_type wird hierfür weder gelesen noch
+        // umgedeutet (reiner Content-Wert für Schaden/Darstellung).
+        if self.category.is_equippable() {
+            let cat = self.category.as_db();
+            match (self.equip_subtype.as_deref(), self.handling.as_deref()) {
+                (None, None) => {
+                    errors.push(format!(
+                        "equip_subtype und handling fehlen für ausrüstbare Kategorie {cat}"
+                    ));
+                }
+                (None, Some(_)) => {
+                    errors.push(format!(
+                        "equip_subtype fehlt für ausrüstbare Kategorie {cat}"
+                    ));
+                }
+                (Some(_), None) => {
+                    errors.push(format!("handling fehlt für ausrüstbare Kategorie {cat}"));
+                }
+                (Some(subtype), Some(handling)) => {
+                    let subtype_bekannt = equip_subtypes_for(self.category).contains(&subtype);
+                    if !subtype_bekannt {
+                        errors.push(format!(
+                            "equip_subtype {subtype:?} unbekannt für Kategorie {cat} (Domain: inventory_system.md §7.1)"
+                        ));
+                    }
+                    if !HANDLING_DOMAIN.contains(&handling) {
+                        errors.push(format!(
+                            "handling {handling:?} unbekannt (zulässig: one_handed|two_handed|off_hand|ranged|none)"
+                        ));
+                    } else if subtype_bekannt
+                        && !equip_handlings_for(self.category, subtype).contains(&handling)
+                    {
+                        errors.push(format!(
+                            "Kombination {cat} + equip_subtype {subtype:?} + handling {handling:?} ohne §7.1-Eintrag"
+                        ));
+                    }
+                }
+            }
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -433,6 +504,46 @@ impl ItemDefinition {
             (None, Some(m)) if m > 0 => Some((ConsumableKind::Mana, m)),
             _ => None,
         }
+    }
+}
+
+/// Handhabungs-Domain der Ausrüstungs-Achse `handling`
+/// (docs/item_properties.md „Ausrüstungs-Achsen"; Erweiterbarkeit =
+/// Content-/Auftragsentscheidung, keine verstreuten Einzelabfragen).
+const HANDLING_DOMAIN: [&str; 5] = ["one_handed", "two_handed", "off_hand", "ranged", "none"];
+
+/// Kanonische Subtyp-Domain je ausrüstbarer Kategorie, exakt
+/// docs/inventory_system.md §7.1 (kleingeschrieben, ohne Leerzeichen,
+/// Kopfschutz = `helm`; Kopfschutz-Zeile Nr. 1). Für nicht ausrüstbare
+/// Kategorien gibt es keine Subtyp-Domain (leere Liste).
+fn equip_subtypes_for(category: ItemCategory) -> &'static [&'static str] {
+    match category {
+        ItemCategory::Weapon => &["sword", "dagger", "axe", "mace", "staff", "bow", "crossbow"],
+        ItemCategory::Armor => &[
+            "helm", "shoulder", "arms", "gloves", "chest", "belt", "legs", "boots", "shield",
+        ],
+        ItemCategory::Accessory => &["earring", "amulet", "back", "ring", "lantern", "ammo"],
+        _ => &[],
+    }
+}
+
+/// Zulässige Handhabungen je (Kategorie, Subtyp) gemäß Zeilen der
+/// §7.1-Zuordnungstabelle: Hauptwaffen (sword/dagger/axe/mace/staff)
+/// ein-/zweihändig, Distanzwaffen (bow/crossbow) `ranged`, Schild
+/// (`category armor` + `shield`) ausschließlich `off_hand`, sonst Rüstung
+/// und Zubehör `none`. Eine Kombination ohne Eintrag ist ein
+/// Definitionsfehler (fail-closed); neue Subtypen werden beim nächsten
+/// Content-Auftrag hier ergänzt, die Slot-Ableitung selbst bleibt A2.
+fn equip_handlings_for(category: ItemCategory, subtype: &str) -> &'static [&'static str] {
+    match (category, subtype) {
+        (ItemCategory::Weapon, "sword" | "dagger" | "axe" | "mace" | "staff") => {
+            &["one_handed", "two_handed"]
+        }
+        (ItemCategory::Weapon, "bow" | "crossbow") => &["ranged"],
+        (ItemCategory::Armor, "shield") => &["off_hand"],
+        (ItemCategory::Armor, _) => &["none"],
+        (ItemCategory::Accessory, _) => &["none"],
+        _ => &[],
     }
 }
 
@@ -723,6 +834,8 @@ mod tests {
             base_damage: Some(10.0),
             duration_ms: Some(2500),
             range: Some(2.0),
+            equip_subtype: Some("sword".to_string()),
+            handling: Some("one_handed".to_string()),
             ..Default::default()
         }
     }
@@ -986,5 +1099,190 @@ mod tests {
         assert_eq!(def.heal_amount, None);
         assert_eq!(def.mana_amount, None);
         assert_eq!(def.consumable_effect(), None);
+    }
+
+    // ── Ausrüstungs-Achsen equip_subtype/handling (Migration 029, A1) ─────
+
+    /// Definition mit expliziten Achsenwerten (None bleibt None → NULL).
+    fn axes_def(
+        category: ItemCategory,
+        subtype: Option<&str>,
+        handling: Option<&str>,
+    ) -> ItemDefinition {
+        let mut def = ItemDefinition::new("achsentest", "Achsentest", category);
+        def.equip_subtype = subtype.map(str::to_string);
+        def.handling = handling.map(str::to_string);
+        def
+    }
+
+    /// Vollständige gültige Kombinationen, wörtlich aus der
+    /// §7.1-Zuordnungstabelle (Zeilen 1–19, ohne Food/Drink-Slots 20/21):
+    /// 5 Hauptwaffen × {one_handed, two_handed} + bow/crossbow × ranged
+    /// + 8 Rüstungen × none + Schild × off_hand + 6 Zubehör × none = 27.
+    fn gueltige_achsen_kombinationen() -> Vec<(ItemCategory, &'static str, &'static str)> {
+        let mut v = Vec::new();
+        for st in ["sword", "dagger", "axe", "mace", "staff"] {
+            for h in ["one_handed", "two_handed"] {
+                v.push((ItemCategory::Weapon, st, h));
+            }
+        }
+        for st in ["bow", "crossbow"] {
+            v.push((ItemCategory::Weapon, st, "ranged"));
+        }
+        for st in [
+            "helm", "shoulder", "arms", "gloves", "chest", "belt", "legs", "boots",
+        ] {
+            v.push((ItemCategory::Armor, st, "none"));
+        }
+        v.push((ItemCategory::Armor, "shield", "off_hand"));
+        for st in ["earring", "amulet", "back", "ring", "lantern", "ammo"] {
+            v.push((ItemCategory::Accessory, st, "none"));
+        }
+        v
+    }
+
+    /// `true` = die Achsenkombination validiert; `false` = Definitionsfehler.
+    fn achsen_ok(category: ItemCategory, subtype: Option<&str>, handling: Option<&str>) -> bool {
+        axes_def(category, subtype, handling).validate().is_ok()
+    }
+
+    #[test]
+    fn equip_axes_gueltige_matrix_entspricht_paragraph_7_1() {
+        let kombinationen = gueltige_achsen_kombinationen();
+        assert_eq!(kombinationen.len(), 27, "alle §7.1-Zeilen abgedeckt");
+        for (cat, st, h) in kombinationen {
+            assert!(
+                achsen_ok(cat, Some(st), Some(h)),
+                "gültige Kombination {cat:?} + {st:?} + {h:?} muss validieren"
+            );
+        }
+    }
+
+    #[test]
+    fn equip_axes_null_nur_bei_nicht_ausruestbaren_kategorien() {
+        // Ausrüstbare Kategorien: NULL in einer oder beiden Achsen = Fehler.
+        for cat in [
+            ItemCategory::Weapon,
+            ItemCategory::Armor,
+            ItemCategory::Accessory,
+        ] {
+            assert!(
+                axes_def(cat, None, None).validate().is_err(),
+                "{cat:?} ohne beide Achsen muss fehlschlagen"
+            );
+            assert!(axes_def(cat, Some("sword"), None).validate().is_err());
+            assert!(axes_def(cat, None, Some("none")).validate().is_err());
+        }
+        // Nicht ausrüstbare Kategorien: NULL/NULL ist zulässig (Bestand).
+        for cat in [
+            ItemCategory::RawMaterial,
+            ItemCategory::Food,
+            ItemCategory::Drink,
+            ItemCategory::Potion,
+            ItemCategory::Recipe,
+            ItemCategory::QuestItem,
+        ] {
+            assert!(
+                axes_def(cat, None, None).validate().is_ok(),
+                "{cat:?} mit NULL/NULL muss validieren"
+            );
+        }
+    }
+
+    #[test]
+    fn equip_axes_unbekannte_werte_sind_validierungsfehler() {
+        // (Kategorie, Subtyp, Handhabung) — jede Zeile ist ein
+        // Definitionsfehler: unbekannter Subtyp, Subtyp einer fremden
+        // Kategorie, nicht-kanonische Schreibweise (kleingeschrieben, kein
+        // Leerzeichen, Kopfschutz = helm) oder unbekannte Handhabung
+        // (Domain: one_handed|two_handed|off_hand|ranged|none).
+        let fehlerhafte_achsen = [
+            (ItemCategory::Weapon, Some("excalibur"), Some("one_handed")),
+            (ItemCategory::Weapon, Some("shield"), Some("off_hand")),
+            (ItemCategory::Armor, Some("sword"), Some("one_handed")),
+            (ItemCategory::Accessory, Some("helm"), Some("none")),
+            (ItemCategory::Weapon, Some("Sword"), Some("one_handed")),
+            (ItemCategory::Weapon, Some("sword "), Some("one_handed")),
+            (ItemCategory::Armor, Some("head"), Some("none")),
+            (ItemCategory::Armor, Some(""), Some("none")),
+            (ItemCategory::Weapon, Some("sword"), Some("juggler")),
+            (ItemCategory::Armor, Some("helm"), Some("")),
+        ];
+        for (cat, st, h) in fehlerhafte_achsen {
+            assert!(!achsen_ok(cat, st, h), "Fehler erwartet: {st:?} + {h:?}");
+        }
+    }
+
+    #[test]
+    fn equip_axes_kombination_ohne_paragraph_7_1_eintrag_fehlt() {
+        // Distanzwaffe nicht einhändig, Nahkampfwaffe nicht ranged;
+        // Nebenhand (V1) ausschließlich Schild; Kopf nicht off_hand.
+        let fehlerhafte_kombinationen = [
+            (ItemCategory::Weapon, "bow", "one_handed"),
+            (ItemCategory::Weapon, "sword", "ranged"),
+            (ItemCategory::Weapon, "sword", "off_hand"),
+            (ItemCategory::Armor, "shield", "none"),
+            (ItemCategory::Armor, "helm", "off_hand"),
+            (ItemCategory::Accessory, "ring", "two_handed"),
+        ];
+        for (cat, st, h) in fehlerhafte_kombinationen {
+            assert!(
+                !achsen_ok(cat, Some(st), Some(h)),
+                "Kombination ohne §7.1-Eintrag: {st:?} + {h:?}"
+            );
+        }
+        // Positivgegenproben: genau die §7.1-Kombinationen gelten.
+        for (cat, st, h) in [
+            (ItemCategory::Weapon, "bow", "ranged"),
+            (ItemCategory::Armor, "shield", "off_hand"),
+            (ItemCategory::Accessory, "ring", "none"),
+        ] {
+            assert!(achsen_ok(cat, Some(st), Some(h)), "§7.1: {st:?} + {h:?}");
+        }
+    }
+
+    #[test]
+    fn equip_axes_lesen_weapon_type_nicht_und_lassen_es_unangetastet() {
+        // weapon_type wird für die Achsen nicht gelesen: beliebiger
+        // Content-Wert zur Waffe ändert die Achsenprüfung nicht.
+        let mut def = axes_def(ItemCategory::Weapon, Some("bow"), Some("ranged"));
+        def.weapon_type = Some("alt_bogen".to_string());
+        assert!(def.validate().is_ok());
+        // Umgekehrt: korrekte Achsen heilen keinen fremden weapon_type auf
+        // Rüstung — die bestehende Regel „weapon_type nur für Kategorie
+        // weapon" bleibt unangetastet (Schild hat ausdrücklich KEINEN
+        // WeaponType, docs/item_properties.md).
+        let mut shield = axes_def(ItemCategory::Armor, Some("shield"), Some("off_hand"));
+        assert!(shield.validate().is_ok());
+        shield.weapon_type = Some("shield".to_string());
+        assert!(shield.validate().is_err());
+    }
+
+    #[test]
+    fn equip_axes_serde_rueckwaertskompatibel_und_roundtrip() {
+        // Altformat ohne die neuen Felder bleibt lesbar → Achsen None.
+        let json = r#"{"item_id":"holz","name":"Holz","category":"RawMaterial",
+            "rarity":"Common","item_level":1,"base_quality":100.0,"max_stack":100,
+            "weight":1.0,"weapon_type":null,"base_damage":null,"duration_ms":null,
+            "range":null,"armor_value":null,"min_level":null,"allowed_classes":[],
+            "binding_rule":"Tradeable","attribute_bonuses":{},"resistances":{}}"#;
+        let def: ItemDefinition = serde_json::from_str(json).expect("altformat ohne achsen lesbar");
+        assert_eq!(def.equip_subtype, None);
+        assert_eq!(def.handling, None);
+
+        // Setzter Achsenwert überlebt den JSON-Roundtrip.
+        let mut def = axes_def(ItemCategory::Armor, Some("shield"), Some("off_hand"));
+        def.armor_value = Some(4.0);
+        let json = serde_json::to_string(&def).expect("serialisierbar");
+        assert!(json.contains("\"equip_subtype\":\"shield\""));
+        assert!(json.contains("\"handling\":\"off_hand\""));
+        let back: ItemDefinition = serde_json::from_str(&json).expect("roundtrip lesbar");
+        assert_eq!(back, def);
+
+        // None-Achsen werden nicht geschrieben (alte Leser bleiben unberührt).
+        let plain = ItemDefinition::new("wolf_hide", "Wolfsfell", ItemCategory::RawMaterial);
+        let json = serde_json::to_string(&plain).expect("serialisierbar");
+        assert!(!json.contains("equip_subtype"));
+        assert!(!json.contains("\"handling\""));
     }
 }

@@ -4717,11 +4717,15 @@ mod tests {
                 crate::item::ItemCategory::Potion,
             );
             potion.max_stack = 20;
-            let sword = crate::item::ItemDefinition::new(
+            let mut sword = crate::item::ItemDefinition::new(
                 "eisenschwert",
                 "Eisenschwert",
                 crate::item::ItemCategory::Weapon,
             );
+            // Ausrüstungs-Achsen (Migration 029): ausrüstbare Kategorien
+            // sind achsenpflichtig (Validierung in item.rs).
+            sword.equip_subtype = Some("sword".into());
+            sword.handling = Some("one_handed".into());
             w.item_definitions.insert("hp_potion".into(), potion);
             w.item_definitions.insert("eisenschwert".into(), sword);
             let mut pot = crate::item::ItemInstance::new(
@@ -7415,11 +7419,14 @@ mod tests {
             );
             pot.count = 10;
             p1.inventory.base_slots[0] = Some(pot);
-            let sword = crate::item::ItemDefinition::new(
+            let mut sword = crate::item::ItemDefinition::new(
                 "eisenschwert",
                 "Eisenschwert",
                 crate::item::ItemCategory::Weapon,
             );
+            // Ausrüstungs-Achsen (Migration 029): achsenpflichtige Kategorie.
+            sword.equip_subtype = Some("sword".into());
+            sword.handling = Some("one_handed".into());
             let mut sw = crate::item::ItemInstance::new(
                 "sword-2",
                 "eisenschwert",

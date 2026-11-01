@@ -334,7 +334,8 @@ mod tests {
     /// lückenlos ab 1 nummeriert, einschließlich der
     /// Lifecycle-Metadaten-Migration (021), Händler-Migration (022) und
     /// des atomaren Trade-Commit-Nachweises (023) sowie des Serverautoritat-
-    /// wetter-Migration (027) und der Briefkasten-Positions-Migration (028).
+    /// wetter-Migration (027), der Briefkasten-Positions-Migration (028) und
+    /// der Ausrüstungs-Achsen-Migration (029).
     /// Nur Dateiebene — es wird keine Migration ausgeführt und keine
     /// Datenbank berührt.
     #[test]
@@ -344,11 +345,11 @@ mod tests {
         let nums: Vec<u32> = files.iter().map(|f| f.num).collect();
         assert_eq!(
             nums,
-            (1..=28).collect::<Vec<_>>(),
-            "Migrationen 001–028 lückenlos"
+            (1..=29).collect::<Vec<_>>(),
+            "Migrationen 001–029 lückenlos"
         );
         let last = files.last().expect("mindestens eine Migration");
-        assert_eq!((last.num, last.tag.as_str()), (28, "mailbox_locations"));
-        assert_eq!(last.file, "028_mailbox_locations.sql");
+        assert_eq!((last.num, last.tag.as_str()), (29, "item_equip_axes"));
+        assert_eq!(last.file, "029_item_equip_axes.sql");
     }
 }

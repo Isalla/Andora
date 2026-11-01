@@ -1356,6 +1356,83 @@ pub(crate) fn consumable_effect_from_db(
     (positive(heal), positive(mana))
 }
 
+/// Maps the two additive equip-axis columns (Migration 029) into the
+/// `ItemDefinition` axis fields. NULL stays NULL — no axis value and no
+/// default is invented; non-equipment rows keep their existing NULL/NULL
+/// state. Values are passed through untouched: the canonical spelling and
+/// the value domains (`inventory_system.md` §7.1) are validated in
+/// `item.rs` (`validate`), not here. Pure and testable without any DB run.
+pub(crate) fn equip_axes_from_db(
+    subtype: Option<String>,
+    handling: Option<String>,
+) -> (Option<String>, Option<String>) {
+    (subtype, handling)
+}
+
+/// Eine Zeile der Item-Definitionen (Migration 014, additive Spalten aus 024
+/// und 029). Mit den beiden Ausrüstungs-Achsen sind es 18 Spalten — über der
+/// 16-Spalten-Grenze der sqlx-0.8-Tupel, daher die strukturbasierte Zeile wie
+/// `CharacterRow`/`NpcStateRow`. Beide Achsen sind NULLbar: NULL bleibt NULL
+/// (Achse fehlt), es wird kein Wert erfunden und `weapon_type` nicht
+/// umgedeutet.
+#[derive(Debug, Clone)]
+struct ItemDefinitionRow {
+    id: String,
+    name: String,
+    description: Option<String>,
+    category: String,
+    rarity: String,
+    item_level: i32,
+    base_quality: f64,
+    max_stack: i64,
+    weight: f64,
+    base_damage: Option<f64>,
+    duration_ms: Option<i64>,
+    range: Option<f64>,
+    weapon_type: Option<String>,
+    armor_value: Option<f64>,
+    min_level: Option<i32>,
+    binding_rule: String,
+    equip_subtype: Option<String>,
+    handling: Option<String>,
+}
+
+impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for ItemDefinitionRow {
+    fn from_row(row: &sqlx::mysql::MySqlRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(ItemDefinitionRow {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            description: row.try_get("description")?,
+            category: row.try_get("category")?,
+            rarity: row.try_get("rarity")?,
+            item_level: row.try_get("item_level")?,
+            base_quality: row.try_get("base_quality")?,
+            max_stack: row.try_get("max_stack")?,
+            weight: row.try_get("weight")?,
+            base_damage: row.try_get("base_damage")?,
+            duration_ms: row.try_get("duration_ms")?,
+            range: row.try_get("range")?,
+            weapon_type: row.try_get("weapon_type")?,
+            armor_value: row.try_get("armor_value")?,
+            min_level: row.try_get("min_level")?,
+            binding_rule: row.try_get("binding_rule")?,
+            equip_subtype: row.try_get("equip_subtype")?,
+            handling: row.try_get("handling")?,
+        })
+    }
+}
+
+/// Spaltenliste der Item-Definitionen (Migration 014, additive Achsen 029).
+/// `range` ist ein reserviertes Wort (MariaDB 10.x) und wird quotiert; der
+/// Spaltenname bleibt `range` (keine Schemaänderung). Die beiden additiven
+/// Ausrüstungs-Achsen (Migration 029) sind Teil DESSELBEN SELECTs — keine
+/// zweite Abfrage je Zeile.
+const ITEM_DEFINITIONS_SQL: &str = "SELECT id, name, description, category, rarity, \
+     item_level, base_quality, max_stack, weight, base_damage, duration_ms, `range`, \
+     weapon_type, armor_value, min_level, binding_rule, equip_subtype, handling \
+     FROM item_definitions";
+
 /// Lädt alle statischen Item-Definitionen inkl. Klassen/Attributen/
 /// Resistenzen (Content-Schicht der Realm-Inhaltsversion).
 pub async fn load_item_definitions(
@@ -1363,58 +1440,34 @@ pub async fn load_item_definitions(
 ) -> Result<Vec<crate::item::ItemDefinition>, String> {
     use crate::item::{BindingRule, ItemCategory, ItemDefinition, Rarity};
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            String,
-            String,
-            i32,
-            f64,
-            i64,
-            f64,
-            Option<f64>,
-            Option<i64>,
-            Option<f64>,
-            Option<String>,
-            Option<f64>,
-            Option<i32>,
-            String,
-        ),
-    >(
-        // `range` ist ein reserviertes Wort (MariaDB 10.x) und wird quotiert;
-        // der Spaltenname bleibt `range` (keine Schemaänderung).
-        "SELECT id, name, description, category, rarity, item_level, base_quality, \
-             max_stack, weight, base_damage, duration_ms, `range`, weapon_type, armor_value, \
-             min_level, binding_rule FROM item_definitions",
-    )
-    .persistent(false)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Item-Definitionen laden: {e}"))?;
+    let rows = sqlx::query_as::<_, ItemDefinitionRow>(ITEM_DEFINITIONS_SQL)
+        .persistent(false)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Item-Definitionen laden: {e}"))?;
 
     let mut defs = Vec::new();
-    for (
-        id,
-        name,
-        description,
-        category,
-        rarity,
-        item_level,
-        base_quality,
-        max_stack,
-        weight,
-        base_damage,
-        duration_ms,
-        range,
-        weapon_type,
-        armor_value,
-        min_level,
-        binding_rule,
-    ) in rows
-    {
+    for row in rows {
+        let ItemDefinitionRow {
+            id,
+            name,
+            description,
+            category,
+            rarity,
+            item_level,
+            base_quality,
+            max_stack,
+            weight,
+            base_damage,
+            duration_ms,
+            range,
+            weapon_type,
+            armor_value,
+            min_level,
+            binding_rule,
+            equip_subtype,
+            handling,
+        } = row;
         let category = match ItemCategory::from_db(&category) {
             Some(c) => c,
             None => {
@@ -1483,6 +1536,13 @@ pub async fn load_item_definitions(
         };
         let (heal_amount, mana_amount) = consumable_effect_from_db(heal_raw, mana_raw);
 
+        // Ausrüstungs-Achsen (additive Spalten, Migration 029): kommen aus dem
+        // Haupt-SELECT oben. NULL bleibt NULL (Achse fehlt) — keine Erfindung,
+        // kein Default, keine Umdeutung von `weapon_type`; die Wertedomains
+        // prüft `ItemDefinition::validate()`, deren Fehler hier nur die Zeile
+        // überspringen (Verhalten wie bisher).
+        let (equip_subtype, handling) = equip_axes_from_db(equip_subtype, handling);
+
         let def = ItemDefinition {
             item_id: id,
             name,
@@ -1505,6 +1565,8 @@ pub async fn load_item_definitions(
             resistances: resists.into_iter().collect(),
             heal_amount,
             mana_amount,
+            equip_subtype,
+            handling,
         };
         if def.validate().is_err() {
             // Der Validierungsfehler wird NICHT ausgegeben: `ItemError`
@@ -3048,5 +3110,116 @@ mod db_error_log_tests {
         plain.heal_amount = h;
         plain.mana_amount = m;
         assert_eq!(plain.consumable_effect(), None);
+    }
+
+    // ── Additive Ausrüstungs-Achsen loader (Migration 029, NULL-safe) ──────
+    // Pure conversion test — NO SQL/DB decode is claimed here (no DB run).
+
+    #[test]
+    fn item_definition_select_und_from_row_mapping_sind_deckungsgleich() {
+        // Der Haupt-SELECT (18 Spalten) und ItemDefinitionRow::from_row müssen
+        // dieselben Spaltennamen führen: sonst scheitert der Decode eines
+        // Achsenwerts erst zur Laufzeit. Reine Quelltextprüfung — keine DB.
+        let sql = ITEM_DEFINITIONS_SQL
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let columns = sql
+            .split_once("SELECT ")
+            .and_then(|(_, rest)| rest.split_once(" FROM item_definitions"))
+            .map(|(cols, _)| cols)
+            .expect("SELECT … FROM item_definitions");
+        let cols: Vec<String> = columns
+            .split(',')
+            .map(|c| c.trim().trim_matches('`').to_string())
+            .collect();
+        assert_eq!(cols.len(), 18, "18 Spalten inkl. beider Achsen");
+        for expected in ["equip_subtype", "handling", "weapon_type"] {
+            assert!(cols.iter().any(|c| c == expected), "{expected} im SELECT");
+        }
+        let source = include_str!("db.rs");
+        let mapping = source
+            .split_once("impl sqlx::FromRow<'_, sqlx::mysql::MySqlRow> for ItemDefinitionRow")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("ItemDefinitionRow::from_row fehlt");
+        for col in &cols {
+            assert!(
+                mapping.contains(&format!("try_get(\"{col}\")")),
+                "Spalte {col} wird im Loader nicht gemappt"
+            );
+        }
+    }
+
+    #[test]
+    fn equip_axes_values_pass_through_unchanged() {
+        // Gesetzte Achsenwerte werden unverändert durchgereicht (keine
+        // Normalisierung, kein Default, keine Umdeutung von weapon_type).
+        assert_eq!(
+            equip_axes_from_db(Some("sword".into()), Some("one_handed".into())),
+            (Some("sword".to_string()), Some("one_handed".to_string()))
+        );
+        // Einzel-NULL bleibt NULL → bei ausrüstbarer Kategorie unten Fehler.
+        assert_eq!(
+            equip_axes_from_db(Some("shield".into()), None),
+            (Some("shield".to_string()), None)
+        );
+        assert_eq!(
+            equip_axes_from_db(None, Some("none".into())),
+            (None, Some("none".to_string()))
+        );
+        assert_eq!(equip_axes_from_db(None, None), (None, None));
+    }
+
+    #[test]
+    fn equip_axes_loader_roundtrip_feeds_definition_and_validates() {
+        // Row → equip_axes_from_db → ItemDefinition → validate (der Loader
+        // überspringt ungültige Zeilen wie bisher, Loggen inbegriffen).
+        // Gültige Waffenreihe (sword + one_handed) überlebt den Roundtrip …
+        let (st, hd) = equip_axes_from_db(Some("sword".into()), Some("one_handed".into()));
+        let mut waffe = crate::item::ItemDefinition::new(
+            "eisenschwert",
+            "Eisenschwert",
+            crate::item::ItemCategory::Weapon,
+        );
+        waffe.weapon_type = Some("one_hand_sword".into());
+        waffe.equip_subtype = st;
+        waffe.handling = hd;
+        assert!(waffe.validate().is_ok());
+        assert_eq!(waffe.equip_subtype.as_deref(), Some("sword"));
+        assert_eq!(waffe.handling.as_deref(), Some("one_handed"));
+        // … Rohstoff-Zeile mit NULL/NULL validiert unverändert (Bestand), …
+        let (st, hd) = equip_axes_from_db(None, None);
+        let material = crate::item::ItemDefinition {
+            equip_subtype: st,
+            handling: hd,
+            ..crate::item::ItemDefinition::new(
+                "wolf_hide",
+                "Wolfsfell",
+                crate::item::ItemCategory::RawMaterial,
+            )
+        };
+        assert!(material.validate().is_ok());
+        // … eine Rüstungszeile ohne Achsen (Bestand-NULL) wird dagegen
+        // fail-closed abgelehnt und vom Loader übersprungen.
+        let (st, hd) = equip_axes_from_db(None, None);
+        let mut rustung = crate::item::ItemDefinition::new(
+            "kettenhelm",
+            "Kettenhelm",
+            crate::item::ItemCategory::Armor,
+        );
+        rustung.equip_subtype = st;
+        rustung.handling = hd;
+        assert!(rustung.validate().is_err());
+        // Unbekannter Achsenwert aus einer Zeile → Validierungsfehler.
+        let (st, hd) = equip_axes_from_db(Some("Kopf".into()), Some("none".into()));
+        let mut bogus = crate::item::ItemDefinition::new(
+            "kettenhelm",
+            "Kettenhelm",
+            crate::item::ItemCategory::Armor,
+        );
+        bogus.equip_subtype = st;
+        bogus.handling = hd;
+        assert!(bogus.validate().is_err());
     }
 }

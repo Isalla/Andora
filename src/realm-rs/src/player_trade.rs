@@ -1393,13 +1393,22 @@ mod tests {
     }
 
     fn sword_def() -> crate::item::ItemDefinition {
-        crate::item::ItemDefinition::new("eisenschwert", "Eisenschwert", ItemCategory::Weapon)
+        let mut d =
+            crate::item::ItemDefinition::new("eisenschwert", "Eisenschwert", ItemCategory::Weapon);
+        // Ausrüstungs-Achsen (Migration 029): ausrüstbare Kategorien sind
+        // achsenpflichtig — ohne sie validiert die Definition nicht und
+        // der Trade-Annahmepfad lehnt sie fail-closed ab.
+        d.equip_subtype = Some("sword".into());
+        d.handling = Some("one_handed".into());
+        d
     }
 
     fn bop_def() -> crate::item::ItemDefinition {
         let mut d =
             crate::item::ItemDefinition::new("bop_schwert", "BoP-Schwert", ItemCategory::Weapon);
         d.binding_rule = crate::item::BindingRule::BindOnPickup;
+        d.equip_subtype = Some("sword".into());
+        d.handling = Some("one_handed".into());
         d
     }
 
