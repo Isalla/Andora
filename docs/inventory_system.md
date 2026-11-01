@@ -262,6 +262,12 @@ Erweiterbarkeit ohne Rust-Kern-Änderung) sind in `item_properties.md`, Abschnit
 Subtyp und Handhabung ohne Eintrag hier ist ein Definitionsfehler und wird
 **fail-closed** mit `wrong_slot` abgelehnt — nicht ausrüstbar.
 
+> **Nicht ausrüstbare Kategorien** (`Material`, `Potion`, `Food`,
+> `Drink` …) tragen `equip_subtype`/`handling` als `NULL`; das ist kein
+> Definitionsfehler. Die fail-closed-Regel gilt ausschließlich für die
+> ausrüstbaren Kategorien `Weapon`, `Armor`, `Accessory`. Bestehende
+> Definitionen bleiben beim Einführen der Achsen `NULL`.
+
 **Bestand (Slot-Nummern):** Die Nummerierung entspricht unverändert der
 Reihenfolge von `EquipSlot` (`src/realm-rs/src/inventory.rs`) und damit den
 kanonischen DB-Schlüsseln in `character_equipment.slot`: `head`, `earring1`,
@@ -304,6 +310,12 @@ Kombinationsprüfung zulässig**; die Prüfung gilt nur beim Ausrüsten.
 - Bei Regelkonflikt wird **nichts automatisch abgelegt**. Der Spieler entscheidet.
 - Alle Prüfungen erfolgen vor jeder Mutation; Ablehnung ohne Zustandsänderung,
   ohne Dirty-State (fail-closed).
+
+> **Prüfreihenfolge:** Die Grobkategorieprüfung bleibt vorgelagert —
+> nicht ausrüstbare Kategorien antworten weiterhin `not_equippable`.
+> `wrong_slot` bedeutet: Die Kategorie ist ausrüstbar, aber der
+> gesendete Slot gehört nicht zu dem aus der Definition bestimmten
+> Slot.
 
 **Kodierungshinweis (BESTAND):** Die Gründe `wrong_slot`,
 `dual_wield_not_allowed`, `two_handed_needs_offhand_free` und
