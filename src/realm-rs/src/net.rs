@@ -1036,6 +1036,9 @@ async fn dispatch(
             handlers::handle_player_trade(ctx, tx, conn_id, frame.seq, &data).await
         }
         c2s::INVENTORY => handlers::handle_inventory(ctx, tx, conn_id, frame.seq, &data).await,
+        c2s::REVIVE => {
+            handlers::handle_revive(&ctx.shared, tx, conn_id, frame.seq, &ctx.cfg.death).await
+        }
         // AUCTION_LIST / AUCTION_BID: künftig (wie Übergangsstand).
         // Unbekannte Typen werden bereits vor dem Gate verworfen.
         other => log::info!("unknown type {other}"),
@@ -1324,6 +1327,8 @@ mod tests {
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
             weather: crate::config::WeatherCfg::default(),
+            death: crate::config::DeathCfg::default(),
+            races: crate::config::RacesCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });

@@ -304,6 +304,129 @@ pub fn weather_config(env: &HashMap<String, String>) -> WeatherCfg {
     }
 }
 
+/// Spielertod V1 (docs/Kampfsystem.md §§13–14): Rückkehrpunkt der manuellen
+/// Wiederbelebung.
+///
+/// Herkunft: Eigene Gebiets-/Respawnpunkt-Inhalte (§14: „Jedes größere Gebiet
+/// besitzt mehrere Respawnpunkte") existieren noch NICHT — weder Tabelle noch
+/// Content (die `zone_id` aller bestehenden Inhalte ist 0, eine Zonen-Tabelle
+/// gibt es nicht). V1 verwendet daher EINEN realmweiten Rückkehrpunkt aus der
+/// Realm-Konfiguration. Der Default (0, 0) ist keine erfundene Koordinate:
+/// er ist der bereits vorhandene Charakter-Startpunkt der
+/// `characters`-Tabelle (`pos_x`/`pos_y` DEFAULT 0, Migration 001) und damit
+/// der gesicherte Einstiegspunkt des aktuellen Gebiets. Sobald
+/// Gebiets-Respawnpunkte als Content vorliegen, ersetzt deren Auswahl diesen
+/// einen Wert (die Wiederbelebung selbst bleibt unverändert).
+#[derive(Debug, Clone)]
+pub struct DeathCfg {
+    /// X-Koordinate des Rückkehrpunkts (Weltkoordinaten wie `characters.pos_x`).
+    pub respawn_x: f64,
+    /// Y-Koordinate des Rückkehrpunkts (Weltkoordinaten wie `characters.pos_y`).
+    pub respawn_y: f64,
+}
+
+impl Default for DeathCfg {
+    fn default() -> Self {
+        DeathCfg {
+            respawn_x: 0.0,
+            respawn_y: 0.0,
+        }
+    }
+}
+
+/// Werte aus config.env (`RESPAWN_X`, `RESPAWN_Y`). Nicht parsebare oder
+/// nicht endliche Werte fallen auf den Startpunkt (0, 0) zurück — ein
+/// unendlicher Rückkehrpunkt würde die Wiederbelebung otherwise komplett
+/// blockieren; die Handler prüfen zusätzlich endliche Koordinaten.
+pub fn death_config(env: &HashMap<String, String>) -> DeathCfg {
+    let finite = |v: f64| v.is_finite();
+    let x = numf(env, "RESPAWN_X", 0.0);
+    let y = numf(env, "RESPAWN_Y", 0.0);
+    DeathCfg {
+        respawn_x: if finite(x) { x } else { 0.0 },
+        respawn_y: if finite(y) { y } else { 0.0 },
+    }
+}
+
+/// Die fünf kanonischen Rassenwerte (docs/Charaktererstellung_und_Charakter-
+/// darstellung.md, Abschnitt „Speicherort der Rassen- und Startattributdaten"):
+/// kleingeschrieben, ohne Umlaute. Konfigurationsprüfung und Rassen-Loader
+/// lassen ausschließlich genau diese Werte zu — keine Synonyme, keine
+/// Groß-/Kleinschreibvarianten.
+pub const CANONICAL_RACES: [&str; 5] = ["mensch", "elf", "andorer", "luzilla", "mandalonier"];
+
+/// Rassen, die bei der Charaktererstellung wählbar sind, wenn `SELECTABLE_RACES`
+/// nicht gesetzt oder leer ist (dasselbe Dokument): genau `mensch`, `elf` und
+/// `andorer`; `luzilla` und `mandalonier` sind für den Start deaktiviert
+/// (Expansion 1 beziehungsweise 2, docs/Attribute_und_Regeneration.md §2).
+pub const DEFAULT_SELECTABLE_RACES: [&str; 3] = ["mensch", "elf", "andorer"];
+
+/// Realmseitige Konfiguration der bei der Charaktererstellung wählbaren Rassen
+/// (Projekt-Status Eintrag 22). Reine Konfigurationsseite — die Startwertmatrix
+/// selbst liegt in der Rassetabelle (Migration 030, db.rs-Loader).
+#[derive(Debug, Clone)]
+pub struct RacesCfg {
+    /// Geprüfte Liste der wählbaren Rassen (kanonische Werte, Reihenfolge wie
+    /// in config.env, ohne Duplikate).
+    pub selectable: Vec<String>,
+}
+
+impl Default for RacesCfg {
+    fn default() -> Self {
+        RacesCfg {
+            selectable: DEFAULT_SELECTABLE_RACES
+                .iter()
+                .map(|r| r.to_string())
+                .collect(),
+        }
+    }
+}
+
+/// Wert aus `SELECTABLE_RACES` (kommagetrennt, kanonische kleingeschriebene
+/// Werte). Verbindliche Semantik
+/// (docs/Charaktererstellung_und_Charakterdarstellung.md):
+/// - nicht gesetzt oder leer ⇒ exakt `DEFAULT_SELECTABLE_RACES`
+///   (`mensch`, `elf`, `andorer`; `luzilla`/`mandalonier` NICHT wählbar);
+/// - ein unbekannter oder nicht kanonischer Wert ⇒ Fehler und damit
+///   Realm-Startabbruch mit klarer Meldung — er wird NICHT ignoriert und
+///   NICHT durch einen Standardwert ersetzt (kein Fallback, analog R-6 bei
+///   `SEC_*`). Leere Einträge und Duplikate sind ebenfalls Fehler: die Liste
+///   ist eine Menge kanonischer Werte, Nachlässigkeit wäre ein verdeckter
+///   Konfigurationsfehler.
+pub fn races_config(env: &HashMap<String, String>) -> Result<RacesCfg, String> {
+    let allowed = CANONICAL_RACES.join(", ");
+    let raw = env.get("SELECTABLE_RACES").cloned().unwrap_or_default();
+    // `load_env` trimmt Dateiwerte bereits; ein ausdrücklich leerer Wert
+    // (Schlüssel gesetzt, Inhalt leer) ist wie „nicht gesetzt" zu werten.
+    if raw.trim().is_empty() {
+        return Ok(RacesCfg::default());
+    }
+    let mut selectable: Vec<String> = Vec::new();
+    for item in raw.split(',') {
+        let race = item.trim();
+        if race.is_empty() {
+            return Err(format!(
+                "SELECTABLE_RACES: leerer Eintrag in der Rassenliste — erlaubt sind nur die \
+                 kanonischen Werte {allowed}"
+            ));
+        }
+        if !CANONICAL_RACES.contains(&race) {
+            return Err(format!(
+                "SELECTABLE_RACES: unbekannter Rassenwert {race:?} — erlaubt sind nur die \
+                 kanonischen Werte {allowed} (kleingeschrieben, ohne Umlaute)"
+            ));
+        }
+        if selectable.iter().any(|r| r == race) {
+            return Err(format!(
+                "SELECTABLE_RACES: Rassenwert {race:?} mehrfach — jede Rasse ist genau \
+                 einmal anzugeben"
+            ));
+        }
+        selectable.push(race.to_string());
+    }
+    Ok(RacesCfg { selectable })
+}
+
 /// Vorläufige Combat-V1-Balancingwerte (docs/Kampfsystem.md §§4–7, 17).
 /// Alle Werte sind per config.env übersteuerbar und werden anhand späterer
 /// Praxistests angepasst — keine Architekturwerte.
@@ -616,6 +739,12 @@ pub struct Config {
     pub loot: LootCfg,
     /// Serverautoritatives Wetter (docs/Weltzeit_und_Wettersystem.md).
     pub weather: WeatherCfg,
+    /// Spielertod V1 (docs/Kampfsystem.md §§13–14): Rückkehrpunkt der
+    /// manuellen Wiederbelebung.
+    pub death: DeathCfg,
+    /// Realmseitig wählbare Rassen bei der Charaktererstellung
+    /// (docs/Charaktererstellung_und_Charakterdarstellung.md, Eintrag 22).
+    pub races: RacesCfg,
     /// Progressionssystem V1 (docs/Erfahrung_und_Progressionssystem.md).
     pub progression: ProgressionCfg,
     /// Spieler-Persistenz Stufe B (docs/Player_Persistenz.md).
@@ -760,6 +889,13 @@ pub fn load_config(path: &std::path::Path) -> Result<Config, String> {
         progression: progression_config(&env),
         persist: persist_config(&env),
         weather: weather_config(&env),
+        death: death_config(&env),
+        // Ein unbekannter/nicht kanonischer SELECTABLE_RACES-Wert ist ein
+        // Startfehler und kein Default (kein Ignorieren, kein Fallback) —
+        // derselbe `Result`-Kanal wie bei `security` oben. Die validierte
+        // Liste ist die Grundlage, gegen die der Rassen-Loader anschließend
+        // prüft (docs/Charaktererstellung_und_Charakterdarstellung.md).
+        races: races_config(&env)?,
         // Audit 4.4, R-6: Ein ungültiger expliziter SEC_-Wert ist ein
         // Startfehler und kein Default. Der Fehler nutzt denselben
         // `Result`-Kanal wie die fehlende Realm-Konfiguration darüber und
@@ -1233,6 +1369,97 @@ mod tests {
         let cfg = load_config(&p).expect("gültige Konfiguration muss laden");
         assert_eq!(cfg.security.rare_per_sec, 7);
         assert_eq!(cfg.security.max_frame_bytes, 8192);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── Eintrag 22: SELECTABLE_RACES (Config-Validierung, ohne DB) ─────────
+    //
+    // Verbindliche Semantik
+    // (docs/Charaktererstellung_und_Charakterdarstellung.md): leer/nicht
+    // gesetzt = genau mensch, elf, andorer; unbekannter Wert = Startabbruch,
+    // KEIN Standardwert-Fallback, KEIN Ignorieren.
+
+    fn names(cfg: &RacesCfg) -> Vec<&str> {
+        cfg.selectable.iter().map(|s| s.as_str()).collect()
+    }
+
+    #[test]
+    fn selectable_races_unset_yields_exactly_the_three_defaults() {
+        let cfg = races_config(&env_of(&[])).expect("fehlender Schlüssel ist erlaubt");
+        assert_eq!(names(&cfg), vec!["mensch", "elf", "andorer"]);
+    }
+
+    #[test]
+    fn selectable_races_empty_value_yields_exactly_the_three_defaults() {
+        // Ausdrücklich leer ist wie „nicht gesetzt" zu werten — luzilla und
+        // mandalonier sind damit NICHT wählbar.
+        for raw in ["", "   "] {
+            let cfg = races_config(&env_of(&[("SELECTABLE_RACES", raw)]))
+                .expect("leerer Wert ist erlaubt");
+            assert_eq!(names(&cfg), vec!["mensch", "elf", "andorer"]);
+            assert!(!cfg.selectable.iter().any(|r| r == "luzilla"));
+            assert!(!cfg.selectable.iter().any(|r| r == "mandalonier"));
+        }
+    }
+
+    #[test]
+    fn selectable_races_accepts_all_five_canonical_values() {
+        let cfg = races_config(&env_of(&[(
+            "SELECTABLE_RACES",
+            "mensch, elf ,andorer,luzilla,mandalonier",
+        )]))
+        .expect("fünf kanonische Werte sind gültig");
+        assert_eq!(
+            names(&cfg),
+            vec!["mensch", "elf", "andorer", "luzilla", "mandalonier"]
+        );
+    }
+
+    #[test]
+    fn selectable_races_rejects_unknown_value_without_fallback() {
+        // Kein Ignorieren, kein Default-Fallback: der Fehler nennt den
+        // Schlüssel und die erlaubten kanonischen Werte.
+        for raw in ["zwerg", "mensch,zwerg", "Mensch", "mensch,Elf", "mensch,,"] {
+            let err =
+                races_config(&env_of(&[("SELECTABLE_RACES", raw)])).expect_err("muss ablehnen");
+            assert!(err.contains("SELECTABLE_RACES"), "{raw:?} → {err}");
+        }
+    }
+
+    #[test]
+    fn selectable_races_rejects_duplicates() {
+        let err = races_config(&env_of(&[("SELECTABLE_RACES", "mensch,mensch,elf")]))
+            .expect_err("Duplikate sind kein Menge-Bestandteil");
+        assert!(err.contains("SELECTABLE_RACES"), "{err}");
+        assert!(err.contains("mensch"), "{err}");
+    }
+
+    /// End-to-End am **echten** `load_config`: ein unbekannter Rassenwert in
+    /// der Datei verhindert den Start über denselben Kanal wie die SEC_-Werte.
+    #[test]
+    fn load_config_rejects_unknown_selectable_race_from_file() {
+        let dir = std::env::temp_dir().join(format!("realmrs-races-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.env");
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\n\
+             REALM_STATE_DB_NAME=realm_state_de2\nSELECTABLE_RACES=mensch,elf,andorer,luzilla\n",
+        )
+        .unwrap();
+        let cfg = load_config(&p).expect("gültige Rassenliste muss laden");
+        assert_eq!(
+            names(&cfg.races),
+            vec!["mensch", "elf", "andorer", "luzilla"]
+        );
+        std::fs::write(
+            &p,
+            "REALM_ID=2\nREALM_STATE_DB_HOST=db\nREALM_STATE_DB_USER=u\nREALM_STATE_DB_PASSWORD=p\n\
+             REALM_STATE_DB_NAME=realm_state_de2\nSELECTABLE_RACES=zwerg\n",
+        )
+        .unwrap();
+        let err = load_config(&p).expect_err("unbekannter Rassenwert muss den Start verhindern");
+        assert!(err.contains("SELECTABLE_RACES"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

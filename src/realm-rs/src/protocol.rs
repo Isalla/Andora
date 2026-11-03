@@ -43,6 +43,13 @@ pub mod c2s {
     /// Regeln prüft der Server. Antwort: S2C 25 INVENTORY_RESULT, Erfolg
     /// pusht zusätzlich S2C 23 INVENTORY.
     pub const INVENTORY: i64 = 22;
+    /// Spielertod V1 (docs/Kampfsystem.md §13): manuelle Wiederbelebung am
+    /// serverseitigen Rückkehrpunkt. Payload LEER ({}) — der Client sendet
+    /// ausschließlich die Absicht. HP, Position und Rückkehrpunkt bestimmt
+    /// allein der Server; Werte vom Client gibt es nicht und werden nicht
+    /// gelesen. Antwort: S2C 27 REVIVE_RESULT, Erfolg pusht zusätzlich das
+    /// eigene STATE (S2C 4) mit der autoritativen Position und HP.
+    pub const REVIVE: i64 = 23;
 }
 
 /// Server → Client. Vollständige ID-Liste (auch künftige Typen):
@@ -111,6 +118,13 @@ pub mod s2c {
     ///  season: spring|summer|autumn|winter, revision}. The client only
     /// represents it; it never decides the state.
     pub const WEATHER: i64 = 26;
+    /// Ergebnis einer C2S-23-Wiederbelebungsabsicht (docs/Kampfsystem.md §13):
+    /// {ok, reason?} mit stabilem reason (`not_dead` | `respawn_unavailable`).
+    /// Erfolg (ok:true) bestätigt ausschließlich den Ablauf — die maßgeblichen
+    /// Werte (Position, HP) erhält der Eigentümer wie sonst auch über sein
+    /// eigenes STATE (S2C 4, seq 0). Ablehnung verändert HP und Position nicht.
+    /// `seq` ist ausschließlich Korrelation und wird zurückgespiegelt.
+    pub const REVIVE_RESULT: i64 = 27;
 }
 
 /// Drahtformat einer Nachricht: {seq, type, data} als JSON-Frame.
@@ -183,6 +197,8 @@ mod tests {
         assert_eq!(s2c::VITALS, 24);
         assert_eq!(s2c::INVENTORY_RESULT, 25);
         assert_eq!(s2c::WEATHER, 26);
+        assert_eq!(c2s::REVIVE, 23);
+        assert_eq!(s2c::REVIVE_RESULT, 27);
     }
 
     #[test]

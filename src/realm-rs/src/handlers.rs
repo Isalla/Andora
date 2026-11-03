@@ -840,6 +840,27 @@ pub async fn handle_move(
             &world.players.get(&pid).map(|p| &p.effects).unwrap_or(&Vec::new()),
         );
 
+    // Spielertod V1 (docs/Kampfsystem.md §13): ein serverseitig toter
+    // Charakter (hp <= 0) bewegt sich nicht — die Absicht wird verworfen,
+    // BEVOR Position, Aktivität oder Cast-Zustand angefasst werden. Damit
+    // hilft auch wiederholtes SENDEN von MOVE nichts (keine Umgehung), und
+    // die bestehende Root-/Effect-/Speed-Prüfung bleibt unverändert wirksam.
+    // Fachlich unzulässige Absicht: kein Sicherheits-Zähler (log_reject …, 0).
+    if world.players.get(&pid).is_some_and(|me| me.hp <= 0) {
+        let me = world.players.get(&pid);
+        crate::security::log_reject(
+            me,
+            conn_id,
+            &crate::security::RejectInfo {
+                reason: "character_dead".into(),
+                msg_type: crate::protocol::c2s::MOVE,
+                detail: String::new(),
+            },
+            0,
+        );
+        return;
+    }
+
     if let Some(me) = world.players.get_mut(&pid) {
         if !moving {
             return;
@@ -865,6 +886,121 @@ pub async fn handle_move(
     // Dialoge ab und informiert den Partner (docs/Handelssystem.md §15).
     let notes = crate::player_trade::sweep_stand(&mut world, trade_radius);
     crate::player_trade::send_notes(&world, &notes);
+}
+
+/// Wiederbelebung V1 (docs/Kampfsystem.md §§13–14): manuelle Rückkehr eines
+/// toten Charakters an den serverseitigen Rückkehrpunkt.
+///
+/// Der Client sendet ausschließlich die Absicht (leeres Payload, C2S 23) —
+/// HP- oder Positionsangaben vom Client gibt es im Vertrag nicht und werden
+/// nie gelesen. Maßstab ist allein der autoritative RAM-Zustand unter der
+/// World-Sperre:
+/// 1. Sitzung: nur der Eigentümer der Verbindung (by_conn) handelt.
+/// 2. Tod: hp <= 0 ist Voraussetzung — einem lebendigen Charakter nützt die
+///    Absicht nichts (kein Gratis-Heilpfad, kein Teleport), Ablehnung `not_dead`.
+/// 3. Rückkehrpunkt: kommt aus der Realm-Konfiguration (config::DeathCfg,
+///    Herkunft: Startpunkt der characters-Tabelle) und muss endlich sein;
+///    sonst kontrollierte Ablehnung `respawn_unavailable`.
+/// 4. Erst NACH allen Prüfungen ändern Position und HP; HP geht exakt auf
+///    `max_hp` (kein Überlauf), nicht auf einen vom Client genannten Wert.
+/// 5. Zustände: laufender Angriff/Cast werden beendet (wie beim Tod),
+///    Dirty-Markierung von `Position` + `Resources` über den bestehenden
+///    Persistenzpfad (kein direkter DB-Schreibpfad).
+/// 6. Bestätigung: eigenes STATE (S2C 4, autoritative Position/HP) an den
+///    Eigentümer plus S2C 27 REVIVE_RESULT {ok:true}; `seq` nur Korrelation.
+/// 7. Nachbarn erhalten die neue Position über den normalen AOFB-Tick.
+///
+/// Idempotent: eine zweite Anforderung nach erfolgreicher Wiederbelebung fällt
+/// auf Prüfung 2 zurück (`not_dead`) und verändert nichts mehr.
+pub async fn handle_revive(
+    shared: &Shared,
+    tx: &mpsc::UnboundedSender<String>,
+    conn_id: u64,
+    seq: i64,
+    cfg: &crate::config::DeathCfg,
+) {
+    let mut world = shared.lock().await;
+    let Some(pid) = world.by_conn.get(&conn_id).cloned() else {
+        return;
+    };
+    // Ergebnis-Antwort anforderungsbezogen (seq-Echo), Zustandsänderungen
+    // ausschließlich über das eigene STATE.
+    let reject = |reason: &str| {
+        let _ = tx.send(
+            Frame::new(
+                seq,
+                s2c::REVIVE_RESULT,
+                serde_json::json!({"ok": false, "reason": reason}),
+            )
+            .encode(),
+        );
+    };
+    let Some(me) = world.players.get_mut(&pid) else {
+        return;
+    };
+    // 2) Nur Tote können wiederbelebt werden.
+    if me.hp > 0 {
+        crate::security::log_reject(
+            Some(me),
+            conn_id,
+            &crate::security::RejectInfo {
+                reason: "revive_not_dead".into(),
+                msg_type: crate::protocol::c2s::REVIVE,
+                detail: String::new(),
+            },
+            0,
+        );
+        reject("not_dead");
+        return;
+    }
+    // 3) Rückkehrpunkt VOR jeder Änderung prüfen (keine Teiländerung).
+    if !cfg.respawn_x.is_finite() || !cfg.respawn_y.is_finite() {
+        crate::security::log_reject(
+            Some(&*me),
+            conn_id,
+            &crate::security::RejectInfo {
+                reason: "revive_bad_respawn".into(),
+                msg_type: crate::protocol::c2s::REVIVE,
+                detail: String::new(),
+            },
+            0,
+        );
+        reject("respawn_unavailable");
+        return;
+    }
+    // 3b) Gültige HP-Obergrenze: ohne positives max_hp gäbe es keinen
+    //     wiederhergestellten Wert — kontrollierte Ablehnung statt erfundenem
+    //     HP-Wert, HP und Position bleiben unverändert.
+    if me.max_hp <= 0 {
+        crate::security::log_reject(
+            Some(&*me),
+            conn_id,
+            &crate::security::RejectInfo {
+                reason: "revive_bad_max_hp".into(),
+                msg_type: crate::protocol::c2s::REVIVE,
+                detail: String::new(),
+            },
+            0,
+        );
+        reject("revive_unavailable");
+        return;
+    }
+    // 4) Änderung: exakt max_hp, Position auf den Rückkehrpunkt,
+    //    Blickrichtung bleibt.
+    me.hp = me.max_hp;
+    me.x = cfg.respawn_x;
+    me.y = cfg.respawn_y;
+    // 5) Kampf-/Cast-Zustände klar abgrenzen (der Tod hat sie bereits gelöst;
+    //    hier bleibt nichts Laufendes zurück).
+    me.combat = None;
+    me.active_cast = None;
+    me.last_activity = Instant::now();
+    me.mark_dirty(crate::persist::PersistComponent::Position);
+    me.mark_dirty(crate::persist::PersistComponent::Resources);
+    // 6) Autoritativer Zustand an den Eigentümer, dann Erfolgs-Antwort.
+    let frame = crate::world::own_state_frame(me);
+    me.send(&frame);
+    let _ = tx.send(Frame::new(seq, s2c::REVIVE_RESULT, serde_json::json!({"ok": true})).encode());
 }
 
 /// ATTACK (Combat V1 + V2): Auto-Grundangriff starten oder beenden.
@@ -2388,6 +2524,8 @@ pub(crate) mod tests {
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
             weather: crate::config::WeatherCfg::default(),
+            death: crate::config::DeathCfg::default(),
+            races: crate::config::RacesCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
@@ -3169,6 +3307,8 @@ pub(crate) mod tests {
             progression: crate::config::progression_config(&env),
             persist: crate::config::persist_config(&env),
             weather: crate::config::WeatherCfg::default(),
+            death: crate::config::DeathCfg::default(),
+            races: crate::config::RacesCfg::default(),
             security: crate::config::security_config(&env)
                 .expect("Testkonfiguration ohne SEC_*-Fehler"),
         });
@@ -4739,5 +4879,458 @@ pub(crate) mod tests {
             &serde_json::json!({"npc_id": "npc_9", "action": "talk", "text": "hi"}),
         ).await;
         assert!(npc_text_frames(&mut rx).is_empty());
+    }
+
+    // ── Spielertod V1 (docs/Kampfsystem.md §§13–14) ─────────────────────────
+    //
+    // Bewegungssperre für Tote plus manuelle Wiederbelebung am serverseitigen
+    // Rückkehrpunkt. Der Client sendet ausschließlich Absichten; Rückkehrpunkt,
+    // HP und Position bestimmt allein der Server.
+
+    /// Spieler mit wählbaren HP/Position; die Eigentümerschaft (by_conn) setzen
+    /// die Tests ausdrücklich selbst.
+    fn death_player(
+        w: &mut crate::world::World,
+        id: &str,
+        hp: i32,
+        x: f64,
+        y: f64,
+    ) -> mpsc::UnboundedReceiver<String> {
+        let (ptx, prx) = mpsc::unbounded_channel();
+        w.players.insert(
+            id.into(),
+            crate::world::Player {
+                id: id.into(),
+                name: id.into(),
+                x,
+                y,
+                face: 0.0,
+                ping_ms: 0,
+                zone_id: 0,
+                hp,
+                max_hp: 100,
+                lang: "de".into(),
+                account_id: 0,
+                session_id: String::new(),
+                entities: std::collections::HashSet::new(),
+                last_activity: std::time::Instant::now(),
+                tx: ptx,
+                char_class: "Adventurer".into(),
+                class: crate::class::ClassStatus::Adventurer,
+                faction_transition: false,
+                level: 1,
+                exp: 0,
+                free_attr_points: 0,
+                rested_pool: 0,
+                idia: 0,
+                armor: 0,
+                weapon_skill: 1,
+                combat: None,
+                last_strike: None,
+                mana: 50,
+                max_mana: 50,
+                effects: Vec::new(),
+                cooldowns: Default::default(),
+                active_cast: None,
+                learned_abilities: std::collections::HashSet::new(),
+                attributes: Default::default(),
+                max_hp_base: 100,
+                max_mana_base: 50,
+                sitting: false,
+                hp_regen_bonus: 0.0,
+                mana_regen_bonus: 0.0,
+                hp_regen_carry: 0.0,
+                mana_regen_carry: 0.0,
+                inventory: Default::default(),
+                quests: Default::default(),
+                dirty: Default::default(),
+                persist_generation: 0,
+                persist_revision: 0,
+            },
+        );
+        prx
+    }
+
+    fn death_cfg(x: f64, y: f64) -> crate::config::DeathCfg {
+        crate::config::DeathCfg {
+            respawn_x: x,
+            respawn_y: y,
+        }
+    }
+
+    /// (seq, data) aller Frames eines Typs aus einem Kanal.
+    fn frames_of(
+        rx: &mut mpsc::UnboundedReceiver<String>,
+        msg_type: i64,
+    ) -> Vec<(i64, serde_json::Value)> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            let f: crate::protocol::Frame = serde_json::from_str(&m).expect("Frame lesbar");
+            if f.msg_type == msg_type {
+                out.push((f.seq, f.data));
+            }
+        }
+        out
+    }
+
+    fn revive_results(rx: &mut mpsc::UnboundedReceiver<String>) -> Vec<(i64, serde_json::Value)> {
+        frames_of(rx, crate::protocol::s2c::REVIVE_RESULT)
+    }
+
+    #[tokio::test]
+    async fn living_player_moves_but_dead_player_does_not() {
+        let shared = crate::world::new_shared();
+        let mut rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 100, 0.0, 0.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        // 1) Lebend: Bewegung ändert Position + own STATE an den Eigentümer.
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [1.0, 0.0]}),
+            1000,
+            5.0,
+        )
+        .await;
+        let moved = shared.lock().await.players["a"].x;
+        assert!(moved > 0.0, "Lebender bewegt sich");
+        assert!(frames_of(&mut rx, crate::protocol::s2c::STATE)
+            .iter()
+            .any(|(_, d)| d["x"].as_f64() == Some(moved)));
+
+        // 2) Tot: dieselbe Absicht ändert NICHTS — auch nicht wiederholt
+        //    (keine Umgehung durch MOVE-Spam).
+        {
+            let mut w = shared.lock().await;
+            w.players.get_mut("a").unwrap().hp = 0;
+            // Dirty-Stand der lebenden Bewegung zurücksetzen.
+            w.players
+                .get_mut("a")
+                .unwrap()
+                .dirty
+                .clear(crate::persist::PersistComponent::Position);
+        }
+        for _ in 0..5 {
+            handle_move(
+                &shared,
+                7,
+                &serde_json::json!({"dir": [1.0, 0.0]}),
+                1000,
+                5.0,
+            )
+            .await;
+        }
+        let w = shared.lock().await;
+        let p = &w.players["a"];
+        assert_eq!(p.x, moved, "Toter bewegt sich nicht");
+        assert_eq!(p.hp, 0);
+        assert!(
+            !p.dirty.is_dirty(crate::persist::PersistComponent::Position),
+            "abgelehnte Bewegung markiert keine Position dirty"
+        );
+        drop(w);
+        assert!(
+            frames_of(&mut rx, crate::protocol::s2c::STATE).is_empty(),
+            "abgelehnte Bewegung sendet keinen Zustandsframe"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_player_cannot_start_attack_but_can_revive() {
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 0.0, 0.0);
+            death_player(&mut w, "b", 100, 1.0, 0.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        // 3) Toter Angreifer: kein Kampfzustand (bestehende Sperre).
+        handle_attack(
+            &shared,
+            7,
+            &serde_json::json!({"target_id": "b"}),
+            &crate::config::combat_config(&Default::default()),
+            &crate::config::npc_config(&Default::default()),
+        )
+        .await;
+        assert!(shared.lock().await.players["a"].combat.is_none());
+
+        // 4) Derselbe tote Charakter darf die Wiederbelebung anfordern.
+        let (tx, mut ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 42, &death_cfg(3.0, -4.0)).await;
+        let res = revive_results(&mut ctx_rx);
+        assert_eq!(res.len(), 1, "genau eine Antwort");
+        assert_eq!(res[0].1["ok"], serde_json::json!(true));
+        // seq ist ausschließlich Korrelation.
+        assert_eq!(res[0].0, 42);
+    }
+
+    #[tokio::test]
+    async fn revive_restores_hp_at_server_return_point() {
+        let shared = crate::world::new_shared();
+        let mut rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, _ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 1, &death_cfg(3.0, -4.0)).await;
+        {
+            let w = shared.lock().await;
+            let p = &w.players["a"];
+            // 5) HP exakt auf den gültigen Maximalwert.
+            assert_eq!(p.hp, 100, "HP auf max_hp");
+            // 6) serverseitiger Rückkehrpunkt, nicht der Todesort.
+            assert_eq!((p.x, p.y), (3.0, -4.0), "Rückkehrpunkt statt Todesort");
+            // Persistenz über den bestehenden Pfad (kein direkter DB-Schreiber).
+            assert!(p.dirty.is_dirty(crate::persist::PersistComponent::Position));
+            assert!(p
+                .dirty
+                .is_dirty(crate::persist::PersistComponent::Resources));
+        }
+        // Autoritative Bestätigung: eigenes STATE trägt Position UND HP.
+        let state = frames_of(&mut rx, crate::protocol::s2c::STATE);
+        assert_eq!(state.len(), 1);
+        let d = &state[0].1;
+        assert_eq!(d["id"], serde_json::json!("a"));
+        assert_eq!(d["x"], serde_json::json!(3.0));
+        assert_eq!(d["y"], serde_json::json!(-4.0));
+        assert_eq!(d["hp"], serde_json::json!(100));
+        assert_eq!(d["max_hp"], serde_json::json!(100));
+    }
+
+    #[tokio::test]
+    async fn living_player_cannot_abuse_revive_as_heal_or_teleport() {
+        let shared = crate::world::new_shared();
+        let mut rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 30, 12.0, 9.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, mut ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 7, &death_cfg(0.0, 0.0)).await;
+        let res = revive_results(&mut ctx_rx);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].1["ok"], serde_json::json!(false));
+        assert_eq!(res[0].1["reason"], serde_json::json!("not_dead"));
+        {
+            let w = shared.lock().await;
+            let p = &w.players["a"];
+            assert_eq!(p.hp, 30, "kein Gratis-Heilpfad");
+            assert_eq!((p.x, p.y), (12.0, 9.0), "kein Teleport für Lebende");
+            assert!(!p.dirty.any(), "Ablehnung markiert nichts dirty");
+        }
+        assert!(frames_of(&mut rx, crate::protocol::s2c::STATE).is_empty());
+    }
+
+    #[tokio::test]
+    async fn repeated_revive_requests_have_no_stacking_effect() {
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, mut ctx_rx) = mpsc::unbounded_channel();
+        for seq in 1..=3 {
+            handle_revive(&shared, &tx, 7, seq, &death_cfg(3.0, -4.0)).await;
+        }
+        let res = revive_results(&mut ctx_rx);
+        assert_eq!(res.len(), 3);
+        assert_eq!(res[0].1["ok"], serde_json::json!(true));
+        for (_, d) in &res[1..] {
+            assert_eq!(d["ok"], serde_json::json!(false));
+            assert_eq!(d["reason"], serde_json::json!("not_dead"));
+        }
+        let w = shared.lock().await;
+        let p = &w.players["a"];
+        assert_eq!(p.hp, 100, "HP bleibt bei max_hp (kein Stapeln)");
+        assert_eq!((p.x, p.y), (3.0, -4.0));
+        // Nur der erste Durchlauf hat mutationiert: zwei markierte Komponenten.
+        assert_eq!(p.persist_generation, 2, "genau zwei Mutationen");
+    }
+
+    #[tokio::test]
+    async fn invalid_return_point_changes_nothing() {
+        // 9) Kein gültiger Rückkehrpunkt → kontrollierte Ablehnung, DER Tod
+        //    bleibt unverändert zurück (weder HP noch Position teiländeriert).
+        let shared = crate::world::new_shared();
+        let mut rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, mut ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 9, &death_cfg(f64::NAN, 0.0)).await;
+        let res = revive_results(&mut ctx_rx);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].1["ok"], serde_json::json!(false));
+        assert_eq!(res[0].1["reason"], serde_json::json!("respawn_unavailable"));
+        {
+            let w = shared.lock().await;
+            let p = &w.players["a"];
+            assert_eq!(p.hp, 0);
+            assert_eq!((p.x, p.y), (47.0, -13.0));
+            assert!(!p.dirty.any());
+        }
+        assert!(frames_of(&mut rx, crate::protocol::s2c::STATE).is_empty());
+
+        // Ohne positives max_hp ebenfalls keine Änderung (kein erfundener Wert).
+        {
+            let mut w = shared.lock().await;
+            w.players.get_mut("a").unwrap().max_hp = 0;
+        }
+        let (tx2, mut ctx_rx2) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx2, 7, 10, &death_cfg(0.0, 0.0)).await;
+        let res2 = revive_results(&mut ctx_rx2);
+        assert_eq!(res2[0].1["ok"], serde_json::json!(false));
+        assert_eq!(res2[0].1["reason"], serde_json::json!("revive_unavailable"));
+        let w = shared.lock().await;
+        assert_eq!(w.players["a"].hp, 0);
+        assert_eq!((w.players["a"].x, w.players["a"].y), (47.0, -13.0));
+    }
+
+    #[tokio::test]
+    async fn revive_snapshot_carries_hp_and_return_position() {
+        // 10) Persistenz/Konsistenz: der Snapshot des bestehenden Spool-Pfads
+        //     trägt die wiederhergestellten Werte — kein Speichern als tot am
+        //     Todesort und kein lebendig-am-Todesort-Widerspruch.
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, _ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 1, &death_cfg(3.0, -4.0)).await;
+        let w = shared.lock().await;
+        let snap = crate::persist::build_snapshot(
+            &w.players["a"],
+            false,
+            &crate::item_lifecycle::ItemLifecycle::default(),
+            "test-runtime",
+        )
+        .expect("Snapshot möglich")
+        .expect("Dirty-State erzeugt Snapshot");
+        assert_eq!(snap.hp, 100, "Snapshot-HP wiederhergestellt");
+        assert_eq!(snap.x, 3.0);
+        assert_eq!(snap.y, -4.0);
+        assert!(snap
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Position));
+        assert!(snap
+            .dirty
+            .is_dirty(crate::persist::PersistComponent::Resources));
+    }
+
+    #[tokio::test]
+    async fn revive_without_session_changes_nothing() {
+        // Sitzung: ohne by_conn-Zuordnung erreicht die Absicht keinen Charakter.
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        shared.lock().await.by_conn.remove(&7);
+        let (tx, mut ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 1, &death_cfg(3.0, -4.0)).await;
+        assert!(revive_results(&mut ctx_rx).is_empty());
+        let w = shared.lock().await;
+        assert_eq!(w.players["a"].hp, 0);
+        assert_eq!((w.players["a"].x, w.players["a"].y), (47.0, -13.0));
+    }
+
+    #[tokio::test]
+    async fn dead_player_still_cannot_move_after_failed_revive() {
+        // Bewegungs- und Wiederbelebungssperre greifen zusammen: eine abgelehnte
+        // Wiederbelebung lässt den toten Charakter handlungsunfähig.
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 47.0, -13.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, _ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 1, &death_cfg(f64::INFINITY, 0.0)).await;
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [1.0, 0.0]}),
+            1000,
+            5.0,
+        )
+        .await;
+        let w = shared.lock().await;
+        assert_eq!((w.players["a"].x, w.players["a"].y), (47.0, -13.0));
+        assert_eq!(w.players["a"].hp, 0);
+    }
+
+    #[tokio::test]
+    async fn confirmed_revive_enables_movement_again() {
+        // Nach bestätigter Wiederbelebung ist normale Bewegung wieder möglich —
+        // der Server entscheidet, nicht der Client.
+        let shared = crate::world::new_shared();
+        let _rx = {
+            let mut w = shared.lock().await;
+            let rx = death_player(&mut w, "a", 0, 0.0, 0.0);
+            w.by_conn.insert(7, "a".into());
+            rx
+        };
+        let (tx, _ctx_rx) = mpsc::unbounded_channel();
+        handle_revive(&shared, &tx, 7, 1, &death_cfg(0.0, 0.0)).await;
+        handle_move(
+            &shared,
+            7,
+            &serde_json::json!({"dir": [1.0, 0.0]}),
+            1000,
+            5.0,
+        )
+        .await;
+        let w = shared.lock().await;
+        assert!(
+            w.players["a"].x > 0.0,
+            "nach Wiederbelebung wieder beweglich"
+        );
+    }
+
+    #[test]
+    fn dead_move_rejection_uses_a_stable_data_free_reason() {
+        // Stabiler Grund der Bewegungsablehnung im Tod, ohne Positions-/
+        // Koordinatenangaben (Datenschutz wie bei allen Reject-Logs).
+        let line = crate::security::reject_log_line(
+            None,
+            7,
+            &crate::security::RejectInfo {
+                reason: "character_dead".into(),
+                msg_type: crate::protocol::c2s::MOVE,
+                detail: String::new(),
+            },
+            0,
+        );
+        assert!(line.contains("reason=character_dead"), "Log: {line}");
+        assert!(line.contains("type=2"), "MOVE-Typ im Log: {line}");
+    }
+
+    #[test]
+    fn revive_rate_limit_is_the_strict_rare_class() {
+        // Wiederbelebung fällt in die strengste Klasse (fail-closed wie alle
+        // nicht ausdrücklich klassifizierten Aktionen).
+        assert_eq!(
+            crate::security::MsgClass::of(crate::protocol::c2s::REVIVE),
+            crate::security::MsgClass::Rare
+        );
+        assert!(crate::security::is_known_c2s(crate::protocol::c2s::REVIVE));
     }
 }

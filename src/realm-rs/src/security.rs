@@ -380,6 +380,7 @@ pub fn is_known_c2s(msg_type: i64) -> bool {
             | SPEND_ATTRIBUTE
             | PLAYER_TRADE
             | INVENTORY
+            | REVIVE
     )
 }
 

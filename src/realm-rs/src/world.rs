@@ -205,6 +205,27 @@ pub struct MailboxLocation {
     pub y: f64,
 }
 
+/// Eine Zeile der rassischen Startwertmatrix (Migration 030, Tabelle
+/// `race_definitions`): kanonischer Rassenwert + sieben Startattribute aus
+/// docs/Attribute_und_Regeneration.md §2. Wird beim Start fail-closed
+/// geladen (`db::load_race_start_attributes`) und ist danach unveränderlich
+/// (analog `mailbox_locations`). Bewusst KEIN Eingriff in class.rs/regen.rs/
+/// attributes.rs: die Matrix ist reine Daten-/Content-Schicht, eine
+/// Balancing-Anpassung erfordert keinen Architekturumbau
+/// (docs/Charaktererstellung_und_Charakterdarstellung.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RaceStartAttributes {
+    /// Kanonischer Rassenwert (kleingeschrieben, ohne Umlaute).
+    pub race: String,
+    pub strength: i32,
+    pub dexterity: i32,
+    pub intelligence: i32,
+    pub constitution: i32,
+    pub wisdom: i32,
+    pub luck: i32,
+    pub endurance: i32,
+}
+
 pub struct World {
     pub players: HashMap<String, Player>,
     /// Prepared economic changes, retained verbatim across an uncertain spool
@@ -264,6 +285,15 @@ pub struct World {
     /// (analog `merchant_catalog`). Kein Tick-Eingriff, keine Reichweite.
     /// Weitergabe additiv im WELCOME (`mailboxes`, handlers.rs).
     pub mailbox_locations: Vec<MailboxLocation>,
+    /// Rassische Startwertmatrix des Realms (Content-Schicht, Migration 030):
+    /// beim Start fail-closed geladen (`db::load_race_start_attributes`),
+    /// danach unveränderlich (analog `mailbox_locations`), deterministische
+    /// Reihenfolge nach `race`. Ein Zeile-je-Rasse-Index baut der Konsument.
+    /// Konsument ist die Charakteranlage (`POST /characters`, noch offen —
+    /// Projekt-Status Eintrag 22); bis dahin kein Aufrufer, daher bewusst
+    /// kein Tick-/Persistenzeingriff.
+    #[allow(dead_code)]
+    pub race_start_attributes: Vec<RaceStartAttributes>,
     /// Spielerhandel-Dialoge (docs/Handelssystem.md §15): charaktergebundene
     /// Runtime-Dialoge (Dialog-ID → Dialog), höchstens einer je Charakter
     /// (Charakter → Dialog-ID, Einladung zählt mit). Keine Persistenz
@@ -340,6 +370,7 @@ impl World {
             item_lifecycle: HashMap::new(),
             merchant_catalog: crate::trade::MerchantCatalog::default(),
             mailbox_locations: Vec::new(),
+            race_start_attributes: Vec::new(),
             player_trade_dialogs: HashMap::new(),
             player_trade_by_char: HashMap::new(),
             player_trade_next_id: 1,

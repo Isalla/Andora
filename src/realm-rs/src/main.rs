@@ -317,6 +317,26 @@ async fn async_main() -> Result<(), String> {
         }
         Arc::new(svc)
     };
+
+    // Rassen-Startwertmatrix (Migration 030, docs/Charaktererstellung_und_
+    // Charakterdarstellung.md): lädt VOR dem Zulassen von Spielern (vor
+    // `net::serve`, analog den übrigen Content-Registrierungen) und ist
+    // FAIL-CLOSED — Tabellen-/Datenfehler brechen den Realm-Start ab (kein
+    // Zeilenüberspringen wie bei Item-Definitionen; die Rasse ist Teil der
+    // Charakteridentität). Die geprüfte `SELECTABLE_RACES`-Liste kommt aus der
+    // vorab validierten Konfiguration (`load_config` → `races_config`).
+    let race_start_attributes =
+        db::load_race_start_attributes(&pool, &cfg.races.selectable).await?;
+    log::info!(
+        "{} Rassen-Startattributzeilen geladen (wählbar: {})",
+        race_start_attributes.len(),
+        cfg.races.selectable.join(", ")
+    );
+    {
+        let mut w = tick_shared.lock().await;
+        w.race_start_attributes = race_start_attributes;
+    }
+
     let ws_task = {
         let (cfg, shared, parental, groups, persist) = (
             cfg.clone(),

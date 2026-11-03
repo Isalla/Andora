@@ -9,8 +9,12 @@ const C2S = {
 	"GROUP_INVITE": 13, "GROUP_INVITE_REACT": 14, "GROUP_SUGGEST": 15,
 	"GROUP_SUGGEST_DECIDE": 16, "GROUP_LEAVE": 17, "GROUP_KICK": 18,
 	"GROUP_TRANSFER": 19, "SPEND_ATTRIBUTE": 20, "PLAYER_TRADE": 21,
-	"INVENTORY": 22
+	"INVENTORY": 22, "REVIVE": 23
 }
+# REVIVE (23) Spielertod V1 (docs/Kampfsystem.md §13): Payload LEER. Der
+# Client sendet ausschließlich die Absicht; Rückkehrpunkt, HP und Position
+# bestimmt allein der Server. Antwort: S2C 27 REVIVE_RESULT; Erfolg pusht
+# zusätzlich das eigene STATE (S2C 4).
 # NPC_TALK (6) Händler-Payload (docs/Handelssystem.md §13):
 # {npc_id, action, item_id?, item_uuid?, history_id?, count?} mit
 # action = open/buy/sell/buyback. Buyback nur per history_id (volle Einträge).
@@ -26,7 +30,7 @@ const S2C = {
 	"GROUP_INFO": 18, "GROUP_INVITE_S2C": 19, "GROUP_TOAST": 20,
 	"ATTRIBUTE_RESULT": 21, "PLAYER_TRADE": 22, "INVENTORY": 23,
 	"VITALS": 24, "INVENTORY_RESULT": 25,
-	"WEATHER": 26
+	"WEATHER": 26, "REVIVE_RESULT": 27
 }
 # WELCOME (1) Payload: {you:{id,name,x,y,mana,max_mana,level}, mailboxes:[...]}.
 # `mailboxes` ist ein ADDITIVES Feld (Realm Migration 028, M2): reine

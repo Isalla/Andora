@@ -654,6 +654,8 @@ pub(crate) fn test_config() -> Config {
         loot: Default::default(),
         progression: crate::progression::ProgressionCfg::default(),
         weather: crate::config::WeatherCfg::default(),
+        death: crate::config::DeathCfg::default(),
+        races: crate::config::RacesCfg::default(),
         security: crate::config::SecurityCfg::default(),
     }
 }

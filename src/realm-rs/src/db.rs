@@ -2408,6 +2408,133 @@ pub async fn load_mailbox_locations(
     Ok(mailbox_locations_from_rows(rows))
 }
 
+// ── Rassen-Startwertmatrix (Migration 030, docs/Charaktererstellung_und_
+// Charakterdarstellung.md „Speicherort der Rassen- und Startattributdaten") ──
+//
+// FEHLERSEMANTIK bewusst ANDERS als bei `load_item_definitions`: dort werden
+// fehlerhafte Zeilen geloggt und übersprungen, hier bricht JEGLICHER
+// Dokumentfehler den Realm-Start ab (fail-closed). Begründung: Die Rasse ist
+// Teil der Charakteridentität — ohne vollständige, korrekte Matrix kann kein
+// Charakter korrekt angelegt werden, und ein Überspringen würde eine
+// wählbare Rasse still verschwinden lassen.
+
+/// Eine geladene Zeile der Rassetabelle: `race` + sieben Attributwerte.
+/// Bewusst `Option<i32>` je Attribut: die Spalten sind `NOT NULL` deklariert,
+/// doch ein fehlender/nicht lesbarer Wert muss im Loader als eigener
+/// Fehlerfall sichtbar werden (fail-closed, kein Default-Ersatz).
+/// Reihenfolge: strength, dexterity, intelligence, constitution, wisdom,
+/// luck, endurance (identisch zu Migration 030 und den characters-Spalten).
+pub type RaceStartRow = (
+    String,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+    Option<i32>,
+);
+
+/// Prüft und überführt geladene Zeilen in die unveränderliche Startmatrix.
+/// Reine Funktion ohne DB-Zugriff — dieselbe Route nutzen die Offline-Tests
+/// mit den Seed-Zeilen der Migrationsdatei (Muster `mailbox_locations_from_rows`,
+/// Nachweis ohne Datenbank). Startabbruf (Rückgabe `Err`) bei:
+/// a) fehlendem/nicht lesbarem Attributwert, Wert < 1 oder sonst ungültig,
+/// b) Rassenwert außerhalb der fünf kanonischen Werte,
+/// c) derselben Rasse in mehr als einer Zeile,
+/// d) fehlender Rasse, die laut (vorab validierter) Konfiguration wählbar ist.
+/// Eine laut Konfiguration NICHT wählbare Rasse darf fehlen (Toleranz nur
+/// hier — vorbereitete Expansionen blockieren den Start nicht).
+pub fn race_start_attributes_from_rows(
+    rows: Vec<RaceStartRow>,
+    selectable: &[String],
+) -> Result<Vec<crate::world::RaceStartAttributes>, String> {
+    let attribute = |race: &str, column: &str, value: Option<i32>| -> Result<i32, String> {
+        match value {
+            None => Err(format!(
+                "Rassetabelle: Rasse {race:?} — Attribut {column} fehlt oder ist nicht \
+                 ganzzahlig lesbar (Startabbruch, kein Default-Ersatz)"
+            )),
+            Some(v) if v < 1 => Err(format!(
+                "Rassetabelle: Rasse {race:?} — Attribut {column} = {v} ist kleiner als 1 \
+                 (Basiswert je Grundattribut ist 1, docs/Attribute_und_Regeneration.md §2)"
+            )),
+            Some(v) => Ok(v),
+        }
+    };
+    let mut loaded: Vec<crate::world::RaceStartAttributes> = Vec::new();
+    for (race, strength, dexterity, intelligence, constitution, wisdom, luck, endurance) in rows {
+        // b) ausschließlich kanonische Rassenwerte (kleingeschrieben, ohne
+        //    Umlaute) — keine Normalisierung, kein Überspringen.
+        if !crate::config::CANONICAL_RACES.contains(&race.as_str()) {
+            return Err(format!(
+                "Rassetabelle: Zeile mit unbekanntem Rassenwert {race:?} — erlaubt sind nur \
+                 die kanonischen Werte {} (Startabbruch, kein Zeilenüberspringen)",
+                crate::config::CANONICAL_RACES.join(", ")
+            ));
+        }
+        // c) genau eine Zeile je Rasse (der PRIMARY KEY verhindert das bereits
+        //    in der DB; der Loader prüft es trotzdem gegen jeden Bestand).
+        if loaded.iter().any(|r| r.race == race) {
+            return Err(format!(
+                "Rassetabelle: Rasse {race:?} in mehr als einer Zeile — genau eine Zeile \
+                 je Rasse (Startabbruch)"
+            ));
+        }
+        // a) alle sieben Attributwerte vorhanden, ganzzahlig und ≥ 1.
+        let entry = crate::world::RaceStartAttributes {
+            strength: attribute(&race, "strength", strength)?,
+            dexterity: attribute(&race, "dexterity", dexterity)?,
+            intelligence: attribute(&race, "intelligence", intelligence)?,
+            constitution: attribute(&race, "constitution", constitution)?,
+            wisdom: attribute(&race, "wisdom", wisdom)?,
+            luck: attribute(&race, "luck", luck)?,
+            endurance: attribute(&race, "endurance", endurance)?,
+            race,
+        };
+        loaded.push(entry);
+    }
+    // d) jede laut Konfiguration wählbare Rasse MUSS in der Tabelle stehen.
+    //    Die Liste kommt aus `races_config` (vorab auf kanonische Werte ohne
+    //    Duplikate geprüft) — die Prüfung erfolgt gegen genau diese Liste.
+    for want in selectable {
+        if !loaded.iter().any(|r| &r.race == want) {
+            return Err(format!(
+                "Rassetabelle: die laut Konfiguration (SELECTABLE_RACES) wählbare Rasse \
+                 {want:?} fehlt in race_definitions (Startabbruch)"
+            ));
+        }
+    }
+    Ok(loaded)
+}
+
+/// Lädt die rassische Startwertmatrix (Migration 030) VOR dem Zulassen von
+/// Spielern. FAIL-CLOSED: fehlende Tabelle, ungültige Werte, unbekannte oder
+/// doppelte Rassen und eine laut Konfiguration wählbare, aber fehlende Rasse
+/// brechen den Realm-Start mit klarer deutscher Meldung ab — fehlerhafte
+/// Zeilen werden NICHT übersprungen (bewusst anders als `load_item_definitions`,
+/// Begründung oben im Abschnitt). `selectable` ist die vorab validierte Liste
+/// aus `config::races_config`. Die Reihenfolge ist deterministisch
+/// (`ORDER BY race`), identisch zur seedfesten Offline-Prüfung.
+pub async fn load_race_start_attributes(
+    pool: &Pool<MySql>,
+    selectable: &[String],
+) -> Result<Vec<crate::world::RaceStartAttributes>, String> {
+    let rows: Vec<RaceStartRow> = sqlx::query_as(
+        "SELECT race, strength, dexterity, intelligence, constitution, wisdom, luck, endurance \
+         FROM race_definitions ORDER BY race",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        format!(
+            "Rassen-Startattributdaten laden (race_definitions, Migration 030): {e} — \
+             Realm-Start abgebrochen (kein Charakteranlage-Bestand ohne vollständige Matrix)"
+        )
+    })?;
+    race_start_attributes_from_rows(rows, selectable)
+}
+
 #[cfg(test)]
 pub(crate) mod mailbox_seed_tests {
     //! Offline-Nachweis (D1) ohne Datenbank, am Muster der Datei-Tests aus
@@ -2539,6 +2666,276 @@ pub(crate) mod mailbox_seed_tests {
         }
         // Leere Tabelle → leere Liste (kein Feld-Weglassen, kein Fehler).
         assert!(mailbox_locations_from_rows(Vec::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod race_seed_tests {
+    //! Eintrag 22 — Offline-Nachweis des Rassen-Loaders ohne Datenbank, am
+    //! Muster von `mailbox_seed_tests`: die ausgelieferte Migration 030 wird
+    //! auf Dateiebene gelesen (keine DB, kein Statement läuft), die Seed-
+    //! Zeilen werden extrahiert und durch denselben Code
+    //! (`race_start_attributes_from_rows`) geschickt, den
+    //! `load_race_start_attributes` für DB-Zeilen nutzt.
+
+    use super::*;
+
+    /// Verbindliche Matrix aus docs/Attribute_und_Regeneration.md §2
+    /// (Basis 1, Mensch durchgehend 2): race, strength, dexterity,
+    /// intelligence, constitution, wisdom, luck, endurance — Werte unverändert.
+    const DOCUMENTED_MATRIX: [(&str, [i32; 7]); 5] = [
+        ("mensch", [2, 2, 2, 2, 2, 2, 2]),
+        ("elf", [1, 4, 1, 1, 1, 3, 1]),
+        ("andorer", [1, 1, 4, 1, 3, 1, 1]),
+        ("luzilla", [1, 4, 1, 1, 1, 1, 3]),
+        ("mandalonier", [4, 1, 1, 3, 1, 1, 1]),
+    ];
+
+    fn migration_body() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations")
+            .join("030_race_definitions.sql");
+        std::fs::read_to_string(&path).expect("Migration 030 liegt ausgeliefert")
+    }
+
+    /// Minimaler, absichtlich strenger Parser des Seed-INSERTs: jedes
+    /// unerwartete Format bricht den Test ab (fail-closed statt stiller Lücke).
+    /// Ergebnis exakt im Loader-Zeilentyp `RaceStartRow` — die Offline-Route
+    /// nutzt damit denselben Zeilenaufbau wie der DB-Loader.
+    fn parse_seed_rows(body: &str) -> Vec<RaceStartRow> {
+        let stmts = crate::migrations::split_statements(body);
+        assert_eq!(stmts.len(), 2, "Migration 030: genau CREATE TABLE + INSERT");
+        let create = &stmts[0];
+        assert!(
+            create.starts_with("CREATE TABLE race_definitions"),
+            "CREATE TABLE ohne IF NOT EXISTS (Konflikt muss als Fehler sichtbar werden)"
+        );
+        assert!(
+            !crate::migrations::is_destructive(body),
+            "030 ist nicht destruktiv"
+        );
+        let insert = &stmts[1];
+        assert!(
+            insert.starts_with("INSERT INTO race_definitions"),
+            "Seed per normalem INSERT"
+        );
+        let rest =
+            &insert[insert.find("VALUES").expect("INSERT VALUES vorhanden") + "VALUES".len()..];
+        // Tuples klammerweise austasten (Quotes beachten — `split_statements`
+        // füllt Zeilen mit Leerzeichen zusammen, Trenner sind nicht fix).
+        let chars: Vec<char> = rest.chars().collect();
+        let mut groups: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '(' {
+                let mut g = String::new();
+                let mut in_quote = false;
+                i += 1;
+                loop {
+                    assert!(i < chars.len(), "unabgeschlossene Seed-Tuple");
+                    let c = chars[i];
+                    if c == '\'' {
+                        in_quote = !in_quote;
+                        g.push(c);
+                    } else if c == ')' && !in_quote {
+                        break;
+                    } else {
+                        g.push(c);
+                    }
+                    i += 1;
+                }
+                groups.push(g);
+            }
+            i += 1;
+        }
+        assert_eq!(groups.len(), 5, "Seed enthält genau fünf Rassen-Zeilen");
+        groups
+            .into_iter()
+            .map(|g| {
+                // Form: 'race', str, dex, int, con, wis, glueck, end —
+                // race quotesiert, Attribute nackte Ganzzahlen.
+                let parts: Vec<&str> = g.split(',').map(|p| p.trim()).collect();
+                assert_eq!(parts.len(), 8, "genau race + sieben Attribute je Zeile");
+                let race = parts[0]
+                    .strip_prefix('\'')
+                    .and_then(|s| s.strip_suffix('\''))
+                    .unwrap_or_else(|| panic!("race ist quotesiert: {:?}", parts[0]))
+                    .to_string();
+                let attrs: Vec<i32> = parts[1..]
+                    .iter()
+                    .map(|p| p.parse::<i32>().expect("Attributwert ganzzahlig lesbar"))
+                    .collect();
+                (
+                    race,
+                    Some(attrs[0]),
+                    Some(attrs[1]),
+                    Some(attrs[2]),
+                    Some(attrs[3]),
+                    Some(attrs[4]),
+                    Some(attrs[5]),
+                    Some(attrs[6]),
+                )
+            })
+            .collect()
+    }
+
+    /// Seed-Zeilen der ausgelieferten Migration 030 (Dateiebene, ohne DB).
+    fn shipped_seed_rows() -> Vec<RaceStartRow> {
+        parse_seed_rows(&migration_body())
+    }
+
+    fn defaults() -> Vec<String> {
+        crate::config::races_config(&std::collections::HashMap::new())
+            .expect("leere Umgebung = dokumentierte Defaults")
+            .selectable
+    }
+
+    #[test]
+    fn seed_ships_all_five_races_with_documented_values() {
+        // Die Matrix MUSS wortgleich zu §2 sein — nichts verändert, keine
+        // eigene Balance (Summen laut Doku: 14/12/12/12/12).
+        let rows = shipped_seed_rows();
+        assert_eq!(rows.len(), DOCUMENTED_MATRIX.len());
+        for (race, want) in DOCUMENTED_MATRIX {
+            let hit = rows
+                .iter()
+                .find(|(r, ..)| r == race)
+                .unwrap_or_else(|| panic!("Seed-Zeile {race:?} fehlt"));
+            let got: [i32; 7] = [
+                hit.1.expect("strength"),
+                hit.2.expect("dexterity"),
+                hit.3.expect("intelligence"),
+                hit.4.expect("constitution"),
+                hit.5.expect("wisdom"),
+                hit.6.expect("luck"),
+                hit.7.expect("endurance"),
+            ];
+            assert_eq!(got, want, "{race:?} exakt wie §2");
+            assert_eq!(
+                got.iter().sum::<i32>(),
+                if race == "mensch" { 14 } else { 12 }
+            );
+        }
+    }
+
+    #[test]
+    fn loader_accepts_shipped_seed_with_documented_defaults() {
+        let loaded = race_start_attributes_from_rows(shipped_seed_rows(), &defaults())
+            .expect("vollständiger Seed lädt fail-closed durch");
+        assert_eq!(loaded.len(), 5, "alle fünf Rassen geladen");
+        for (race, _) in DOCUMENTED_MATRIX {
+            assert!(loaded.iter().any(|r| r.race == race), "{race:?} vorhanden");
+        }
+    }
+
+    #[test]
+    fn loader_rejects_missing_attribute_value() {
+        for col in 1..=7usize {
+            let mut rows = shipped_seed_rows();
+            for row in &mut rows {
+                if row.0 == "elf" {
+                    match col {
+                        1 => row.1 = None,
+                        2 => row.2 = None,
+                        3 => row.3 = None,
+                        4 => row.4 = None,
+                        5 => row.5 = None,
+                        6 => row.6 = None,
+                        _ => row.7 = None,
+                    }
+                }
+            }
+            let err = race_start_attributes_from_rows(rows, &defaults()).expect_err(&format!(
+                "fehlender Attributwert {col} muss Startabbruch sein"
+            ));
+            assert!(err.contains("elf"), "{err}");
+            assert!(err.contains("fehlt"), "{err}");
+        }
+    }
+
+    #[test]
+    fn loader_rejects_attribute_below_one() {
+        for col in 1..=7usize {
+            let mut rows = shipped_seed_rows();
+            for row in &mut rows {
+                if row.0 == "mensch" {
+                    match col {
+                        1 => row.1 = Some(0),
+                        2 => row.2 = Some(0),
+                        3 => row.3 = Some(0),
+                        4 => row.4 = Some(0),
+                        5 => row.5 = Some(0),
+                        6 => row.6 = Some(0),
+                        _ => row.7 = Some(0),
+                    }
+                }
+            }
+            let err = race_start_attributes_from_rows(rows, &defaults()).expect_err(&format!(
+                "Attributwert 0 in Spalte {col} muss Startabbruch sein"
+            ));
+            assert!(err.contains("kleiner als 1"), "{err}");
+        }
+        // Negative Werte ebenso (gleiche Prüfung, andere Richtung).
+        let mut rows = shipped_seed_rows();
+        for row in &mut rows {
+            if row.0 == "andorer" {
+                row.2 = Some(-3);
+            }
+        }
+        assert!(race_start_attributes_from_rows(rows, &defaults()).is_err());
+    }
+
+    #[test]
+    fn loader_rejects_duplicate_race_row() {
+        let mut rows = shipped_seed_rows();
+        let again = rows
+            .iter()
+            .find(|(r, ..)| r == "elf")
+            .expect("elf im Seed")
+            .clone();
+        rows.push(again);
+        let err = race_start_attributes_from_rows(rows, &defaults())
+            .expect_err("dieselbe Rasse in zwei Zeilen ist ein Startabbruch");
+        assert!(err.contains("mehr als einer Zeile"), "{err}");
+    }
+
+    #[test]
+    fn loader_rejects_unknown_race_in_row() {
+        for bogus in ["zwerg", "Mensch", "mensch "] {
+            let mut rows = shipped_seed_rows();
+            rows.retain(|(r, ..)| r != "andorer");
+            let (_, s, d, i, c, w, l, e) = rows.remove(0);
+            rows.push((bogus.to_string(), s, d, i, c, w, l, e));
+            let err = race_start_attributes_from_rows(rows, &defaults())
+                .expect_err(&format!("{bogus:?} ist kein kanonischer Wert"));
+            assert!(err.contains("unbekanntem Rassenwert"), "{err}");
+        }
+    }
+
+    #[test]
+    fn loader_requires_every_selectable_race_present() {
+        // laut Konfiguration wählbar, aber in der Tabelle fehlend → Startabbruch.
+        let mut rows = shipped_seed_rows();
+        rows.retain(|(r, ..)| r != "andorer");
+        let err = race_start_attributes_from_rows(rows, &defaults())
+            .expect_err("fehlende wählbare Rasse ist ein Startabbruch");
+        assert!(err.contains("andorer"), "{err}");
+    }
+
+    #[test]
+    fn loader_tolerates_missing_non_selectable_race() {
+        // luzilla/mandalonier fehlen: laut Default-Konfiguration nicht wählbar
+        // → KEIN Abbruch (Toleranz nur hier, damit eine vorbereitete
+        // Expansion nicht den Start erzwingt).
+        let mut rows = shipped_seed_rows();
+        rows.retain(|(r, ..)| r != "luzilla" && r != "mandalonier");
+        let loaded = race_start_attributes_from_rows(rows, &defaults())
+            .expect("fehlende NICHT-wählbare Rasse blockiert den Start nicht");
+        assert_eq!(loaded.len(), 3);
+        // Umgekehrt: mit aktivierter Expansion wird genau diese Rasse Pflicht.
+        let mut selectable = defaults();
+        selectable.push("luzilla".to_string());
+        assert!(race_start_attributes_from_rows(shipped_seed_rows(), &selectable).is_ok());
     }
 }
 
