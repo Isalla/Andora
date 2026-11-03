@@ -920,16 +920,25 @@ character_quests
 → realm_state_<realm> (Schema-Name: `quests`, Migration `004_quests.sql`; frühere Bezeichnung `character_quests` — vereinheitlicht auf den implementierten Namen, siehe `Quest-System.md`, Abschnitt 27.6)
 
 craft_jobs
-→ realm_state_<realm>
+→ realm_state_<realm> (Refund-Quelle, nicht implementiert; offene Quellanbindung)
 
 craft_job_items
-→ realm_state_<realm>
+→ realm_state_<realm> (Refund-Quelle, nicht implementiert; offene Quellanbindung)
+
+character_mail
+→ realm_state_<realm> (Migration 026, additiv; System-Rückerstattungs-Mails)
+
+character_mail_items
+→ realm_state_<realm> (Migration 026, additiv; Escrow-Referenzen auf item_instances)
+
+character_mail_claims
+→ realm_state_<realm> (Migration 026, additiv; Claim-Receipts)
 
 mail
-→ realm_state_<realm>
+→ realm_state_<realm> (Legacy 005_mail.sql, ungenutzt, nicht durch Code referenziert)
 
 mail_attachments
-→ realm_state_<realm>
+→ realm_state_<realm> (Legacy 005_mail.sql, ungenutzt, nicht durch Code referenziert)
 
 guilds
 → realm_state_<realm>

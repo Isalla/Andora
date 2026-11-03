@@ -588,6 +588,23 @@ Die Rückerstattung muss gegen doppelte Ausführung geschützt sein.
 
 Ein Job darf seine Items und Kosten nur einmal zurückerstatten.
 
+Items und Idia werden gemeinsam im Refund-Escrow hinterlegt (`character_mail` +
+`character_mail_items`, Migration 026 additiv). Die Items bleiben als bestehende
+`item_instances`-UUIDs erhalten und werden erst beim Claim übernommen.
+
+Der Claim erfolgt über einen idempotenten `MailClaimArtifact` im bestehenden
+Spool-/Drain-Pfad (analog Quest-Completion, Migration 025): vollständiger
+Nachzustand, Basis-/Zielrevision und eindeutige Claim-Zuordnung
+(`character_id` + `mail_id`) als Commit-Beleg (`character_mail_claims`,
+Migration 026). Wiederholung mit identischem Inhalt ergibt `AlreadyApplied`,
+abweichender Inhalt `Conflict`. Items und Idia werden vollständig oder gar
+nicht übernommen; bei fehlender Inventarkapazität bleibt die gesamte
+Rückerstattung erhalten.
+
+Es gibt keine Spieler-Textmail, keinen Spieler-Itemversand, keine Gebühren,
+keine Quota, keine Fristen, kein Löschen und keine Rücksendung an den Absender
+(V1).
+
 ---
 
 ## 24. Fehlende Coordinator-Jobs und Realm-Recovery
