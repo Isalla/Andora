@@ -558,7 +558,11 @@ async fn async_main() -> Result<(), String> {
                 let row = crate::weather::to_row(&world.weather);
                 let wp = weather_pool.clone();
                 tokio::spawn(async move {
-                    db::save_weather_state(&wp, &row);
+                    // .await ist Pflicht: ohne wird der Future nur erzeugt und
+                    // sofort wieder verworfen — der Wetterzustand wäre damit
+                    // nie persistiert (und der mit 0 geseedete Zeitplan hätte
+                    // jeden Neustart die Wechsel-Schleife aus loest).
+                    db::save_weather_state(&wp, &row).await;
                 });
             }
         }

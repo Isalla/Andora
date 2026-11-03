@@ -263,6 +263,20 @@ Eine Gameplay-Frage bleibt ausdrücklich **offen**:
 
 **Keine dieser Varianten wird jetzt ausgewählt** (Abschnitt 18).
 
+### 12.1 Überholter Zeitplan (umgesetzte Regel)
+
+„Wiederaufnahme" bedeutet **nicht**, einen längst überholten Wechselzeitpunkt Tick für Tick nachzuziehen. Die Migration `027_weather.sql` seedet `next_at_ms = 0`; wäre dieser Wert verbindlich, würde `advance()` bei **jedem** Tick feuern — das Wetter springt dann in einer Endlosschleife (WEATHER-Spam), und die sichtbegrenzte AOFB-Streuung (Abschnitt 15) lässt zusätzlich NPC-Marker flackern.
+
+Umgesetzte Regel (Server, `weather.rs`):
+
+* Liegt der persistierte `next_at_ms` **in der Zukunft**, wird er unverändert fortgesetzt (resume, not reset).
+* Ist er bereits **verstrichen** (Seed-Wert 0 oder Downtime), wird der Zeitplan **ab jetzt** neu eingeplant.
+* Invariante nach jedem Wechsel: `next_at_ms > now`. damit ein Wechsel nie im Vergangenheitstermin stecken bleibt.
+
+Nachgewiesen durch die Tests `stale_schedule_never_fires_every_tick`,
+`from_row_replans_elapsed_schedule_from_now` und
+`from_row_resumes_future_schedule_untouched`.
+
 ---
 
 ## 13. Spieler-Login und Gebietswechsel

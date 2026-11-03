@@ -304,6 +304,12 @@ pub fn season_weights(s: Season) -> [u32; 6] {
 /// `next` + duration + intensity via the SEASON-WEIGHTED distribution, and bump
 /// the revision. Returns true iff a genuine change happened (the caller
 /// broadcasts WEATHER only then). The season is re-derived from `now_ms`.
+///
+/// INVARIANT (tested): after a change `next_at_ms > now_ms`. A schedule that is
+/// already stale (the migration seeds `next_at_ms = 0`, or the realm was offline
+/// longer than one span) is RE-PLANNED from `now_ms` instead of being replayed
+/// tick by tick — otherwise every tick would fire a change and the weather would
+/// cycle in an endless loop (WEATHER spam + flickering AOFB radius).
 pub fn advance(world: &mut World, cfg: &WeatherCfg, rng: &mut SplitMix64, now_ms: i64) -> bool {
     if now_ms < world.weather.next_at_ms {
         return false;
@@ -318,12 +324,23 @@ pub fn advance(world: &mut World, cfg: &WeatherCfg, rng: &mut SplitMix64, now_ms
     let intensity = (rng.next() * 101.0).floor() as u8;
 
     // Mutate the autoritative state in place (WeatherState is Copy; no move-out
-    // of the struct). Order keeps the started_at/next_at relation consistent.
+    // of the struct). A stale schedule (next_at in the past, e.g. the seeded 0)
+    // restarts from now; a slightly overdue one resumes at its planned point.
+    let started = if world.weather.next_at_ms > 0 && now_ms - world.weather.next_at_ms <= span as i64 {
+        world.weather.next_at_ms
+    } else {
+        now_ms
+    };
     world.weather.current = world.weather.next;
-    world.weather.started_at_ms = world.weather.next_at_ms;
+    world.weather.started_at_ms = started;
     world.weather.next = new_next;
     world.weather.intensity = intensity;
-    world.weather.next_at_ms = world.weather.started_at_ms + dur;
+    world.weather.next_at_ms = started + dur;
+    // INVARIANT: the next change never stays in the past (no catch-up storm).
+    if world.weather.next_at_ms <= now_ms {
+        world.weather.started_at_ms = now_ms;
+        world.weather.next_at_ms = now_ms + dur;
+    }
     world.weather.revision = world.weather.revision.wrapping_add(1);
     world.weather.season = season;
     true
@@ -403,14 +420,20 @@ pub struct WeatherRow {
 pub fn from_row(row: &WeatherRow, now_ms: i64, cfg: &WeatherCfg) -> Weather {
     let current = WeatherState::from_key(row.current.as_str()).unwrap_or(WeatherState::Sunny);
     let next = WeatherState::from_key(row.next.as_str()).unwrap_or(current);
+    // A schedule still in the future is RESUMED as persisted (docs §12: resumed,
+    // not reset). An already elapsed one (the migration seeds next_at = 0, or the
+    // realm was offline) is re-planned from `now_ms` — replaying it tick by tick
+    // would change the weather on every tick (endless WEATHER spam).
+    let stale = row.next_at_ms <= now_ms;
+    let min_ms = cfg.transition_min_ms.max(1) as i64;
+    let started_at_ms = if stale { now_ms } else { row.started_at_ms };
+    let next_at_ms = if stale { now_ms + min_ms } else { row.next_at_ms };
     Weather {
         current,
         next,
         intensity: row.intensity.clamp(0, 100) as u8,
-        started_at_ms: row.started_at_ms,
-        // A stale next_at in the past is honoured (docs §12: the persisted
-        // position is resumed, not reset); the next tick will advance it.
-        next_at_ms: row.next_at_ms,
+        started_at_ms,
+        next_at_ms,
         revision: row.revision.max(0) as u64,
         // Season is calendar-derived (not persisted): recompute from the clock.
         season: season_from_epoch_ms(now_ms),
@@ -493,6 +516,78 @@ mod tests {
         assert_eq!(w.weather.revision, 1);
         // Immediately again (now before the new next_at): no double change.
         assert_eq!(advance(&mut w, &cfg(), &mut rng, 1001), false);
+    }
+
+    #[test]
+    fn stale_schedule_never_fires_every_tick() {
+        // Regression (Testclient-Praxis): die Migration seedet next_at_ms = 0.
+        // Wird der ueberholte Zeitplan Tick fuer Tick nachgezogen, wechselt das
+        // Wetter bei JEDEM Tick — WEATHER-Spam plus flackernde AOFB-Sicht.
+        // Cfg wie im Realbetrieb (2..10 min), 200 Ticks a 100 ms = 20 s.
+        let real = WeatherCfg {
+            transition_min_ms: 120_000,
+            transition_max_ms: 600_000,
+            persist_interval_ms: 30_000,
+        };
+        let mut w = World::new();
+        w.weather = Weather {
+            current: WeatherState::Sunny,
+            next: WeatherState::Sunny,
+            intensity: 40,
+            started_at_ms: 0,
+            next_at_ms: 0,
+            revision: 0,
+            season: Season::Summer,
+        };
+        let mut rng = SplitMix64::new(4242);
+        let mut changes = 0;
+        for i in 1..=200 {
+            let now = i * 100;
+            if advance(&mut w, &real, &mut rng, now) {
+                changes += 1;
+            }
+            // INVARIANT: der naechste Wechsel liegt immer in der Zukunft.
+            assert!(w.weather.next_at_ms > now, "next_at {} <= now {}", w.weather.next_at_ms, now);
+        }
+        // Genau EIN Wechsel (der erste aus dem ueberholten Seed-Zustand),
+        // danach 20 s Ruhe — nicht 200.
+        assert_eq!(changes, 1);
+        assert_eq!(w.weather.revision, 1);
+    }
+
+    #[test]
+    fn from_row_replans_elapsed_schedule_from_now() {
+        // Seedsatz (next_at = 0) darf nicht als "sofort faellig" resumed werden.
+        let row = WeatherRow {
+            current: "sunny".into(),
+            next: "sunny".into(),
+            intensity: 40,
+            started_at_ms: 0,
+            next_at_ms: 0,
+            revision: 0,
+        };
+        let w = from_row(&row, 5_000_000, &cfg());
+        assert_eq!(w.started_at_ms, 5_000_000);
+        assert!(w.next_at_ms > 5_000_000);
+    }
+
+    #[test]
+    fn from_row_resumes_future_schedule_untouched() {
+        // docs §12: ein noch nicht faelliger persistierter Zeitplan wird 1:1
+        // fortgesetzt (resume, not reset) — auch über einen Neustart hinweg.
+        let row = WeatherRow {
+            current: "rain".into(),
+            next: "storm".into(),
+            intensity: 55,
+            started_at_ms: 90_000,
+            next_at_ms: 120_000,
+            revision: 4,
+        };
+        let w = from_row(&row, 100_000, &cfg());
+        assert_eq!(w.started_at_ms, 90_000);
+        assert_eq!(w.next_at_ms, 120_000);
+        assert_eq!(w.current, WeatherState::Rain);
+        assert_eq!(w.next, WeatherState::Storm);
     }
 
     #[test]
