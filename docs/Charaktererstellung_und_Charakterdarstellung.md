@@ -173,7 +173,10 @@ festgelegt und hier nicht vorweggenommen.
 Die realmseitige Konfiguration enthält nur kanonische Rassenwerte. Ein
 unbekannter oder nicht kanonischer Wert führt zu einem Abbruch des
 Realm-Starts mit klarer Fehlermeldung; er wird nicht ignoriert oder durch
-einen Standardwert ersetzt. Eine nach dieser Konfiguration wählbare Rasse
+einen Standardwert ersetzt. Ein leerer Eintrag gilt als nicht kanonisch.
+Derselbe kanonische Wert darf nicht mehrfach aufgeführt werden; auch ein
+Duplikat führt zu einem Abbruch des Realm-Starts mit klarer Fehlermeldung.
+Eine nach dieser Konfiguration wählbare Rasse
 muss zusätzlich in der Rassetabelle vorhanden sein; fehlt sie, greift die
 bereits beschriebene Prüfung beim Start des Loaders.
 
