@@ -20,11 +20,18 @@ Grundprinzip:
 
 Aktuell sind folgende spielbare Rassen vorgesehen:
 
-* Menschen
-* Elfen
-* Andorer
-* Luzilla
-* Mandalonier
+| Rasse | kanonischer Wert | Status |
+|---|---|---|
+| Menschen | `mensch` | Basis, beim Start spielbar |
+| Elfen | `elf` | Basis, beim Start spielbar |
+| Andorer | `andorer` | Basis, beim Start spielbar |
+| Luzilla | `luzilla` | Expansion 1, beim Start deaktiviert |
+| Mandalonier | `mandalonier` | Expansion 2, beim Start deaktiviert |
+
+Die kanonischen Werte sind kleingeschrieben und führen keine
+Umlaute. Der Status regelt ausschließlich die Verfügbarkeit bei
+der Charaktererstellung und ändert nichts an der Weltbuilding-
+oder Attributsdefinition der Rasse.
 
 Die genauen Eigenschaften, Kulturen und möglichen spielmechanischen Besonderheiten der einzelnen Rassen werden separat ausgearbeitet.
 
@@ -192,11 +199,9 @@ Charaktererstellung
         ↓
 Rasse
         ↓
-Grundklasse
+Abenteurer (Level 1–8, Kennenlernen aller vier Grundklassen)
         ↓
-Level 1–10
-        ↓
-Klassenentwicklung
+Wahl einer Grundklasse ab Level 9
         ↓
 Unterklasse
         ↓

@@ -11,14 +11,14 @@
   (f64), Hook `AttributeBonuses` für Ausrüstungsboni (§3, konkrete Items folgen separat),
   `recompute_max_resources` für Login-Initialisierung. DB-Spalten via Migration 011
   (`strength`, `agility`→dexterity, `intelligence`, `constitution` bereits in 001;
-  `wisdom`, `luck`, `endurance` neu, neutral auf 10 – **keine beschlossene
-  Start-/Rassenverteilung**, §2 folgt mit dem Rassen-/Charaktersystem). Aktive Wirkungen: Kraft→Nahkampf +0,5 %/Pkt, Konstitution→
+  `wisdom`, `luck`, `endurance` neu, neutral auf 10; die rassische Startverteilung ist in §2 dokumentiert,
+  aber im Realm noch nicht implementiert). Aktive Wirkungen: Kraft→Nahkampf +0,5 %/Pkt, Konstitution→
   Max-HP +10/Pkt, Geschicklichkeit→Fernkampf +0,5 %/Pkt (reine Funktion, kein
   Fernkampfsystem), Intelligenz→Magischer Schaden +0,5 %/Pkt (in `ability.rs` wired),
   Weisheit→Max-Mana +20/Pkt, Glück→Crit +0,1 pp/Pkt (Aufschlag auf bestehenden
   Crit-Wurf, kein paralleles System), Ausdauer→Rüstungswert +0,2 %/Pkt (wirkt auf
   effektive Rüstung vor dem Cap) + Laufdauer +1 %/Pkt (vorbereitet, inaktiv).
-  Rassenverteilung (§2) folgt mit dem Rassensystem.
+  Die dokumentierte rassische Startverteilung in §2 ist noch nicht implementiert.
 
 - **HP-/Mana-Regeneration (Abschnitte 4–8) eingebaut:** `src/realm-rs/src/regen.rs`,
   eingebunden in `world.rs` / `main.rs`. Grundformel `(Basis + additive Boni) ×
@@ -145,6 +145,32 @@ Die Grundattribute wirken als Kampf- und Charakterwerte in das gesamte Spiel hin
 * auch hier **keine Tank-Pflicht oder Klassensperre**
 
 Die konkrete Werteverteilung je Rasse wird beim eigentlichen Rassen-/Charaktersystem umgesetzt und über Spieltests abgeglichen.
+
+### Startwerte der spielbaren Rassen
+
+Verbindlich für die Charakteranlage. Basiswert jedes der sieben
+Grundattribute ist **1**.
+
+| Attribut | Mensch | Elf | Andorer | Luzilla | Mandalonier |
+|---|---|---|---|---|---|
+| Kraft | 2 | 1 | 1 | 1 | 4 |
+| Konstitution | 2 | 1 | 1 | 1 | 3 |
+| Geschicklichkeit | 2 | 4 | 1 | 4 | 1 |
+| Intelligenz | 2 | 1 | 4 | 1 | 1 |
+| Weisheit | 2 | 1 | 3 | 1 | 1 |
+| Glück | 2 | 3 | 1 | 1 | 1 |
+| Ausdauer | 2 | 1 | 1 | 3 | 1 |
+| Summe | 14 | 12 | 12 | 12 | 12 |
+
+- Die Werte gelten für Level 1. Weitere Unterschiede entstehen durch
+  Stufe, Klasse, verteilte Attribute und insbesondere Ausrüstung.
+- Menschen tragen den Ausgleich für ihre Allround-Rolle darin, dass
+  alle sieben Attribute auf 2 stehen.
+- Luzilla und Mandalonier sind vollständig hinterlegt, für den Start
+  aber deaktiviert (Expansion 1 beziehungsweise 2).
+- Die Verteilung soll daten- respektive contentgetrieben gehalten
+  werden und darf keine Umbauten der Kampflogik erfordern
+  (Architekturprinzip Abschnitt 11).
 
 ---
 

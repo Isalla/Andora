@@ -27,13 +27,93 @@ Der Erstellungsablauf validiert mindestens:
 1. **Account-Bindung** – die `account_id` stammt aus der authentifizierten Sitzung; ein Auftrag ohne authentifizierte Sitzung wird abgelehnt.
 2. **Name** – Länge und zulässiger Zeichensatz werden serverseitig geprüft; der Name darf kein Ersatz für die `character_id` sein.
 3. **Eindeutigkeit** – ein bereits vergebener Name wird abgelehnt, statt einen zweiten Datensatz anzulegen.
-4. **Rasse, Klasse und Appearance** – die übermittelten Werte werden gegen die gültigen Werte geprüft und in kanonischer Form gespeichert; die Grundklasse folgt den Regeln des Klassensystems.
+4. **Rasse und Startklasse** – die übermittelte Rasse wird gegen die gültigen aktivierten Werte geprüft und in kanonischer Form gespeichert; die Startklasse folgt den Regeln des Klassensystems. Appearance-Felder gehören nicht zum V1-Umfang der Erstellung; ihre Prüfung und Speicherung ist für einen späteren Auftrag offen.
 5. **Initiale Datensätze** – neben dem Charakter-Datensatz werden die zugehörigen Startdatensätze angelegt (zum Beispiel Ausrüstung/Inventar, Fähigkeiten, Questzustand), damit kein unvollständiger Charakter entsteht.
 6. **Transaktionsgrenzen** – die Anlage der Datensätze erfolgt so, dass ein Fehler keinen halb angelegten Charakter hinterlässt.
 
-### Offene Architekturentscheidung
+### Angebot des Erstellungsablaufs
 
-Aus den bestehenden Dokumenten geht **nicht** eindeutig hervor, welcher Dienst den Erstellungsablauf anbietet und welche Datenbanktransaktion er verwendet. Diese Festlegung ist eine **gesonderte Entscheidung** und wird hier nicht vorweggenommen. Solange sie nicht getroffen ist, gilt die Regel oben unabhängig vom anbietenden Dienst: kein Anlegen im Realm-Einstieg, serverseitig vergebene positive `character_id`, fail-closed bei fehlendem oder fremdem `char_id` beim Lookup.
+Die Charaktererstellung wird vom **Realm-Server** über seinen
+bestehenden HTTP-Port angeboten, analog zur bereits eingebauten
+Charakterliste `GET /characters`:
+
+```text
+POST /characters?session_id=<Login-Session>
+```
+
+- Die `session_id` wird über die vorhandene signierte Auth-API
+  geprüft; die `account_id` stammt ausschließlich aus dieser Prüfung.
+- Eine clientgelieferte `account_id` oder `character_id` ist ohne
+  Wirkung und wird abgelehnt.
+- Die `character_id` ist die vom Server vergebene positive
+  Datenbank-ID in der Realm-Datenbank dieses Realms.
+- Die Anlage erfolgt in einer Transaktion, damit kein halber
+  Charakter zurückbleibt.
+- Die Prüfung auf einen bereits vergebenen Namen erfolgt vor der
+  Transaktion gegen dieselbe Realm-Datenbank.
+
+Der Realm-Einstieg selbst bleibt davon unberührt und legt niemals
+einen Charakter an (`Login_Realm_Architektur.md` Abschnitt 6).
+
+### Spielbare Rassen bei der Erstellung
+
+Kanonische Rassenwerte sind durchgehend **kleingeschrieben** und führen **keine Umlaute**:
+
+| Rasse | kanonischer Wert | beim Start |
+|---|---|---|
+| Menschen | `mensch` | aktiv |
+| Elfen | `elf` | aktiv |
+| Andorer | `andorer` | aktiv |
+| Luzilla | `luzilla` | deaktiviert (Expansion 1) |
+| Mandalonier | `mandalonier` | deaktiviert (Expansion 2) |
+
+Die Realm-Validierung akzeptiert nur aktivierte Rassen. Eine
+deaktivierte Rasse ist als Wert vorbereitet, aber bei der
+Charaktererstellung nicht wählbar.
+
+### Vorname
+
+Bei der Charaktererstellung wird ausschließlich der **Vorname** vergeben.
+
+- Länge 3 bis 10 Zeichen.
+- Erlaubt sind Buchstaben einschließlich deutscher Umlaute sowie
+  der Bindestrich; keine Ziffern, keine sonstigen Sonderzeichen.
+- Führende und abschließende Leerzeichen werden entfernt; ein
+  leerer oder nur aus Leerzeichen bestehender Name wird abgelehnt.
+- Die Eindeutigkeit gilt realmweit und Groß-/Kleinschreibung
+  gleichgültig.
+- Funktionsbezeichnungen wie `gm`, `admin` oder `support` sind
+  reserviert und werden abgelehnt.
+- Nachnamen sind ausdrücklich **nicht** Bestandteil dieses
+  Abschnitts. Sie sind als **accountgebundener** Zusatz geplant,
+  dadurch teilen alle Charaktere eines Accounts denselben
+  Nachnamen, und bei der Erstellung wird weiterhin nur der
+  Vorname gewählt. Direkte Ansprache im Spiel verwendet den
+  Namen ohne Nachnamen. Für die Nachnamen existiert derzeit
+  weder Feld noch Regel.
+
+### Startklasse und Startwerte bei der Erstellung
+
+- Jeder neu erstellte Charakter beginnt als **Abenteurer**; die
+  Grundklassenwahl erfolgt wie im Klassensystem dokumentiert
+  später (`Klassensystem.md`, `Rassen-Fraktionen.md` Abschnitt 10).
+- Die sieben Grundattribute werden aus der rassischen
+  Startwertmatrix gesetzt (`Attribute_und_Regeneration.md`
+  Abschnitt 2).
+- Die zugehörigen Startdatensätze werden vollständig und
+  fehlerfrei angelegt. Der konkrete Umfang der Startdatensätze
+  wird mit dem Umsetzungsauftrag festgelegt; es wird keine
+  Starterausrüstung erfunden.
+
+### Umgang mit vorhandenen Test- und Platzhaltercharakteren
+
+Bestehende Charakterdatensätze werden **nicht** per Migration auf
+die kanonischen Rassenwerte umgestellt. Die Erstellung schreibt
+ausschließlich kanonische Werte. Der Realm liest das Feld
+`race` tolerant: ein unbekannter oder abweichend geschriebener
+Wert wird protokolliert, verhindert aber **nicht** den Einstieg.
+Vorhandene Platzhaltercharaktere werden ersetzt, sobald die
+Charaktererstellung verfügbar ist.
 
 ### Appearance beim Erstellen
 
@@ -48,6 +128,8 @@ hair = 2
 hair_color = 4
 skin = 3
 ```
+
+Die Beispiele in diesem Abschnitt und den folgenden Abschnitten sind illustrativ. Für die Rasse gilt ausschließlich der kanonische Rassenwert aus Abschnitt „Spielbare Rassen bei der Erstellung". Dort lautet der Menschenwert `mensch`, nicht `human`.
 
 Der Client übermittelt keine:
 
