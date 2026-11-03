@@ -37,6 +37,8 @@ Die genauen Eigenschaften, Kulturen und möglichen spielmechanischen Besonderhei
 
 Die aktuellen rassischen Attributschwerpunkte und die Regel „Jede Rasse soll jede Klasse sinnvoll spielen können" stehen verbindlich in `Attribute_und_Regeneration.md` (Abschnitt 2).
 
+Speicherort der Rassen- und Startattributdaten und das Verhalten beim Laden durch den Realm stehen verbindlich in `Charaktererstellung_und_Charakterdarstellung.md` (Abschnitt „Speicherort der Rassen- und Startattributdaten"); die Regeln selbst werden in diesem Dokument nicht wiederholt.
+
 ---
 
 # 3. Rasse ist keine Fraktion

@@ -144,6 +144,63 @@ Der Server prüft lediglich, ob die übermittelten Werte für die jeweilige Char
 
 ---
 
+## Speicherort der Rassen- und Startattributdaten
+
+Die rassische Startwertmatrix liegt **serverseitig als Daten** vor und wird
+vom Realm beim Start geladen. Verbindliche Zahlenquelle ist
+`Attribute_und_Regeneration.md` Abschnitt 2 (Basiswert 1, `mensch` durchgehend
+auf 2); dieses Dokument wiederholt keine Zahlenwerte. Die Matrix gehört nicht
+in die Kampf-, Klassen- oder Regenerationslogik: die Verteilung bleibt
+daten- respektive contentgetrieben (`Attribute_und_Regeneration.md`
+Abschnitt 11), damit eine Balancing-Anpassung keinen Architekturumbau
+erfordert.
+
+Fest steht:
+
+- pro Rasse genau **eine** Zeile mit den sieben Startattributwerten;
+- welche Rassen bei der Charaktererstellung wählbar sind, entscheidet die
+  **realmseitige Konfiguration** (`luzilla` und `mandalonier` sind als Werte
+  vorbereitet und beim Start deaktiviert);
+- im Charakterdatensatz bleibt ausschließlich der kanonische Rassenwert
+  (`race`); die Startattribute werden bei der Anlage aus der Tabelle
+  abgeleitet und als Werte des Charakters gespeichert.
+
+Der konkrete Speicherort — Tabellenname, Spalten, Migrationsdatei und der
+Schlüssel der realmseitigen Konfiguration — wird mit dem Umsetzungsauftrag
+festgelegt und hier nicht vorweggenommen.
+
+Der Loader der Rassetabelle arbeitet **fail-closed**. Der Realm-Start bricht
+mit klarer Meldung ab, wenn:
+
+- die Tabelle fehlt,
+- ein Attributwert fehlt, nicht ganzzahlig, kleiner als 1 oder sonst ungültig ist,
+- eine Zeile einen Rassenwert enthält, der nicht zu den fünf kanonischen
+  Werten gehört,
+- dieselbe Rasse in mehr als einer Zeile steht,
+- eine Rasse fehlt, die nach der realmseitigen Konfiguration wählbar sein soll.
+
+Ein Überspringen fehlerhafter Zeilen — das Verfahren der Item-Definitionen —
+ist für Rassedaten ausdrücklich **nicht** vorgesehen, weil die Rasse Teil der
+Charakteridentität ist und ohne vollständige Matrix kein Charakter korrekt
+angelegt werden kann.
+
+Eine Rasse, die nach der Konfiguration **nicht** wählbar ist, darf in der
+Tabelle fehlen, ohne den Start zu blockieren. Die Migrationsinhalte hinterlegen
+vorgesehen alle fünf Rassen vollständig; die Toleranz betrifft nur den
+Loader, damit eine vorbereitete Expansion nicht den Start eines Realms
+erzwingt, das sie noch nicht anbietet.
+
+Bestehende Rust-Klassen-/Regenerationskonstanten bleiben davon unberührt: die
+Klassen- und Regenerationsgrundwerte in `class.rs` und `regen.rs` sowie die
+Attributswirkungen in `attributes.rs` (`Attribute_und_Regeneration.md`
+Abschnitte 6 und 11) sind von der Rassetabelle getrennt. Die Tabelle
+verändert weder Klassenwerte noch Regenerationswerte noch bestehende
+Attributswirkungen.
+
+**Status: dokumentiert, nicht implementiert.**
+
+---
+
 ## Serverseitige Charakterdaten
 
 Der Realm-Server kennt beispielsweise:

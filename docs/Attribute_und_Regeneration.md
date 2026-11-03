@@ -171,6 +171,10 @@ Grundattribute ist **1**.
 - Die Verteilung soll daten- respektive contentgetrieben gehalten
   werden und darf keine Umbauten der Kampflogik erfordern
   (Architekturprinzip Abschnitt 11).
+- Speicherort der Matrix und Verhalten beim Laden durch den Realm sind
+  ausschließlich in `Charaktererstellung_und_Charakterdarstellung.md`,
+  Abschnitt „Speicherort der Rassen- und Startattributdaten" geregelt;
+  die dort beschriebenen Fehlerfälle werden hier nicht wiederholt.
 
 ---
 
