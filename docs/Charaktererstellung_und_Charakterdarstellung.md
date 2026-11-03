@@ -159,8 +159,9 @@ Fest steht:
 
 - pro Rasse genau **eine** Zeile mit den sieben Startattributwerten;
 - welche Rassen bei der Charaktererstellung wählbar sind, entscheidet die
-  **realmseitige Konfiguration** (`luzilla` und `mandalonier` sind als Werte
-  vorbereitet und beim Start deaktiviert);
+  **realmseitige Konfiguration**; nicht gesetzt oder leer bedeutet, dass
+  ausschließlich `mensch`, `elf` und `andorer` wählbar sind, während
+  `luzilla` und `mandalonier` nicht wählbar sind;
 - im Charakterdatensatz bleibt ausschließlich der kanonische Rassenwert
   (`race`); die Startattribute werden bei der Anlage aus der Tabelle
   abgeleitet und als Werte des Charakters gespeichert.
@@ -168,6 +169,13 @@ Fest steht:
 Der konkrete Speicherort — Tabellenname, Spalten, Migrationsdatei und der
 Schlüssel der realmseitigen Konfiguration — wird mit dem Umsetzungsauftrag
 festgelegt und hier nicht vorweggenommen.
+
+Die realmseitige Konfiguration enthält nur kanonische Rassenwerte. Ein
+unbekannter oder nicht kanonischer Wert führt zu einem Abbruch des
+Realm-Starts mit klarer Fehlermeldung; er wird nicht ignoriert oder durch
+einen Standardwert ersetzt. Eine nach dieser Konfiguration wählbare Rasse
+muss zusätzlich in der Rassetabelle vorhanden sein; fehlt sie, greift die
+bereits beschriebene Prüfung beim Start des Loaders.
 
 Der Loader der Rassetabelle arbeitet **fail-closed**. Der Realm-Start bricht
 mit klarer Meldung ab, wenn:
