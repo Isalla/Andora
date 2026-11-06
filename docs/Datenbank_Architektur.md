@@ -186,7 +186,7 @@ Zum Beispiel:
   Migration 030; beim Realm-Start geladen)
 * weitere Realm-/Inhaltsversion-definierende Daten
 
-Zu den Rassen- und Startattributdefinitionen: Speicherort und Verhalten beim Laden durch den Realm stehen verbindlich in `Charaktererstellung_und_Charakterdarstellung.md` (Abschnitt „Speicherort der Rassen- und Startattributdaten"). Namen von Tabelle und Migration sind dort bewusst offengehalten und werden hier nicht vorweggenommen; die Regeln selbst werden in diesem Dokument nicht wiederholt.
+Zu den Rassen- und Startattributdefinitionen: Speicherort und Verhalten beim Laden durch den Realm stehen verbindlich in `Charaktererstellung_und_Charakterdarstellung.md` (Abschnitt „Speicherort der Rassen- und Startattributdaten"). Namen von Tabelle und Migration sind dort festgelegt; die Regeln selbst werden in diesem Dokument nicht wiederholt.
 
 ### Wichtig
 

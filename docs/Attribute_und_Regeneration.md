@@ -10,9 +10,10 @@
   `Attributes`-Struct (7 × i32), datengetriebene Konstanten (§11), abgeleitete Werte
   (f64), Hook `AttributeBonuses` für Ausrüstungsboni (§3, konkrete Items folgen separat),
   `recompute_max_resources` für Login-Initialisierung. DB-Spalten via Migration 011
-  (`strength`, `agility`→dexterity, `intelligence`, `constitution` bereits in 001;
+  (`strength`, `intelligence`, `constitution` sowie `agility` bereits in 001;
+  die Spalte `agility` steht für Geschicklichkeit und wird im Code unter `dexterity` geführt;
   `wisdom`, `luck`, `endurance` neu, neutral auf 10; die rassische Startverteilung ist in §2 dokumentiert,
-  aber im Realm noch nicht implementiert). Aktive Wirkungen: Kraft→Nahkampf +0,5 %/Pkt, Konstitution→
+  aber ihre Anwendung auf angelegte Charaktere ist noch nicht implementiert). Aktive Wirkungen: Kraft→Nahkampf +0,5 %/Pkt, Konstitution→
   Max-HP +10/Pkt, Geschicklichkeit→Fernkampf +0,5 %/Pkt (reine Funktion, kein
   Fernkampfsystem), Intelligenz→Magischer Schaden +0,5 %/Pkt (in `ability.rs` wired),
   Weisheit→Max-Mana +20/Pkt, Glück→Crit +0,1 pp/Pkt (Aufschlag auf bestehenden

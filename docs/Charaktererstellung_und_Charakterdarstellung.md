@@ -173,11 +173,15 @@ Konfiguration verwendet den Schlüssel `SELECTABLE_RACES`. Die
 Attributspalten führen die sieben Grundattribute unter denselben Namen
 wie `attributes.rs`.
 
-Die Tabelle führt Geschicklichkeit unter `dexterity`; die bestehende
-`characters`-Tabelle führt dieselbe Größe historisch unter `agility`
-(Migration 001). Bei der Charakteranlage ist `race_definitions.dexterity`
-auf die Spalte `characters.agility` abzubilden. Diese Zuordnung ist mit
-der Charakteranlage umzusetzen und derzeit nicht implementiert.
+Die Tabelle führt Geschicklichkeit unter `dexterity`; die `characters`-Tabelle
+führt dieselbe Größe unter `agility` (seit Migration 001, durch Migration 011
+unverändert). Bei den übrigen sechs Grundattributen stimmen die Spaltennamen
+beider Tabellen überein. Die Namenszuordnung zwischen `agility` und `dexterity`
+besitzt der Realm bereits in seinem Attribut-Lese- und -Schreibpfad. Zu
+ergänzen ist sie bei der Charakteranlage: der aus `race_definitions.dexterity`
+abgeleitete Startwert muss beim Anlegen in die Spalte `characters.agility`
+geschrieben werden. Diese Verwendung der Rassetabelle bei der Charakteranlage
+ist derzeit nicht implementiert.
 
 Die realmseitige Konfiguration enthält nur kanonische Rassenwerte. Ein
 unbekannter oder nicht kanonischer Wert führt zu einem Abbruch des
