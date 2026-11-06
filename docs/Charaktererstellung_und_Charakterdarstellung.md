@@ -166,9 +166,18 @@ Fest steht:
   (`race`); die Startattribute werden bei der Anlage aus der Tabelle
   abgeleitet und als Werte des Charakters gespeichert.
 
-Der konkrete Speicherort — Tabellenname, Spalten, Migrationsdatei und der
-Schlüssel der realmseitigen Konfiguration — wird mit dem Umsetzungsauftrag
-festgelegt und hier nicht vorweggenommen.
+Der Speicherort ist mit der Umsetzung festgelegt: die Tabelle
+`race_definitions` wird in der Migration `030_race_definitions.sql`
+angelegt und beim Realm-Start durch den Realm geladen; die realmseitige
+Konfiguration verwendet den Schlüssel `SELECTABLE_RACES`. Die
+Attributspalten führen die sieben Grundattribute unter denselben Namen
+wie `attributes.rs`.
+
+Die Tabelle führt Geschicklichkeit unter `dexterity`; die bestehende
+`characters`-Tabelle führt dieselbe Größe historisch unter `agility`
+(Migration 001). Bei der Charakteranlage ist `race_definitions.dexterity`
+auf die Spalte `characters.agility` abzubilden. Diese Zuordnung ist mit
+der Charakteranlage umzusetzen und derzeit nicht implementiert.
 
 Die realmseitige Konfiguration enthält nur kanonische Rassenwerte. Ein
 unbekannter oder nicht kanonischer Wert führt zu einem Abbruch des
@@ -196,8 +205,8 @@ Charakteridentität ist und ohne vollständige Matrix kein Charakter korrekt
 angelegt werden kann.
 
 Eine Rasse, die nach der Konfiguration **nicht** wählbar ist, darf in der
-Tabelle fehlen, ohne den Start zu blockieren. Die Migrationsinhalte hinterlegen
-vorgesehen alle fünf Rassen vollständig; die Toleranz betrifft nur den
+Tabelle fehlen, ohne den Start zu blockieren. Die Migrationsinhalte
+hinterlegen alle fünf Rassen vollständig; die Toleranz betrifft nur den
 Loader, damit eine vorbereitete Expansion nicht den Start eines Realms
 erzwingt, das sie noch nicht anbietet.
 
@@ -208,7 +217,9 @@ Abschnitte 6 und 11) sind von der Rassetabelle getrennt. Die Tabelle
 verändert weder Klassenwerte noch Regenerationswerte noch bestehende
 Attributswirkungen.
 
-**Status: dokumentiert, nicht implementiert.**
+**Status: Datenbasis, Loader und realmseitige Konfiguration implementiert.
+Die Anwendung der Matrix bei der Charakteranlage (`POST /characters`) ist
+noch nicht implementiert.**
 
 ---
 

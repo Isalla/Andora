@@ -18,7 +18,11 @@
   Weisheit→Max-Mana +20/Pkt, Glück→Crit +0,1 pp/Pkt (Aufschlag auf bestehenden
   Crit-Wurf, kein paralleles System), Ausdauer→Rüstungswert +0,2 %/Pkt (wirkt auf
   effektive Rüstung vor dem Cap) + Laufdauer +1 %/Pkt (vorbereitet, inaktiv).
-  Die dokumentierte rassische Startverteilung in §2 ist noch nicht implementiert.
+  Die dokumentierte rassische Startverteilung in §2 ist in ihrer Anwendung auf
+  angelegte Charaktere noch nicht implementiert. Die Datenbasis der Matrix ist
+  seit R1 implementiert (Tabelle `race_definitions`, Migration 030, beim
+  Realm-Start geladen); die Zuweisung der Startwerte an angelegte Charaktere
+  steht noch aus.
 
 - **HP-/Mana-Regeneration (Abschnitte 4–8) eingebaut:** `src/realm-rs/src/regen.rs`,
   eingebunden in `world.rs` / `main.rs`. Grundformel `(Basis + additive Boni) ×
