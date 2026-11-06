@@ -29,9 +29,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::class::ClassStatus;
 
-/// Die sieben Grundattribute (kanonische Schlüssel, konsistent zur
-/// characters-Tabelle: strength/constitution/dexterity/intelligence/wisdom/
-/// luck/endurance, docs/Attribute_und_Regeneration.md §1).
+/// Die sieben Grundattribute (kanonische Schlüssel, konsistent zum
+/// `Attributes`-Struct in attributes.rs; die characters-Tabelle führt dieselben
+/// Größen ebenfalls unter diesen Namen, nur die Geschicklichkeit heißt dort
+/// `agility` — umgeschaltet wird beim Lesen und Schreiben in db.rs —,
+/// docs/Attribute_und_Regeneration.md §1).
 pub const ATTRIBUTES: [&str; 7] = [
     "strength",
     "constitution",

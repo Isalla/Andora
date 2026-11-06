@@ -2423,7 +2423,9 @@ pub async fn load_mailbox_locations(
 /// doch ein fehlender/nicht lesbarer Wert muss im Loader als eigener
 /// Fehlerfall sichtbar werden (fail-closed, kein Default-Ersatz).
 /// Reihenfolge: strength, dexterity, intelligence, constitution, wisdom,
-/// luck, endurance (identisch zu Migration 030 und den characters-Spalten).
+/// luck, endurance (identisch zu Migration 030; von den characters-Spalten
+/// weicht nur die Geschicklichkeit ab — dort heißt die Spalte `agility`,
+/// die Zuordnung erledigen `CharacterRow::from_row` und `write_attributes`).
 pub type RaceStartRow = (
     String,
     Option<i32>,
