@@ -857,7 +857,8 @@ Für einen etwaigen späteren Löschlauf ist `idx_sessions_expires` für eine Be
 
 Bis zu einer späteren Entscheidung ist dieses Dokument **keine** Beschreibung einer vorhandenen Retention.
 
-Bereits angewendete Migrationen werden nicht nachträglich umnummeriert oder verändert.
+Bereits angewendete Migrationen werden nicht nachträglich umnummeriert.
+Inhaltliche Korrekturen richten sich nach Abschnitt 22.
 
 ---
 
@@ -1092,7 +1093,11 @@ Die Migrationen der statischen Definitionen eines Realms erfolgen im Rahmen des 
 
 Bereits erfolgreich angewendete Migrationen werden niemals nachträglich verändert.
 
+Ausnahme: Eine fehlerhafte Migration darf korrigiert werden, solange sie die höchste Migration ist. Sobald eine weitere Migration dahinter existiert, ist sie unantastbar. „Fehlerhaft" betrifft die Anwendung oder das Ergebnis der Migration. Wortlaut, Kommentare oder Dokumentation in einer bereits angewendeten Migration sind kein Korrekturanlass; dafür gilt die Unveränderlichkeit ausnahmslos.
+
 Muss ein bereits bestehendes Schema später geändert werden, wird eine neue Migration erstellt.
+
+Ist die höchste Migration inhaltlich fehlerhaft und wird nach ihrer ersten Anwendung korrigiert, entwertet das ihren bisherigen Anwendungsnachweis: betroffene Datenbanken führen die Version in `db_version` und wenden die Korrektur nicht erneut an. Sie müssen neu aufgesetzt oder ausdrücklich als abweichend markiert werden.
 
 Beispiel:
 
@@ -1102,7 +1107,7 @@ Beispiel:
 
 Die Integration der früheren Character-Struktur in `realm_state` muss ebenfalls über neue Migrationen erfolgen, sofern entsprechende Tabellen bereits tatsächlich angelegt oder produktiv verwendet wurden.
 
-Bestehende angewendete Migrationen werden nicht einfach umgeschrieben.
+Bestehende angewendete Migrationen werden nicht einfach umgeschrieben; die Ausnahme siehe oben in diesem Abschnitt.
 
 ---
 
@@ -1118,7 +1123,7 @@ Dabei gelten folgende Regeln:
 * keine fremden Datenbanken verändern
 * keine Tabellen ohne Zuordnung zu einem DB-Bereich erstellen
 * keine neue zentrale `schema.sql` aufbauen
-* bereits angewendete Migrationen nicht nachträglich verändern
+* bereits angewendete Migrationen nicht nachträglich verändern (Ausnahme: Abschnitt 22)
 * Migrationen nur mit dem vorgesehenen technischen DB-Benutzer anwenden
 * keine separate Character-Datenbank neu einführen
 * Character-Tabellen gehören zum jeweiligen `realm_state_<realm>`
@@ -1234,4 +1239,4 @@ Dadurch wird verhindert, dass Character-Daten und Realmzustand aus unterschiedli
 
 > Jede Andora-Datenbank besitzt ihre eigene `db_version`-Historie.
 
-> Bereits angewendete Migrationen werden niemals nachträglich verändert.
+> Bereits angewendete Migrationen werden niemals nachträglich verändert. Die Ausnahme regelt Abschnitt 22.

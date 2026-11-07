@@ -353,7 +353,7 @@ mit eigener `db_version`-Tabelle in der Realm-Datenbank `realm_state_<realm>`).
 Loginserver, Realmserver und Webseite führen keine Migrationen auf
 `auth` aus.
 
-Bereits angewendete Migrationen werden nicht nachträglich verändert.
+Bereits angewendete Migrationen werden nicht nachträglich verändert. Die Ausnahme regelt Datenbank_Architektur.md, Abschnitt 22.
 Änderungen erfolgen durch neue, fortlaufend nummerierte Migrationen.
 
 ## 15. Verhältnis zu anderen Datenbanken
