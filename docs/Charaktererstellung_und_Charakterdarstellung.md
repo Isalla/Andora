@@ -36,7 +36,7 @@ Der Erstellungsablauf validiert mindestens:
 2. **Name** – Länge und zulässiger Zeichensatz werden serverseitig geprüft; der Name darf kein Ersatz für die `character_id` sein.
 3. **Eindeutigkeit** – ein bereits vergebener Name wird abgelehnt, statt einen zweiten Datensatz anzulegen.
 4. **Rasse und Startklasse** – die übermittelte Rasse wird gegen die gültigen aktivierten Werte geprüft und in kanonischer Form gespeichert; die Startklasse folgt den Regeln des Klassensystems. Appearance-Felder gehören nicht zum V1-Umfang der Erstellung; ihre Prüfung und Speicherung ist für einen späteren Auftrag offen.
-5. **Initiale Datensätze** — die Anlage schreibt genau **einen** Charakterdatensatz: die `characters`-Zeile und ihre sieben Grundattribute (Regel 8b, Abschnitt „Beschlüsse dieser Runde"). Die zugehörigen Tabellen `inventory`, `character_abilities`, `quests`, `skills` und `character_cooldowns` erhalten bei der Anlage **keine** Startzeilen; das Fehlen der Zeile ist ihr leerer Anfangszustand (Abschnitt „Startdatenstruktur"). Ein unvollständiger Charakter entsteht dadurch nicht; Starterausrüstung wird nicht erfunden („Festlegungen", (d) und (j)).
+5. **Initiale Datensätze** — die Anlage schreibt genau **einen** Charakterdatensatz: die `characters`-Zeile und ihre sieben Grundattribute (Regel 8b, Abschnitt „Beschlüsse dieser Runde") sowie — Beschluss 5a — genau **eine** `skills`-Zeile mit Stufe 1 (Abschnitt „Startdatenstruktur"). Die übrigen zugehörigen Tabellen `inventory`, `character_abilities`, `quests` und `character_cooldowns` erhalten bei der Anlage **keine** Startzeilen; das Fehlen der Zeile ist ihr leerer Anfangszustand. Ein unvollständiger Charakter entsteht dadurch nicht; Starterausrüstung wird nicht erfunden („Festlegungen", (d) und (j)).
 6. **Transaktionsgrenzen** – die Anlage der Datensätze erfolgt so, dass ein Fehler keinen halb angelegten Charakter hinterlässt.
 
 ### Angebot des Erstellungsablaufs
@@ -225,10 +225,13 @@ Die Quelle nennt, wer den Wert bei der Anlage bestimmt:
 Anlegepfad vorgegeben), **Rassenmatrix** (RAM-Kopie beim Start),
 **Datenbank** (AUTO_INCREMENT) oder **DB-Default** (von der Anlage
 nicht geschrieben; der in der Migration definierte Standardwert gilt).
+Jede Zeile mit Quelle DB-Default trägt ihre Belegstelle — Datei und
+Zeile der Klausel, geprüft gegen den Wortlaut der Migrationen 001
+bis 030.
 
 | Spalte | Quelle | Wert/Bemerkung bei der Anlage |
 |---|---|---|
-| `id` | Datenbank | AUTO_INCREMENT; die vergebene positive Datenbank-ID (VERBINDLICH-Liste) |
+| `id` | Datenbank | AUTO_INCREMENT (`001_characters.sql:9`); die vergebene positive Datenbank-ID (VERBINDLICH-Liste) |
 | `account_id` | Sitzung | ausschließlich aus der Sessionprüfung |
 | `name` | geprüfte Anfrage | Vorname nach Abschnitt „Vorname"; `idx_char_name` als letzte Durchsetzung ((a)) |
 | `race` | geprüfte Anfrage | kanonischer, wählbarer Wert („Spielbare Rassen") |
@@ -240,38 +243,46 @@ nicht geschrieben; der in der Migration definierte Standardwert gilt).
 | `wisdom` | Rassenmatrix | via (b) und `db::write_attributes` |
 | `luck` | Rassenmatrix | via (b) und `db::write_attributes` |
 | `endurance` | Rassenmatrix | via (b) und `db::write_attributes` |
-| `level` | DB-Default | 1 |
-| `exp` | DB-Default | 0 |
-| `idia` | DB-Default | 0 (Beschluss: Start-`idia` ist 0, kein Startbetrag) |
-| `hp` | DB-Default | 100 |
-| `mana` | DB-Default | 50 |
-| `mana_max` | DB-Default | 50 (Migration 010) |
-| `zone_id` | DB-Default | 0 |
-| `pos_x` | DB-Default | 0 |
-| `pos_y` | DB-Default | 0 |
-| `guild_id` | DB-Default | NULL |
-| `created_at` | DB-Default | CURRENT_TIMESTAMP |
-| `combat_armor` | DB-Default | 0 (Migration 008) |
-| `faction_transition` | DB-Default | 0 (Migration 012) |
-| `free_attr_points` | DB-Default | 0 (Migration 018) |
-| `rested_pool` | DB-Default | 0 (Migration 018) |
-| `logout_at` | DB-Default | NULL (Migration 018) |
-| `persist_revision` | DB-Default | 0 (Migration 019) |
+| `level` | DB-Default | 1 (`001_characters.sql:14`, `INT NOT NULL DEFAULT 1`) |
+| `exp` | DB-Default | 0 (`001_characters.sql:15`, `INT NOT NULL DEFAULT 0`) |
+| `idia` | DB-Default | 0 (`019_idia.sql:17`, `INT NOT NULL DEFAULT 0`, umbenannt aus `gold`, `001_characters.sql:16`) — Beschluss: Start-`idia` ist 0, kein Startbetrag |
+| `hp` | DB-Default | 100 (`001_characters.sql:17`, `INT NOT NULL DEFAULT 100`) |
+| `mana` | DB-Default | 50 (`001_characters.sql:18`, `INT NOT NULL DEFAULT 50`) |
+| `mana_max` | DB-Default | 50 (`010_combat_v3.sql:21`, `INT NOT NULL DEFAULT 50`) |
+| `zone_id` | DB-Default | 0 (`001_characters.sql:23`, `INT NOT NULL DEFAULT 0`) |
+| `pos_x` | DB-Default | 0 (`001_characters.sql:24`, `FLOAT NOT NULL DEFAULT 0`) |
+| `pos_y` | DB-Default | 0 (`001_characters.sql:25`, `FLOAT NOT NULL DEFAULT 0`) |
+| `guild_id` | DB-Default | NULL (`001_characters.sql:26`, `INT NULL` — NULL zugelassen, keine DEFAULT-Klausel; impliziter Standard NULL) |
+| `created_at` | DB-Default | CURRENT_TIMESTAMP (`001_characters.sql:27`, `TIMESTAMP DEFAULT CURRENT_TIMESTAMP`) |
+| `combat_armor` | DB-Default | 0 (`008_combat_v1.sql:7`, `INT NOT NULL DEFAULT 0`) |
+| `faction_transition` | DB-Default | 0 (`012_class_progression.sql:15`, `TINYINT(1) NOT NULL DEFAULT 0`) |
+| `free_attr_points` | DB-Default | 0 (`018_progression.sql:22`, `INT NOT NULL DEFAULT 0`) |
+| `rested_pool` | DB-Default | 0 (`018_progression.sql:24`, `INT NOT NULL DEFAULT 0`) |
+| `logout_at` | DB-Default | NULL (`018_progression.sql:26`, `BIGINT NULL` — NULL zugelassen, keine DEFAULT-Klausel; impliziter Standard NULL) |
+| `persist_revision` | DB-Default | 0 (`019_idia.sql:19`, `BIGINT NOT NULL DEFAULT 0`) |
 
 #### Startdatenstruktur
 
-Die Anlage schreibt genau **eine** Zeile — in `characters` (mit dem
-Attribut-Update derselben Zeile, Regel 8b). Die zugehörigen Tabellen
-erhalten bei der Anlage keine Startzeilen; für sie ist das Fehlen der
-Zeile das definierte Startbild:
+Die Anlage schreibt die `characters`-Zeile (mit dem Attribut-Update
+derselben Zeile, Regel 8b) und nach Beschluss 5a genau **eine**
+`skills`-Zeile mit Stufe 1. Die übrigen zugehörigen Tabellen erhalten
+bei der Anlage keine Startzeilen; für sie ist das Fehlen der Zeile das
+definierte Startbild:
 
-| Tabelle (Migration) | Zeile bei der Anlage | Bedeutung des Fehlens |
+| Tabelle (Migration) | Zeile bei der Anlage | Bedeutung |
 |---|---|---|
 | `inventory` (002) | keine | leeres Inventar; der Persistenzpfad schreibt Vollbestände später selbst |
 | `character_abilities` (010) | keine | **3c — OFFEN**, siehe unten |
 | `quests` (004) | keine | keine Quests; der Quest-Lader liefert die leere Liste |
-| `skills` (003) | keine | kein Eintrag = Startstufe 1 (`db::load_weapon_skill`) |
+| `skills` (003) | **eine, Stufe 1** | Beschluss 5a: der Wert gehört zum Charakter und darf nicht von einem später geänderten Lader-Default abhängen; die Lesetoleranz „kein Eintrag = 1" (`db::load_weapon_skill`) bleibt als Toleranz bestehen, trägt aber den Startwert nicht mehr |
 | `character_cooldowns` (020) | keine | keine Cooldowns; der Lader liefert die leere Liste |
+
+Die `skills`-Startzeile betrifft genau den Skill, den der Kampf liest:
+`skill_id` ist der Wert von `CombatCfg.weapon_skill_id`
+(`config.rs`, Umgebungsschlüssel `COMBAT_WEAPON_SKILL_ID`, Default
+`schwerter`); `lvl` ist 1 (`003_skills.sql:6` führt `lvl INT NOT NULL
+DEFAULT 1`, die Anlage schreibt den Wert jedoch ausdrücklich, statt
+ihn vom Default zu erwarten).
 
 **3c — Startfähigkeiten: OFFEN.** Der Realm lädt beim Start alle Zeilen
 der Tabelle `ability_definitions` (`db::load_ability_definitions`,
@@ -287,21 +298,26 @@ festgelegt und **nicht** erfunden.
 
 #### Regel 8b — Spaltenzuständigkeit je Statement
 
-Die Anlege-Transaktion enthält genau zwei Statements, die `characters`
-schreiben, und sonst nichts außer dem Abschluss:
+Die Anlege-Transaktion enthält neben dem Abschluss genau drei
+Statements: zwei schreiben `characters`, eines schreibt `skills`
+(Beschluss 5a):
 
 | Statement | Zuständigkeit (einzige) |
 |---|---|
 | `INSERT INTO characters (account_id, name, race, char_class)` | diese vier Spalten; `id` entsteht durch AUTO_INCREMENT |
 | `UPDATE characters SET strength, agility, intelligence, constitution, wisdom, luck, endurance` (`db::write_attributes`) | die sieben Grundattribute |
+| `INSERT` genau einer `skills`-Zeile mit `lvl` 1 (Beschluss 5a; `skill_id`: Abschnitt „Startdatenstruktur") | ausschließlich diese eine Startstufen-Zeile |
 | `COMMIT` (bei Erfolg) / Widerruf ohne Commit (jeder Fehlerpfad) | schreibt keine Spalte |
 
 Jede Spalte hat genau eine Zuständigkeit; keine andere Stelle schreibt
-bei der Anlage an `characters`. Die 17 nicht geschriebenen Spalten
-behalten ihren DB-Default, `id` trägt die vergebene positive
-Datenbank-ID. Der Konfliktfall erreicht das
-Attribut-Update nicht: die Indexentscheidung (1062, (a)) liegt vor
-ihm.
+bei der Anlage an `characters`, kein weiteres Statement schreibt an
+`skills`. Die 17 nicht geschriebenen `characters`-Spalten behalten
+ihren DB-Default, `id` trägt die vergebene positive Datenbank-ID. Der
+Konfliktfall erreicht das Attribut-Update und die `skills`-Zeile nicht:
+die Indexentscheidung (1062, (a)) liegt vor ihnen. Wie die beiden
+`characters`-Statements gehört die `skills`-Zeile zur Transaktion:
+jeder Fehlerpfad verwirft sie zusammen mit dem Charakterdatensatz
+(VERBINDLICH-Liste, Eintrag 6).
 
 ---
 
