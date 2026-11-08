@@ -360,6 +360,143 @@ pub async fn list_characters(
         .collect())
 }
 
+/// Fehlerklassen der Charakteranlage (`POST /characters`, Stufe 1 ohne
+/// Gegenstände). Regelstelle ist
+/// `docs/Charaktererstellung_und_Charakterdarstellung.md`, Abschnitt
+/// „Festlegungen zur Charakteranlage (Entscheidungen a–j)".
+pub(crate) enum CreateCharacterError {
+    /// Name bereits vergeben — entweder Vorprüfung oder Indexkonflikt auf
+    /// `idx_char_name`; beide werden fachlich identisch beantwortet. Die
+    /// Transaktion wurde ohne Commit verworfen: kein halb angelegter
+    /// Charakter, keine Rückstände.
+    NameTaken,
+    /// Realm-Datenbank nicht erreichbar oder Anlage fehlgeschlagen; es
+    /// wurde nichts geschrieben.
+    Unavailable,
+}
+
+/// ER_DUP_ENTRY (1062): der UNIQUE-Index `idx_char_name` hat entschieden —
+/// ein zweiter gleichzeitiger Wunsch desselben Namens. Antwort wie die
+/// Vorprüfung (`name taken`), nie als 500.
+fn is_duplicate_key(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .and_then(|d| d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
+        .is_some_and(|m| m.number() == 1062)
+}
+
+/// Legt genau einen Charakter in EINER Transaktion an (Regelstelle
+/// Entscheidungen a und b): der Name wird VOR der Transaktion gegen
+/// dieselbe Realm-Datenbank geprüft; der UNIQUE-Index `idx_char_name`
+/// (Migration 001) bleibt die letzte Durchsetzung. INSERT mit positiver
+/// Auto-Increment-ID, kanonischem Rassenwert und Startklasse `Adventurer`;
+/// die sieben Startwerte schreibt die bestehende Attributschreibfunktion
+/// `write_attributes` (`race_definitions.dexterity` → `characters.agility`,
+/// die Zuordnung besitzt bereits der Lesepfad). Keine Gegenstände, keine
+/// Abilities, keine Questzustände (Stufe 1). Kein World-Zugriff: die
+/// Aufruferin hält beim Aufruf keine World-Sperre — es gibt keine DB-I/O
+/// unter World-Sperre. Jeder Fehlerpfad verwirft die Transaktion
+/// uncommittet: kein halb angelegter Charakter.
+pub(crate) async fn create_character(
+    pool: &Pool<MySql>,
+    account_id: u32,
+    name: &str,
+    race: &str,
+    attrs: &crate::attributes::Attributes,
+) -> Result<u64, CreateCharacterError> {
+    use CreateCharacterError::*;
+    // Vorprüfung AUSSERHALB der Transaktion gegen dieselbe Realm-Datenbank.
+    // Die Groß-/Kleinschreibung Gleichgültigkeit trägt die Kollation der
+    // Spalte (Abschnitt „Voraussetzung der Kollation"), nicht dieser Pfad.
+    let existing: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM characters WHERE name = ? LIMIT 1")
+            .bind(name)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| {
+                log::error!(
+                    "{}",
+                    db_error_line(
+                        "create_character_precheck",
+                        &account_id.to_string(),
+                        db_error_class(&e)
+                    )
+                );
+                Unavailable
+            })?;
+    if existing.is_some() {
+        return Err(NameTaken);
+    }
+    let mut tx = pool.begin().await.map_err(|e| {
+        log::error!(
+            "{}",
+            db_error_line(
+                "create_character_begin",
+                &account_id.to_string(),
+                db_error_class(&e)
+            )
+        );
+        Unavailable
+    })?;
+    let result = sqlx::query(
+        "INSERT INTO characters (account_id, name, race, char_class) VALUES (?, ?, ?, ?)",
+    )
+    .bind(i64::from(account_id))
+    .bind(name)
+    .bind(race)
+    .bind(crate::class::ClassStatus::Adventurer.canonical_db_name())
+    .execute(&mut *tx)
+    .await;
+    // Indexkonflikt wird vor jeder weiteren Zeile der Transaktion behandelt:
+    // return verwirft tx ohne Commit — keine Rückstände, kein 500-Fehler.
+    let id = match result {
+        Ok(r) => r.last_insert_id(),
+        Err(e) => {
+            if is_duplicate_key(&e) {
+                return Err(NameTaken);
+            }
+            log::error!(
+                "{}",
+                db_error_line(
+                    "create_character_insert",
+                    &account_id.to_string(),
+                    db_error_class(&e)
+                )
+            );
+            return Err(Unavailable);
+        }
+    };
+    if id == 0 {
+        // Positive DB-ID ist Voraussetzung; ohne sie wird nicht committet.
+        return Err(Unavailable);
+    }
+    if let Err(e) = write_attributes(&mut tx, &id.to_string(), attrs).await {
+        // write_attributes verschluckt den Treibertext in sein String-Fehler-
+        // bild; loggbarmachbar ist nur die stabile Klasse (B3-Vertrag).
+        let _ = e;
+        log::error!(
+            "{}",
+            db_error_line(
+                "create_character_attributes",
+                &id.to_string(),
+                DbErrorClass::Other
+            )
+        );
+        return Err(Unavailable);
+    }
+    tx.commit().await.map_err(|e| {
+        log::error!(
+            "{}",
+            db_error_line(
+                "create_character_commit",
+                &id.to_string(),
+                db_error_class(&e)
+            )
+        );
+        Unavailable
+    })?;
+    Ok(id)
+}
+
 /// Level des Waffen-/Kampfskills (docs/Kampfsystem.md §4). Grundsätzlich
 /// verfügbare Skills starten bei 1; kein Eintrag = 1.
 pub async fn load_weapon_skill(pool: &Pool<MySql>, char_id: &str, skill_id: &str) -> u32 {
@@ -2938,6 +3075,96 @@ mod race_seed_tests {
         let mut selectable = defaults();
         selectable.push("luzilla".to_string());
         assert!(race_start_attributes_from_rows(shipped_seed_rows(), &selectable).is_ok());
+    }
+
+    // ── Charakteranlage POST /characters (C-1, Stufe 1 ohne Gegenstände) ──
+
+    #[test]
+    fn duplicate_key_detection_holds_for_every_non_database_error() {
+        // Nur ein Database-Fehler mit Treibernummer 1062 darf `name taken`
+        // werden; jeder andere Fehler bleibt `database unavailable` (nie 500,
+        // nie ein vorgetäuschter Namenskonflikt).
+        for e in [
+            sqlx::Error::RowNotFound,
+            sqlx::Error::Io(std::io::Error::other("test")),
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Protocol("test".into()),
+            sqlx::Error::Configuration("test".into()),
+            sqlx::Error::Decode("test".into()),
+        ] {
+            assert!(!is_duplicate_key(&e), "{e:?} darf kein Namenskonflikt sein");
+        }
+    }
+
+    #[test]
+    fn create_character_conflict_precedes_any_further_statement_and_commit() {
+        // Strukturbeleg (analog dem Reihenfolgebeleg-Muster in handlers.rs):
+        // Im Anlegepfad muss die Konfliktbehandlung (Err-Zweig mit
+        // `return Err(NameTaken)`) VOR write_attributes und VOR tx.commit()
+        // abgeschlossen sein — ein Indexkonflikt verwirft die Transaktion
+        // ohne weitere Aussage und ohne Commit: keine Teilmutation, kein
+        // halb angelegter Charakter.
+        let src = include_str!("db.rs");
+        let start = src
+            .find("pub(crate) async fn create_character(")
+            .expect("Anlegefunktion vorhanden");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktationsende");
+        let body = &src[start..end];
+        let conflict = body
+            .find("return Err(NameTaken)")
+            .expect("Konflikt-Zweig mit vorzeitigem Return");
+        let attrs_write = body
+            .find("write_attributes(&mut tx")
+            .expect("bestehender Attributschreibpfad in derselben Transaktion");
+        let commit = body
+            .find("tx.commit()")
+            .expect("Commit am Ende des Erfolgs Pfads");
+        assert!(
+            conflict < attrs_write && attrs_write < commit,
+            "Reihenfolge: Konflikt-Rückgabe vor Attributschreiben vor Commit"
+        );
+        // Die INSERT-Aussage führt die Startklasse kanonisch und nennt keine
+        // Gegenstände/Abilities/Quests (Stufe 1).
+        let insert = body
+            .find("INSERT INTO characters")
+            .expect("INSERT in characters");
+        assert!(body[insert..insert + 400].contains("char_class"));
+        assert!(
+            !body.contains("item") && !body.contains("quest"),
+            "Stufe 1 schreibt nur die characters-Zeile und die Attribute"
+        );
+    }
+
+    #[test]
+    fn write_attributes_maps_dexterity_to_the_agility_column() {
+        // Regelstelle Entscheidungen (b): der aus `race_definitions.dexterity`
+        // abgeleitete Wert geht beim Anlegen in `characters.agility`; die
+        // bestehende Attributschreibfunktion besitzt genau dieses Mapping.
+        let src = include_str!("db.rs");
+        let start = src
+            .find("pub(crate) async fn write_attributes(")
+            .expect("bestehender Attributschreibpfad");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktionsende");
+        let body = &src[start..end];
+        let agility = body.find("agility = ?").expect("Agility-Spalte im UPDATE");
+        let second_placeholder = body
+            .find("strength = ?, ")
+            .map(|i| i + "strength = ?, ".len());
+        assert_eq!(
+            second_placeholder,
+            Some(agility),
+            "agility ist das zweite Platzhalter-Ziel, direkt nach strength"
+        );
+        let bind = body
+            .find(".bind(attrs.dexterity)")
+            .expect("dexterity wird gebunden");
+        assert!(agility < bind, "Platzhalter folgt vor dem zugehörigen Bind");
     }
 }
 

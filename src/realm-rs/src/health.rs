@@ -60,6 +60,165 @@ async fn characters_for(
     }
 }
 
+// ── Charakteranlage: POST /characters (C-1, Stufe 1 ohne Gegenstände) ─────
+// Regelstelle: docs/Charaktererstellung_und_Charakterdarstellung.md,
+// Abschnitt „Festlegungen zur Charakteranlage (Entscheidungen a–j)".
+// Session-/Realm-/Auth-Ablehnungen sind wörtlich dieselben Fälle wie bei der
+// GET-Route (characters_for); die übrigen Gründe folgen der dortigen
+// Tabelle. Der Endpunkt teilt sich den Port mit GET /characters; welcher
+// Betreiber ihn wie erreichbar macht (HEALTH_BIND_HOST), entscheidet das
+// Deployment, nicht dieser Pfad.
+
+/// Reservierte Funktionsbezeichnungen (Groß-/Kleinschreibung gleichgültig);
+/// Abschnitt „Vorname" derselben Regelstelle.
+const RESERVED_FIRST_NAMES: [&str; 3] = ["gm", "admin", "support"];
+
+/// Prüft den Vornamen und liefert die zu speichernde, getrimmte Form:
+/// 3–10 Zeichen, Buchstaben inklusive deutscher Umlaute sowie Bindestrich;
+/// keine Ziffern, keine sonstigen Sonderzeichen; leer nach Trim abgelehnt;
+/// reservierte Bezeichnungen abgelehnt. Die Groß-/Kleinschreibung bleibt
+/// erhalten — die Namenseindeutigkeit trägt die Kollation (Abschnitt
+/// „Voraussetzung der Kollation"), nicht dieser Validator.
+fn validate_first_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let count = trimmed.chars().count();
+    if count < 3 || count > 10 {
+        return None;
+    }
+    if !trimmed.chars().all(|c| {
+        c.is_ascii_alphabetic() || matches!(c, 'ä' | 'ö' | 'ü' | 'Ä' | 'Ö' | 'Ü' | 'ß' | '-')
+    }) {
+        return None;
+    }
+    if RESERVED_FIRST_NAMES.contains(&trimmed.to_lowercase().as_str()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Rasse wählbar? Nur der exakte kanonische, kleingeschriebene Wert aus
+/// `SELECTABLE_RACES`; Groß-/Kleinschreibvarianten sind keine kanonischen
+/// Werte und damit nicht wählbar (Abschnitt „Spielbare Rassen bei der
+/// Erstellung").
+fn race_is_selectable(race: &str, selectable: &[String]) -> bool {
+    selectable.iter().any(|r| r == race)
+}
+
+/// Die sieben Startwerte aus der beim Realm-Start geladenen RAM-Kopie —
+/// keine DB-Lesung der Matrix während der Anlage. `dexterity` (Spalte
+/// `race_definitions.dexterity`) liegt als `Attributes.dexterity` vor;
+/// `db::write_attributes` schreibt genau das in `characters.agility`.
+fn start_attributes_from(
+    matrix: &[crate::world::RaceStartAttributes],
+    race: &str,
+) -> Option<crate::attributes::Attributes> {
+    matrix
+        .iter()
+        .find(|row| row.race == race)
+        .map(|row| crate::attributes::Attributes {
+            strength: row.strength,
+            constitution: row.constitution,
+            dexterity: row.dexterity,
+            intelligence: row.intelligence,
+            wisdom: row.wisdom,
+            luck: row.luck,
+            endurance: row.endurance,
+        })
+}
+
+/// Fachliche Antwort auf den Anlagen-Ausgang: Erfolg 201 mit
+/// `character_id` (kanonische positive DB-ID als String, analog der
+/// GET-Liste) und Name; Indexkonflikt/Vorprüfungstreffer identisch als
+/// 409 `name taken` (nie 500); DB-Ausfall 503 `database unavailable`.
+fn create_db_response(
+    result: Result<u64, crate::db::CreateCharacterError>,
+    name: &str,
+) -> (u16, serde_json::Value) {
+    match result {
+        Ok(id) => (
+            201,
+            serde_json::json!({"character_id": id.to_string(), "name": name}),
+        ),
+        Err(crate::db::CreateCharacterError::NameTaken) => {
+            (409, serde_json::json!({"error": "name taken"}))
+        }
+        Err(crate::db::CreateCharacterError::Unavailable) => {
+            (503, serde_json::json!({"error": "database unavailable"}))
+        }
+    }
+}
+
+async fn create_character_for(
+    target: &str,
+    realm_id: u32,
+    cfg: &Config,
+    context: Option<&CharacterListContext>,
+    shared: &Shared,
+    body: &[u8],
+) -> (u16, serde_json::Value) {
+    let error = |status, reason| (status, serde_json::json!({"error": reason}));
+    // Vor jeder Schreiboperation: gültige Session dieses Realms. Die
+    // Prüfung ist wörtlich die der GET-Route — account_id ausschließlich
+    // aus der Sessionprüfung, eine clientgelieferte account_id oder
+    // character_id erreicht diese Stelle gar nicht erst und hat keine
+    // Wirkung.
+    let Ok(url) = reqwest::Url::parse(&format!("http://realm{target}")) else {
+        return error(400, "invalid request");
+    };
+    let params: Vec<_> = url.query_pairs().collect();
+    let sessions: Vec<_> = params.iter().filter(|(k, _)| k == "session_id").collect();
+    let realms: Vec<_> = params.iter().filter(|(k, _)| k == "realm_id").collect();
+    if realms.len() != 1 || realms[0].1.parse::<u32>().ok() != Some(realm_id) {
+        return error(400, "wrong realm");
+    }
+    if sessions.len() != 1 || sessions[0].1.is_empty() {
+        return error(401, "invalid session");
+    }
+    let Some(context) = context.filter(|c| c.auth.enabled()) else {
+        return error(503, "auth unavailable");
+    };
+    let session = match context.auth.validate_session(&sessions[0].1).await {
+        Ok(session) => session,
+        Err(_) => return error(503, "auth unavailable"),
+    };
+    let Some(account_id) = session.account_id.filter(|id| session.valid && *id > 0) else {
+        return error(401, "invalid session");
+    };
+    // Body {"name", "race"}; unbekannte Zusatzfelder (auch account_id,
+    // character_id) werden verworfen, nie gelesen.
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return error(400, "invalid request");
+    };
+    let name_raw = value.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(name) = validate_first_name(name_raw) else {
+        return error(400, "invalid name");
+    };
+    let race = value.get("race").and_then(|v| v.as_str()).unwrap_or("");
+    if !race_is_selectable(race, &cfg.races.selectable) {
+        return error(400, "race not selectable");
+    }
+    // Startwerte aus der RAM-Kopie des Starts. Die World-Sperre wird
+    // innerhalb dieses Blocks erworben und VOR jedem DB-Zugriff wieder
+    // freigegeben: keine DB-I/O unter World-Sperre.
+    let attrs = {
+        let world = shared.lock().await;
+        let attrs = start_attributes_from(&world.race_start_attributes, race);
+        drop(world);
+        attrs
+    };
+    // Der fail-closed-Loader garantiert je wählbarer Rasse genau eine
+    // Zeile; fehlt sie trotz alledem, sind die Startdaten nicht
+    // verfügbar — es wurde nichts geschrieben.
+    let Some(attrs) = attrs else {
+        return error(503, "database unavailable");
+    };
+    let result = crate::db::create_character(&context.pool, account_id, &name, race, &attrs).await;
+    create_db_response(result, &name)
+}
+
 /// Die beiden **rein lesend** erhobenen Beobachtungswerte der `/status`
 ///-Antwort (`P-30` Quarantäne, `P-23` Persistenzstatus). Sie werden im
 /// Handler ausschließlich gelesen und hier nur weitergereicht.
@@ -544,6 +703,24 @@ async fn accept_loop(
                 return;
             }
 
+            // Charakteranlage (POST /characters, Stufe 1 ohne Gegenstände):
+            // direkt neben GET /characters auf demselben Port. Validierung,
+            // Sessionprüfung und Transaktion laufen in create_character_for;
+            // ohne characters-Kontext (Auth/Pool) antwortet der Pfad 503.
+            if method == "POST" && path.split('?').next() == Some("/characters") {
+                let (status, body_val) = create_character_for(
+                    path,
+                    cfg.realm_id,
+                    &cfg,
+                    characters.as_ref(),
+                    &shared,
+                    body,
+                )
+                .await;
+                let _ = sock.write_all(response(status, &body_val).as_bytes()).await;
+                return;
+            }
+
             if method != "GET" {
                 let _ = sock
                     .write_all(
@@ -757,6 +934,344 @@ mod tests {
         assert_eq!(code, 401);
         assert_eq!(body, serde_json::json!({"error": "invalid session"}));
         fake_auth.await.unwrap();
+    }
+
+    // ── Charakteranlage POST /characters (C-1, Stufe 1 ohne Gegenstände) ──
+
+    /// Einmaliger Fake-Auth-Dienst wie im GET-Test; antwortet `times` Mal
+    /// mit derselben Session-JSON. Der Pool bleibt lazy und unerreichbar:
+    /// jede erreichte DB-I/O würde fehlschlagen, nie succeed.
+    async fn fake_auth_context(
+        session_response: &'static str,
+        times: usize,
+    ) -> (CharacterListContext, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for _ in 0..times {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).await.unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{session_response}",
+                            session_response.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        let context = CharacterListContext {
+            auth: crate::auth_api::AuthApi::new(&crate::config::AuthApiConfig {
+                url: format!("http://{addr}"),
+                service_id: "test".into(),
+                secret: "test".into(),
+            })
+            .unwrap(),
+            pool: sqlx::mysql::MySqlPoolOptions::new()
+                .connect_lazy("mysql://test:test@127.0.0.1:1/test")
+                .unwrap(),
+        };
+        (context, task)
+    }
+
+    fn race_row(race: &str, base: i32) -> crate::world::RaceStartAttributes {
+        crate::world::RaceStartAttributes {
+            race: race.to_string(),
+            strength: base,
+            dexterity: base + 1,
+            intelligence: base + 2,
+            constitution: base + 3,
+            wisdom: base + 4,
+            luck: base + 5,
+            endurance: base + 6,
+        }
+    }
+
+    fn shared_with_matrix() -> Shared {
+        let mut world = crate::world::World::new();
+        world.race_start_attributes = vec![
+            race_row("mensch", 2),
+            race_row("elf", 1),
+            race_row("andorer", 3),
+        ];
+        std::sync::Arc::new(tokio::sync::Mutex::new(world))
+    }
+
+    #[tokio::test]
+    async fn create_character_rejects_wrong_realm_and_bad_session_params() {
+        let shared = shared_with_matrix();
+        let body = br#"{"name":"Alda","race":"mensch"}"#;
+        let (code, v) = create_character_for(
+            "/characters?realm_id=2&session_id=x",
+            1,
+            &test_config(),
+            None,
+            &shared,
+            body,
+        )
+        .await;
+        assert_eq!(
+            (code, v),
+            (400, serde_json::json!({"error": "wrong realm"}))
+        );
+        for target in [
+            "/characters?realm_id=1",
+            "/characters?realm_id=1&session_id=",
+            "/characters?realm_id=1&session_id=x&session_id=y",
+        ] {
+            let (code, v) =
+                create_character_for(target, 1, &test_config(), None, &shared, body).await;
+            assert_eq!(
+                (code, v),
+                (401, serde_json::json!({"error": "invalid session"})),
+                "{target}"
+            );
+        }
+        // Clientgelieferte account_id bleibt ohne Wirkung; ohne aktivierte
+        // Auth ist die Prüfung nicht durchführbar (wie GET: 503).
+        assert_eq!(
+            create_character_for(
+                "/characters?realm_id=1&session_id=x&account_id=7",
+                1,
+                &test_config(),
+                None,
+                &shared,
+                body,
+            )
+            .await
+            .0,
+            503
+        );
+    }
+
+    #[tokio::test]
+    async fn create_character_rejects_invalid_session_before_any_write() {
+        let (context, fake_auth) = fake_auth_context(r#"{"valid":false,"account_id":7}"#, 1).await;
+        let shared = shared_with_matrix();
+        let (code, v) = create_character_for(
+            "/characters?realm_id=1&session_id=invalid&account_id=7",
+            1,
+            &test_config(),
+            Some(&context),
+            &shared,
+            br#"{"name":"Alda","race":"mensch"}"#,
+        )
+        .await;
+        // Ungültige Sitzung: 401, bevor irgendein Schreibpfad berührt wird —
+        // der unerreichbare Pool würde andernals als 503 antworten.
+        assert_eq!(
+            (code, v),
+            (401, serde_json::json!({"error": "invalid session"}))
+        );
+        fake_auth.await.unwrap();
+    }
+
+    #[test]
+    fn first_name_rules_hold_before_any_write() {
+        // Grenze 3 und 10 Zeichen (Unicode-Zähler, keine Bytes)
+        assert_eq!(validate_first_name("Ala").as_deref(), Some("Ala"));
+        assert_eq!(
+            validate_first_name("Albertinus").as_deref(),
+            Some("Albertinus")
+        );
+        assert_eq!(validate_first_name("Al"), None);
+        assert_eq!(validate_first_name("AlbertinusX"), None);
+        // Trim; leer nach Trim abgelehnt
+        assert_eq!(validate_first_name("  Alda  ").as_deref(), Some("Alda"));
+        assert_eq!(validate_first_name("   "), None);
+        assert_eq!(validate_first_name(""), None);
+        // Buchstaben inklusive deutscher Umlaute sowie Bindestrich
+        assert_eq!(
+            validate_first_name("Jörg-Alda").as_deref(),
+            Some("Jörg-Alda")
+        );
+        assert_eq!(validate_first_name("Grüße").as_deref(), Some("Grüße"));
+        // Ziffern, innere Leerzeichen, sonstige Sonderzeichen abgelehnt
+        assert_eq!(validate_first_name("Alraune9"), None);
+        assert_eq!(validate_first_name("Al da"), None);
+        assert_eq!(validate_first_name("Alda_"), None);
+        assert_eq!(validate_first_name("Alda!"), None);
+        // Reservierte Funktionsbezeichnungen, Groß-/Kleinschreibung gleichgültig
+        for reserved in [
+            "gm", "GM", "Gm", "admin", "Admin", "ADMIN", "support", "Support",
+        ] {
+            assert_eq!(
+                validate_first_name(reserved),
+                None,
+                "{reserved} ist reserviert"
+            );
+        }
+        // Normale Groß-/Kleinschreibung bleibt erhalten — die Eindeutigkeit
+        // trägt die Kollation, nicht der Validator.
+        assert_eq!(validate_first_name("Alda").as_deref(), Some("Alda"));
+        assert_eq!(validate_first_name("alda").as_deref(), Some("alda"));
+    }
+
+    #[test]
+    fn only_canonical_selectable_races_pass() {
+        let selectable: Vec<String> = crate::config::DEFAULT_SELECTABLE_RACES
+            .iter()
+            .map(|r| r.to_string())
+            .collect();
+        for r in ["mensch", "elf", "andorer"] {
+            assert!(race_is_selectable(r, &selectable), "{r} ist wählbar");
+        }
+        // Deaktivierte Expansion-Rassen und Nicht-Kanonisches (auch
+        // Groß-/Kleinschreibvarianten) sind nicht wählbar.
+        for r in [
+            "luzilla",
+            "mandalonier",
+            "Mensch",
+            "MENSCH",
+            "mensch ",
+            "",
+            "zwerg",
+        ] {
+            assert!(
+                !race_is_selectable(r, &selectable),
+                "{r:?} ist nicht wählbar"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_character_rejects_deactivated_race_and_bad_name_after_session() {
+        let (context, fake_auth) = fake_auth_context(r#"{"valid":true,"account_id":7}"#, 4).await;
+        let shared = shared_with_matrix();
+        for (body, reason) in [
+            (r#"{"name":"Alda","race":"luzilla"}"#, "race not selectable"),
+            (r#"{"name":"Alda","race":"Mensch"}"#, "race not selectable"),
+            (r#"{"name":"Admin","race":"mensch"}"#, "invalid name"),
+            (r#"{"name":"Alraune9","race":"mensch"}"#, "invalid name"),
+        ] {
+            let (code, v) = create_character_for(
+                "/characters?realm_id=1&session_id=s",
+                1,
+                &test_config(),
+                Some(&context),
+                &shared,
+                body.as_bytes(),
+            )
+            .await;
+            assert_eq!(
+                (code, v),
+                (400, serde_json::json!({"error": reason})),
+                "{body}"
+            );
+        }
+        fake_auth.await.unwrap();
+    }
+
+    #[test]
+    fn start_attributes_are_mapped_per_race_from_the_ram_copy() {
+        let matrix = vec![
+            race_row("mensch", 2),
+            race_row("elf", 1),
+            race_row("andorer", 3),
+        ];
+        // Je wählbarer Rasse die eigene Zeile; dexterity (race_definitions)
+        // bleibt Attributes.dexterity und gelangt über db::write_attributes
+        // in characters.agility.
+        let a = start_attributes_from(&matrix, "elf").expect("Zeile je wählbarer Rasse");
+        assert_eq!(
+            a,
+            crate::attributes::Attributes {
+                strength: 1,
+                constitution: 4,
+                dexterity: 2,
+                intelligence: 3,
+                wisdom: 5,
+                luck: 6,
+                endurance: 7,
+            }
+        );
+        assert_eq!(
+            start_attributes_from(&matrix, "mensch").map(|x| x.strength),
+            Some(2)
+        );
+        assert_eq!(
+            start_attributes_from(&matrix, "andorer").map(|x| x.strength),
+            Some(3)
+        );
+        assert!(start_attributes_from(&matrix, "luzilla").is_none());
+    }
+
+    #[test]
+    fn create_outcomes_answer_exactly_per_the_decided_table() {
+        // Erfolg 201 mit character_id (kanonische ID als String, analog der
+        // GET-Liste) und Name; Vorprüfungstreffer und Indexkonflikt werden
+        // von db::create_character beide als NameTaken gemeldet und sind hier
+        // fachlich identisch: 409 name taken — nie 500.
+        assert_eq!(
+            create_db_response(Ok(42), "Alda"),
+            (
+                201,
+                serde_json::json!({"character_id": "42", "name": "Alda"})
+            )
+        );
+        assert_eq!(
+            create_db_response(Err(crate::db::CreateCharacterError::NameTaken), "Alda"),
+            (409, serde_json::json!({"error": "name taken"}))
+        );
+        assert_eq!(
+            create_db_response(Err(crate::db::CreateCharacterError::Unavailable), "Alda"),
+            (503, serde_json::json!({"error": "database unavailable"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn create_character_database_failure_answers_service_unavailable() {
+        let (context, fake_auth) = fake_auth_context(r#"{"valid":true,"account_id":7}"#, 1).await;
+        let shared = shared_with_matrix();
+        // Unerreichbarer Pool: die Vorprüfung schlägt fehl, bevor eine
+        // Transaktion beginnt — nichts geschrieben, stabil 503.
+        let (code, v) = create_character_for(
+            "/characters?realm_id=1&session_id=s",
+            1,
+            &test_config(),
+            Some(&context),
+            &shared,
+            br#"{"name":"Alda","race":"mensch"}"#,
+        )
+        .await;
+        assert_eq!(
+            (code, v),
+            (503, serde_json::json!({"error": "database unavailable"}))
+        );
+        fake_auth.await.unwrap();
+    }
+
+    #[test]
+    fn create_character_releases_world_lock_before_database_access() {
+        // Strukturbeleg (Reihenfolgebeleg-Muster): Im Anlagehandler muss die
+        // World-Sperre gelöst sein, BEVOR der DB-Anlagepfad aufgerufen wird —
+        // keine DB-I/O unter World-Sperre.
+        let src = include_str!("health.rs");
+        let start = src
+            .find("async fn create_character_for(")
+            .expect("Anlagehandler vorhanden");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktionsende");
+        let body = &src[start..end];
+        let lock = body
+            .find("shared.lock().await")
+            .expect("RAM-Lesung unter World-Sperre");
+        let release = body
+            .find("drop(world)")
+            .expect("Sperre wird vor der Anlage gelöst");
+        let db_call = body
+            .find("db::create_character(")
+            .expect("DB-Anlage nach der Sperre");
+        assert!(
+            lock < release && release < db_call,
+            "Reihenfolge: Sperre holen -> freigeben -> DB-Anlage"
+        );
     }
 
     fn observed(
