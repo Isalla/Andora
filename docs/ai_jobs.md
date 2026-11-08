@@ -117,10 +117,10 @@ Binary-Pfad, wird die Toolchain unter `.tmp/` verifiziert oder der Nutzer gefrag
 außerhalb des Projektroots.
 
 Regeln:
-- `/etc` und (dauerhafte Projektdateien in) `/tmp` werden für Coden und Kompilieren NICHT benutzt.
-- Kurzlebige Arbeits- und Zwischendaten dürfen in `/tmp/opencode` bzw. systemweites `/tmp`
-  (z. B. Buch-/EPUB-Extraktionen, temporäre Analysedaten, Session-Artefakte); dauerhafte
-  Projektdateien dort sind verboten (Details: `docs/Temporäre_Dateien.md`).
+- `/etc` und `/tmp` werden für Coden und Kompilieren NICHT benutzt.
+- Kurzlebige Arbeits- und Zwischendaten liegen ausschließlich unter `<Projektroot>/.tmp/`;
+  `/tmp`, `/var/tmp` und `/tmp/opencode` sind keine Schreibziele
+  (Details: `docs/Temporäre_Dateien.md`).
 - Temporäre Toolchains, Downloads und temporäre Artefakte ohne Bestand landen ausschließlich in `.tmp/`
   (relativ zum Projektroot, z. B. `.tmp/go` für eine neu geladene Toolchain).
 - Das Operating System des Projekts lässt sich über `.tmp/os-release` (relativ zum Projektroot)

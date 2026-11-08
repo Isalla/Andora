@@ -456,8 +456,9 @@ Bei einem Absturz während des Schreibens bleibt dadurch möglichst die vorherig
 Für sämtliche temporären Dateien gelten die allgemeinen Andora-Projektregeln
 (`docs/Temporäre_Dateien.md`).
 
-Kurzlebige Zwischendaten dürfen systemweites `/tmp`-bzw. `/tmp/opencode`
-nutzen; temporäre Dateien eines atomaren Schreibvorgangs in der Queue
+Kurzlebige Zwischendaten liegen im Projektbereich (`.tmp/` bzw.
+`COORDINATOR_DATA_DIR`); temporäre Dateien eines atomaren
+Schreibvorgangs in der Queue
 gehören jedoch dorthin, wo der atomare Vorgang stattfindet
 (`COORDINATOR_DATA_DIR/queue/jobs/.tmp-*`) — ein Umweg über ein fremdes
 Dateisystem würde die rename-/Persistenzgarantie brechen. Dauerhafte

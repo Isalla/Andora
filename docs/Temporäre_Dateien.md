@@ -22,9 +22,18 @@ bewusst anlegt. Wählt ein Werkzeug seinen Temp-Pfad selbst, ist `TMPDIR` auf
 `<Projektroot>/.tmp/tmp` zu setzen; schreibt es trotzdem außerhalb, ist das
 ein Befund und zu melden, kein stillschweigend hingenommener Zustand.
 
-Grund: Der Projektroot liegt auf einer HDD, das System und damit systemweites
-`/tmp` auf einer SD. Schreiblast auf der SD ist zu vermeiden, weil ihre
-Lebensdauer das Risiko trägt. Zweiter Grund: Projektgrenze.
+Grund: Das System liegt auf einer SD, der Projektroot auf einer HDD.
+Systemweite Verzeichnisse können auf der SD liegen (`/`, `/var/tmp`);
+Schreiblast auf der SD ist zu vermeiden, weil ihre Lebensdauer das Risiko
+trägt. `/tmp` ist auf diesem Host ein tmpfs und damit flüchtig: Nach einem
+Neustart existieren dort keine Artefakte mehr. Prüfnachweise, die über einen
+Auftrag hinaus belegt bleiben sollen, gehören deshalb in `.tmp/` auf der HDD.
+Zweiter Grund: Projektgrenze.
+
+Grund der `TMPDIR`-Vorgabe ist die Projektgrenze, nicht die SD-Schonung:
+`/tmp` ist ein tmpfs. Ein großer Build schreibt außerdem gegen die Größe
+dieses tmpfs; meldet ein Lauf „No space left on device", obwohl auf der
+HDD Platz ist, ist das die tmpfs-Grenze und kein Plattenproblem.
 
 Es gelten zwei Grenzen:
 
@@ -36,8 +45,8 @@ Es gelten zwei Grenzen:
   `COORDINATOR_DATA_DIR`). Ein Umweg über `/tmp` würde die atomic-rename-
   Garantie auf demselben Dateisystem brechen.
 
-Projekt-Toolchains (`.tmp/go`, `.tmp/rust`, Mod-/Build-Caches) sind
-ausdrücklich **kein** Fall für `/tmp`: sie liegen dauerhaft im Projekt.
+Projekt-Toolchains (`.tmp/go`, `.tmp/rust`, Mod-/Build-Caches) liegen
+dauerhaft im Projekt.
 
 Systemweite Installationen oder sonstige persistente Änderungen außerhalb
 des Projektroots bleiben weiterhin zustimmungspflichtig (siehe
@@ -53,8 +62,8 @@ Dies gilt insbesondere für:
 * temporäre Queue- und Recovery-Dateien (zwingend projektintern, siehe oben)
 
 → Diese liegen in `.tmp/` (bei Bedarf mit passenden Unterverzeichnissen)
-bzw. am Ort des jeweiligen atomaren Schreibvorgangs, **nie** als
-dauerhaftes Artefakt in `/tmp`.
+bzw. am Ort des jeweiligen atomaren Schreibvorgangs, niemals in
+systemweiten temporären Verzeichnissen.
 
 ## Projekt-Toolchains in `.tmp/`
 
@@ -71,6 +80,8 @@ Rust-Toolchain aktivieren (relativ zum Projektroot):
 
 ```sh
 source .tmp/rust/env.sh
+mkdir -p "$(pwd)/.tmp/tmp"
+export TMPDIR="$(pwd)/.tmp/tmp"
 ```
 
 Alternativ explizit (ohne Source-Datei):
@@ -79,12 +90,16 @@ Alternativ explizit (ohne Source-Datei):
 export RUSTUP_HOME="$(pwd)/.tmp/rustup"
 export CARGO_HOME="$(pwd)/.tmp/rust"
 export PATH="$(pwd)/.tmp/rust/bin:$PATH"
+mkdir -p "$(pwd)/.tmp/tmp"
+export TMPDIR="$(pwd)/.tmp/tmp"
 ```
 
 Bauen/Testen des Realm-Server (Rust) mit der Projekt-Toolchain:
 
 ```sh
 source .tmp/rust/env.sh
+mkdir -p "$(pwd)/.tmp/tmp"
+export TMPDIR="$(pwd)/.tmp/tmp"
 cargo build --manifest-path src/realm-rs/Cargo.toml
 cargo test  --manifest-path src/realm-rs/Cargo.toml
 ```
