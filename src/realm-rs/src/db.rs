@@ -378,10 +378,24 @@ pub(crate) enum CreateCharacterError {
 /// ER_DUP_ENTRY (1062): der UNIQUE-Index `idx_char_name` hat entschieden —
 /// ein zweiter gleichzeitiger Wunsch desselben Namens. Antwort wie die
 /// Vorprüfung (`name taken`), nie als 500.
+///
+/// Die Zahlenentscheidung selbst liegt in `number_is_duplicate_key` und ist
+/// dort direkt geprüft. Die Downcast-Kette (sqlx-Fehler →
+/// `MySqlDatabaseError`) bleibt Produktionszweig und ist weiterhin ohne
+/// Testabdeckung — nach T-1 ein dokumentierter Zustand statt einer
+/// unbemerkten Lücke, bis eine Live-DB-Prüfung möglich ist.
 fn is_duplicate_key(e: &sqlx::Error) -> bool {
     e.as_database_error()
         .and_then(|d| d.try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>())
-        .is_some_and(|m| m.number() == 1062)
+        .is_some_and(|m| number_is_duplicate_key(m.number()))
+}
+
+/// Reine Zahlenprüfung der Fehlerklassifizierung: genau die
+/// MySQL-Fehlernummer 1062 (ER_DUP_ENTRY) ist ein Namenskonflikt, jede
+/// andere Nummer nicht. Ohne sqlx-Fehlertypen prüfbar; die Delegation von
+/// `is_duplicate_key` hierher ist verhaltensneutral.
+fn number_is_duplicate_key(number: u16) -> bool {
+    number == 1062
 }
 
 /// Legt genau einen Charakter in EINER Transaktion an (Regelstelle
@@ -3093,6 +3107,22 @@ mod race_seed_tests {
             sqlx::Error::Decode("test".into()),
         ] {
             assert!(!is_duplicate_key(&e), "{e:?} darf kein Namenskonflikt sein");
+        }
+    }
+
+    #[test]
+    fn duplicate_key_number_check_is_exact_on_the_wire_numbers() {
+        // T-1: die Zahlenprüfung ist aus der Downcast-Kette herausgelöst und
+        // damit direkt prüfbar — 1062 (ER_DUP_ENTRY) ist der Namenskonflikt,
+        // die übrigen hier erprobten MySQL-Nummern sind es nicht. Der
+        // Produktionszweig (Downcast-Kette in `is_duplicate_key`) bleibt
+        // wie bisher unbelegt: dokumentierter Zustand bis zur Live-DB-Prüfung.
+        assert!(number_is_duplicate_key(1062), "1062 ist der Indexkonflikt");
+        for number in [1054u16, 1205, 1213, 1045, 2006] {
+            assert!(
+                !number_is_duplicate_key(number),
+                "{number} darf kein Namenskonflikt sein"
+            );
         }
     }
 
