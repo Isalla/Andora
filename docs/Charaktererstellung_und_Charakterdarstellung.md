@@ -112,8 +112,9 @@ die kanonischen Rassenwerte umgestellt. Die Erstellung schreibt
 ausschließlich kanonische Werte. Der Realm liest das Feld
 `race` tolerant: ein unbekannter oder abweichend geschriebener
 Wert wird protokolliert, verhindert aber **nicht** den Einstieg.
-Vorhandene Platzhaltercharaktere werden ersetzt, sobald die
-Charaktererstellung verfügbar ist.
+Vorhandene Platzhaltercharaktere werden nicht umgeschrieben und nicht
+per Migration angepasst; sie werden mit der Zeit durch neu angelegte
+Charaktere abgelöst.
 
 ### Appearance beim Erstellen
 
@@ -227,7 +228,7 @@ noch nicht implementiert.**
 
 ---
 
-## Festlegungen zur Charakteranlage (Entscheidungen a–e)
+## Festlegungen zur Charakteranlage (Entscheidungen a–j)
 
 Die folgenden Punkte sind als Regeln der Charakteranlage beschlossen.
 Dieser Abschnitt ist die maßgebliche Regelstelle; andere Dokumente
@@ -247,29 +248,47 @@ wiederholen die Regeln nicht.
   ist kleingeschrieben. Das ist wörtlich die Antwortform der
   bestehenden `GET /characters`-Route (`characters_for`,
   `src/realm-rs/src/health.rs`).
-- Die HTTP-Statuscodes für die überlappenden Fälle sind an dieser
-  GET-Route abgelesen und gelten unverändert für die Anlage:
+- Die folgende Tabelle führt alle Ablehnungsfälle der Anlage mit ihrer
+  Bedeutung, damit der Code später erklärbar ist. Die ersten drei
+  Zeilen sind wörtlich an der bestehenden `GET /characters`-Route
+  abgelesen und gelten unverändert; die übrigen Zeilen sind
+  beschlossen.
 
-| Ablehnungsfall | HTTP-Status | Grund im Feld `error` |
-|---|---|---|
-| fehlende, leere, mehrfach gelieferte oder ungültige Session; Session ohne gültige positive `account_id` | 401 | `invalid session` |
-| falscher Realm (`realm_id` fehlt, mehrfach, ungültig oder passt nicht zum Realm) | 400 | `wrong realm` |
-| Auth-Ausfall (Auth nicht verfügbar oder Prüfaufruf gescheitert) | 503 | `auth unavailable` |
-| DB-Ausfall | 503 | für die GET-Route als `characters unavailable` belegt; der stabile Grundtoken der Anlage ist im Umsetzungsschritt festzulegen |
+| Ablehnungsfall | HTTP-Status | Grund im Feld `error` | Bedeutung |
+|---|---|---|---|
+| fehlende, leere, mehrfach gelieferte oder ungültige Session; Session ohne gültige positive `account_id` | 401 | `invalid session` | nicht angemeldet oder Sitzung abgelaufen |
+| falscher Realm (`realm_id` fehlt, mehrfach, ungültig oder passt nicht zum Realm) | 400 | `wrong realm` | der Request gehört nicht zu diesem Realm |
+| Auth-Ausfall (Auth nicht verfügbar oder Prüfaufruf gescheitert) | 503 | `auth unavailable` | die Sitzung konnte nicht geprüft werden |
+| Realm-Datenbank nicht erreichbar | 503 | `database unavailable` | Anlage unmöglich, nichts geschrieben |
+| Name zu kurz oder zu lang, unzulässige Zeichen, leer nach Trim, reservierte Bezeichnung | 400 | `invalid name` | der Name entspricht nicht den Regeln des Abschnitts „Vorname" |
+| Rasse nicht wählbar laut `SELECTABLE_RACES` | 400 | `race not selectable` | die Rasse existiert, ist aber nicht freigeschaltet |
+| Name bereits vergeben (Vorprüfung oder Indexkonflikt) | 409 | `name taken` | der Name ist in diesem Realm schon vorhanden |
 
-- *Name nicht 3–10 Zeichen*, *Name bereits vergeben* und *Rasse
-  nicht wählbar* sind in der GET-Route nicht angelegt, weil diese
-  Route solche Prüfungen nicht kennt; von dort ist kein Code
-  ablesbar. Diese Antworten erfolgen im Format wie die bestehende
-  GET-Route (Feld `error`, stabiler Grund); der konkrete
-  HTTP-Statuscode ist offen und wird im Umsetzungsschritt
-  festgelegt — nicht erfunden.
-- Bei *Name bereits vergeben* verlässt sich die Anlage auf den
-  UNIQUE-Index `idx_char_name` (`src/realm-rs/migrations/001_characters.sql:30`):
-  es gibt kein Prüfen vor dem INSERT, der Index entscheidet.
-- Bei *Rasse nicht wählbar* entscheidet die realmseitige
-  Konfiguration `SELECTABLE_RACES` (Abschnitt „Speicherort der
-  Rassen- und Startattributdaten").
+- Die GET-Route kennt keinen Fall mit 409; dieser Code ist neu und
+  an dieser Stelle allein gültig.
+- Die Prüfung auf einen bereits vergebenen Namen erfolgt **vor** der
+  Transaktion gegen dieselbe Realm-Datenbank. Der UNIQUE-Index
+  `idx_char_name` (`src/realm-rs/migrations/001_characters.sql:30`)
+  bleibt die letzte Durchsetzung: bringt ein zweiter gleichzeitiger
+  Wunsch denselben Namen zuvor, wird der Indexkonflikt fachlich
+  identisch beantwortet — derselbe Grund (`name taken`), derselbe
+  Statuscode (409), kein 500-Fehler, kein halb angelegter Charakter.
+
+### Voraussetzung der Kollation (Namenseindeutigkeit)
+
+- Die Gleichgültigkeit der Groß-/Kleinschreibung im Namen wird nicht
+  vom Index erzeugt, sondern von der Kollation der Spalte `name`.
+  `001_characters.sql` deklariert keine Kollation; die Spalte erbt
+  sie vom Datenbank-Standard.
+- Voraussetzung ist eine Groß-/Kleinschreibung gleichgültige
+  Standardkollation der Realm-Datenbank; beide Entwicklungs-
+  Datenbanken führen `utf8mb4_german2_ci`. Es wird deshalb keine
+  neue Migration angelegt.
+- Restrisiko, ausdrücklich festgehalten und nicht beschönigt: auf
+  einer Datenbank mit `utf8mb4_bin` oder einer `_cs`-Kollation
+  würden „Alda" und „alda" sowohl die Vorprüfung als auch den Index
+  passieren — ohne Fehler und ohne Protokollierung. Eine dokumentierte
+  Voraussetzung prüft nichts.
 
 ### (b) Startattribute aus der RAM-Kopie; Schreibpfad
 
@@ -315,6 +334,17 @@ wiederholen die Regeln nicht.
   schreibt die kanonische Bezeichnung über
   `ClassStatus::canonical_db_name()` mit `db::write_character_class`
   zurück (`src/realm-rs/src/persist.rs`).
+
+### (j) Startausrüstung später
+
+- Ein fertig angelegter Charakter erhält später Startausrüstung.
+  Ihr Inhalt wird **nicht** festgelegt, solange keine ausrüstbaren
+  Item-Definitionen mit gesetzten Achsen `equip_subtype` und
+  `handling` vorliegen.
+- Bis dahin gilt Abschnitt (d): die Anlage schreibt keine Gegenstände.
+- Präzisierung des Grundes: Das heißt **nicht** „keine Items in der
+  Datenbank". Item-Definitionen sind vorhanden; es fehlt der
+  Achsen-Content für die ausrüstbaren Definitionen.
 
 ---
 
