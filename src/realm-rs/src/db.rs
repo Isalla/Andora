@@ -399,23 +399,31 @@ fn number_is_duplicate_key(number: u16) -> bool {
 }
 
 /// Legt genau einen Charakter in EINER Transaktion an (Regelstelle
-/// Entscheidungen a und b): der Name wird VOR der Transaktion gegen
-/// dieselbe Realm-Datenbank geprüft; der UNIQUE-Index `idx_char_name`
-/// (Migration 001) bleibt die letzte Durchsetzung. INSERT mit positiver
-/// Auto-Increment-ID, kanonischem Rassenwert und Startklasse `Adventurer`;
-/// die sieben Startwerte schreibt die bestehende Attributschreibfunktion
-/// `write_attributes` (`race_definitions.dexterity` → `characters.agility`,
-/// die Zuordnung besitzt bereits der Lesepfad). Keine Gegenstände, keine
-/// Abilities, keine Questzustände (Stufe 1). Kein World-Zugriff: die
-/// Aufruferin hält beim Aufruf keine World-Sperre — es gibt keine DB-I/O
-/// unter World-Sperre. Jeder Fehlerpfad verwirft die Transaktion
-/// uncommittet: kein halb angelegter Charakter.
+/// Entscheidungen a und b, Regel 8b): der Name wird VOR der Transaktion
+/// gegen dieselbe Realm-Datenbank geprüft; der UNIQUE-Index `idx_char_name`
+/// (Migration 001) bleibt die letzte Durchsetzung. Die Transaktion enthält
+/// neben dem Abschluss genau drei Statements: INSERT über `account_id`,
+/// `name`, `race` und `char_class` (positive Auto-Increment-ID, kanonischer
+/// Rassenwert, Startklasse `Adventurer`); die sieben Grundattribute über die
+/// bestehende Attributschreibfunktion `write_attributes`
+/// (`race_definitions.dexterity` → `characters.agility`, die Zuordnung
+/// besitzt bereits der Lesepfad); nach Beschluss 5a INSERT genau einer
+/// `skills`-Zeile mit ausdrücklich geschriebenem `lvl` 1 und `skill_id` aus
+/// der Konfiguration (`CombatCfg.weapon_skill_id`). Die 17 nicht
+/// geschriebenen `characters`-Spalten behalten ihren DB-Default
+/// (Feld-zu-Quelle-Tabelle; `guild_id` und `logout_at` implizit NULL).
+/// Keine Gegenstände, keine Fähigkeiten, keine Questzustände, keine
+/// Abklingzeiten. Kein World-Zugriff: die Aufruferin hält beim Aufruf keine
+/// World-Sperre — es gibt keine DB-I/O unter World-Sperre. Jeder Fehlerpfad
+/// verwirft die Transaktion uncommittet: Charakter, Attribute und
+/// skills-Zeile verschwinden gemeinsam, kein halb angelegter Charakter.
 pub(crate) async fn create_character(
     pool: &Pool<MySql>,
     account_id: u32,
     name: &str,
     race: &str,
     attrs: &crate::attributes::Attributes,
+    weapon_skill_id: &str,
 ) -> Result<u64, CreateCharacterError> {
     use CreateCharacterError::*;
     // Vorprüfung AUSSERHALB der Transaktion gegen dieselbe Realm-Datenbank.
@@ -493,6 +501,30 @@ pub(crate) async fn create_character(
                 "create_character_attributes",
                 &id.to_string(),
                 DbErrorClass::Other
+            )
+        );
+        return Err(Unavailable);
+    }
+    // Beschluss 5a (Regel 8b): genau eine skills-Zeile in derselben
+    // Transaktion. Der Startwert lvl wird ausdrücklich geschrieben (1),
+    // statt ihn dem Spalten-Default zu überlassen; skill_id stammt aus der
+    // Konfiguration (CombatCfg.weapon_skill_id), übergeben vom Anlagehandler.
+    // Schlägt dieses Statement fehl, verwirft der Rückweg die Transaktion
+    // ohne Commit: Charakter, Attribute und skills-Zeile verschwinden
+    // gemeinsam, keine Rückstände.
+    if let Err(e) = sqlx::query("INSERT INTO skills (char_id, skill_id, lvl) VALUES (?, ?, ?)")
+        .bind(id.to_string())
+        .bind(weapon_skill_id)
+        .bind(1i32)
+        .execute(&mut *tx)
+        .await
+    {
+        log::error!(
+            "{}",
+            db_error_line(
+                "create_character_skill",
+                &id.to_string(),
+                db_error_class(&e)
             )
         );
         return Err(Unavailable);
@@ -3091,7 +3123,8 @@ mod race_seed_tests {
         assert!(race_start_attributes_from_rows(shipped_seed_rows(), &selectable).is_ok());
     }
 
-    // ── Charakteranlage POST /characters (C-1, Stufe 1 ohne Gegenstände) ──
+    // ── Charakteranlage POST /characters (C-1 Stufe 1 ohne Gegenstände;
+    //    C-5: skills-Zeile nach Beschluss 5a, drei Statements je Regel 8b) ──
 
     #[test]
     fn duplicate_key_detection_holds_for_every_non_database_error() {
@@ -3130,41 +3163,38 @@ mod race_seed_tests {
     fn create_character_conflict_precedes_any_further_statement_and_commit() {
         // Strukturbeleg (analog dem Reihenfolgebeleg-Muster in handlers.rs):
         // Im Anlegepfad muss die Konfliktbehandlung (Err-Zweig mit
-        // `return Err(NameTaken)`) VOR write_attributes und VOR tx.commit()
-        // abgeschlossen sein — ein Indexkonflikt verwirft die Transaktion
-        // ohne weitere Aussage und ohne Commit: keine Teilmutation, kein
-        // halb angelegter Charakter.
-        let src = include_str!("db.rs");
-        let start = src
-            .find("pub(crate) async fn create_character(")
-            .expect("Anlegefunktion vorhanden");
-        let end = src[start..]
-            .find("\n}\n")
-            .map(|i| start + i)
-            .expect("Funktationsende");
-        let body = &src[start..end];
+        // `return Err(NameTaken)`) VOR write_attributes, VOR der skills-Zeile
+        // (Beschluss 5a) und VOR tx.commit() abgeschlossen sein — ein
+        // Indexkonflikt verwirft die Transaktion ohne weitere Aussage und
+        // ohne Commit: keine Teilmutation, kein halb angelegter Charakter,
+        // die skills-Zeile wird im Konfliktfall gar nicht erst erreicht.
+        let body = create_character_function_body();
         let conflict = body
             .find("return Err(NameTaken)")
             .expect("Konflikt-Zweig mit vorzeitigem Return");
         let attrs_write = body
             .find("write_attributes(&mut tx")
             .expect("bestehender Attributschreibpfad in derselben Transaktion");
+        let skills_insert = body
+            .find("INSERT INTO skills")
+            .expect("skills-Zeile nach Beschluss 5a in derselben Transaktion");
         let commit = body
             .find("tx.commit()")
             .expect("Commit am Ende des Erfolgs Pfads");
         assert!(
-            conflict < attrs_write && attrs_write < commit,
-            "Reihenfolge: Konflikt-Rückgabe vor Attributschreiben vor Commit"
+            conflict < attrs_write && attrs_write < skills_insert && skills_insert < commit,
+            "Reihenfolge: Konflikt-Rückgabe vor Attributschreiben vor skills-Zeile vor Commit"
         );
         // Die INSERT-Aussage führt die Startklasse kanonisch und nennt keine
-        // Gegenstände/Abilities/Quests (Stufe 1).
+        // Gegenstände/Abilities/Quests (Stufe 1); nach Beschluss 5a kommt
+        // genau eine skills-Zeile hinzu, sonst nichts.
         let insert = body
             .find("INSERT INTO characters")
             .expect("INSERT in characters");
         assert!(body[insert..insert + 400].contains("char_class"));
         assert!(
             !body.contains("item") && !body.contains("quest"),
-            "Stufe 1 schreibt nur die characters-Zeile und die Attribute"
+            "die Anlage schreibt nur die characters-Zeile, die Attribute und eine skills-Zeile"
         );
     }
 
@@ -3195,6 +3225,167 @@ mod race_seed_tests {
             .find(".bind(attrs.dexterity)")
             .expect("dexterity wird gebunden");
         assert!(agility < bind, "Platzhalter folgt vor dem zugehörigen Bind");
+    }
+
+    /// Funktionskörper des Anlegepfads für die Strukturbelege: vom Signaturen-
+    /// Anker bis zum ersten Fußpunkt auf Listen-Ebene (dasselbe Muster wie der
+    /// Reihenfolgebeleg; die Doc-Kommentare oberhalb bleiben außen vor).
+    fn create_character_function_body() -> String {
+        let src = include_str!("db.rs");
+        let start = src
+            .find("pub(crate) async fn create_character(")
+            .expect("Anlegefunktion vorhanden");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktionsende");
+        src[start..end].to_string()
+    }
+
+    /// Nennt `column` als eigenständiges Wort (keine Treffer innerhalb längerer
+    /// Bezeichner wie `char_id` oder `mana_max`).
+    fn mentions_column(body: &str, column: &str) -> bool {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        body.match_indices(column).any(|(i, _)| {
+            let before_ok = !body[..i].chars().next_back().is_some_and(is_ident);
+            let after_ok = !body[i + column.len()..]
+                .chars()
+                .next()
+                .is_some_and(is_ident);
+            before_ok && after_ok
+        })
+    }
+
+    #[test]
+    fn create_character_inserts_exactly_one_skills_row_at_level_one_from_the_configured_skill() {
+        // Beschluss 5a: die Anlege-Transaktion enthält genau eine Aussage gegen
+        // `skills` — ein INSERT über `char_id`, `skill_id` und `lvl`. Der
+        // Startwert `lvl` wird ausdrücklich geschrieben (1), statt ihn dem
+        // Spalten-Default zu überlassen; `skill_id` kommt aus der Konfiguration
+        // (`CombatCfg.weapon_skill_id`) und wird als Parameter durchgereicht.
+        // Die Zeile gehört zur Transaktion; ihr Fehlerpfad verwirft ohne
+        // Commit, sodass Charakter, Attribute und skills-Zeile gemeinsam
+        // verschwinden (Regel 8b, VERBINDLICH-Liste Eintrag 6).
+        let body = create_character_function_body();
+        let insert = body
+            .find("INSERT INTO skills (char_id, skill_id, lvl) VALUES (?, ?, ?)")
+            .expect("genau eine skills-Aussage im Anlegepfad");
+        assert_eq!(
+            body.matches("INSERT INTO skills").count(),
+            1,
+            "kein weiteres Statement schreibt bei der Anlage an skills"
+        );
+        assert!(
+            !body.contains("UPDATE skills") && !body.contains("ON DUPLICATE"),
+            "die Anlage schreibt genau eine Zeile, sie ändert und ersetzt keine"
+        );
+        let stmt = &body[insert..];
+        let skill_bind = stmt
+            .find(".bind(weapon_skill_id)")
+            .expect("skill_id kommt aus der Konfiguration");
+        let lvl_bind = stmt
+            .find(".bind(1i32)")
+            .expect("lvl 1 wird ausdrücklich geschrieben");
+        let exec = stmt
+            .find(".execute(&mut *tx)")
+            .expect("die skills-Zeile läuft in derselben Transaktion");
+        assert!(
+            skill_bind < lvl_bind && lvl_bind < exec,
+            "skill_id und lvl sind die gebundenen Werte der skills-Aussage"
+        );
+        let commit = body
+            .find("tx.commit()")
+            .expect("Commit am Ende des Erfolgs Pfads");
+        assert!(insert < commit, "die skills-Zeile gehört zur Transaktion");
+        let discard = stmt
+            .find("return Err(Unavailable)")
+            .expect("Fehlerpfad der skills-Zeile verwirft ohne Commit");
+        assert!(
+            exec < discard,
+            "Rückweg nach dem Statement, nie nach dem Commit"
+        );
+    }
+
+    #[test]
+    fn create_character_writes_no_column_with_db_default() {
+        // Regel 8b und Feld-zu-Quelle-Tabelle: neben dem Abschluss genau drei
+        // Statements — INSERT über `account_id`, `name`, `race`, `char_class`;
+        // `write_attributes` über die sieben Grundattribute; INSERT einer
+        // skills-Zeile über `char_id`, `skill_id`, `lvl`. Die 17 nicht
+        // geschriebenen `characters`-Spalten (einschließlich `guild_id` und
+        // `logout_at` mit implizitem Standard NULL) kommen in keiner Aussage
+        // vor — ihr DB-Default bleibt unangetastet.
+        let body = create_character_function_body();
+        assert!(
+            body.contains(
+                "INSERT INTO characters (account_id, name, race, char_class) VALUES (?, ?, ?, ?)"
+            ),
+            "das characters-INSERT führt genau die vier geschriebenen Spalten"
+        );
+        assert!(
+            body.contains("INSERT INTO skills (char_id, skill_id, lvl) VALUES (?, ?, ?)"),
+            "das skills-INSERT führt genau die drei Spalten der Startzeile"
+        );
+        assert_eq!(
+            body.matches("INSERT INTO characters").count(),
+            1,
+            "genau ein INSERT schreibt bei der Anlage an characters"
+        );
+        assert!(
+            !body.contains("UPDATE characters"),
+            "die sieben Grundattribute laufen ausschließlich über write_attributes"
+        );
+        // Der delegierte Attributs-UPDATE (Regel 8b, zweites Statement) setzt
+        // genau die sieben Grundattribute — auch dort keine Default-Spalte.
+        let src = include_str!("db.rs");
+        let start = src
+            .find("pub(crate) async fn write_attributes(")
+            .expect("bestehender Attributschreibpfad");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktionsende");
+        let attrs_stmt = &src[start..end];
+        // Das SQL-Literal ist im Quelltext per Backslash-Zeile umgebrochen —
+        // die Prüfung folgt genau diesem Bruch (Strukturbeleg am Quelltext).
+        assert!(
+            attrs_stmt
+                .contains("UPDATE characters SET strength = ?, agility = ?, intelligence = ?,"),
+            "der Attributs-UPDATE beginnt mit den ersten drei Grundattributen"
+        );
+        assert!(
+            attrs_stmt
+                .contains("constitution = ?, wisdom = ?, luck = ?, endurance = ? WHERE id = ?"),
+            "der Attributs-UPDATE führt genau die sieben Grundattribute"
+        );
+        for column in [
+            "level",
+            "exp",
+            "idia",
+            "hp",
+            "mana",
+            "mana_max",
+            "zone_id",
+            "pos_x",
+            "pos_y",
+            "guild_id",
+            "created_at",
+            "combat_armor",
+            "faction_transition",
+            "free_attr_points",
+            "rested_pool",
+            "logout_at",
+            "persist_revision",
+        ] {
+            assert!(
+                !mentions_column(&body, column),
+                "die Default-Spalte {column} darf in keiner Aussage der Anlage vorkommen"
+            );
+            assert!(
+                !mentions_column(attrs_stmt, column),
+                "die Default-Spalte {column} darf im Attributs-UPDATE nicht vorkommen"
+            );
+        }
     }
 }
 

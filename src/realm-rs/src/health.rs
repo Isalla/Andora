@@ -60,7 +60,8 @@ async fn characters_for(
     }
 }
 
-// ── Charakteranlage: POST /characters (C-1, Stufe 1 ohne Gegenstände) ─────
+// ── Charakteranlage: POST /characters (C-1 Stufe 1 ohne Gegenstände; C-5
+//    ergänzt die skills-Zeile nach Beschluss 5a, drei Statements je Regel 8b) ─
 // Regelstelle: docs/Charaktererstellung_und_Charakterdarstellung.md,
 // Abschnitt „Festlegungen zur Charakteranlage (Entscheidungen a–j)".
 // Session-/Realm-/Auth-Ablehnungen sind wörtlich dieselben Fälle wie bei der
@@ -215,7 +216,15 @@ async fn create_character_for(
     let Some(attrs) = attrs else {
         return error(503, "database unavailable");
     };
-    let result = crate::db::create_character(&context.pool, account_id, &name, race, &attrs).await;
+    let result = crate::db::create_character(
+        &context.pool,
+        account_id,
+        &name,
+        race,
+        &attrs,
+        &cfg.combat.weapon_skill_id,
+    )
+    .await;
     create_db_response(result, &name)
 }
 
@@ -936,7 +945,8 @@ mod tests {
         fake_auth.await.unwrap();
     }
 
-    // ── Charakteranlage POST /characters (C-1, Stufe 1 ohne Gegenstände) ──
+    // ── Charakteranlage POST /characters (C-1, Stufe 1 ohne Gegenstände;
+    //    C-5 ergänzt den skill_id-Durchgriff auf die Konfiguration) ──
 
     /// Einmaliger Fake-Auth-Dienst wie im GET-Test; antwortet `times` Mal
     /// mit derselben Session-JSON. Der Pool bleibt lazy und unerreichbar:
@@ -1271,6 +1281,35 @@ mod tests {
         assert!(
             lock < release && release < db_call,
             "Reihenfolge: Sperre holen -> freigeben -> DB-Anlage"
+        );
+    }
+
+    #[test]
+    fn create_character_for_passes_the_configured_weapon_skill_id() {
+        // Beschluss 5a: Der skill_id der skills-Startzeile kommt aus der
+        // Konfiguration (CombatCfg.weapon_skill_id, Umgebungsschlüssel
+        // COMBAT_WEAPON_SKILL_ID) — der Handler reicht ihn unverändert an
+        // db::create_character durch. Kein fest codierter Skillname im Pfad.
+        let src = include_str!("health.rs");
+        let start = src
+            .find("async fn create_character_for(")
+            .expect("Anlagehandler vorhanden");
+        let end = src[start..]
+            .find("\n}\n")
+            .map(|i| start + i)
+            .expect("Funktionsende");
+        let body = &src[start..end];
+        let db_call = body
+            .find("db::create_character(")
+            .expect("DB-Anlage im Handler");
+        let window = &body[db_call..];
+        assert!(
+            window.contains("cfg.combat.weapon_skill_id"),
+            "der konfigurierte weapon_skill_id wird an db::create_character übergeben"
+        );
+        assert!(
+            !window.contains("schwerter"),
+            "kein fest codierter Startwert — die Konfiguration entscheidet"
         );
     }
 
