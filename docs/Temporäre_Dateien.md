@@ -107,6 +107,8 @@ cargo test  --manifest-path src/realm-rs/Cargo.toml
 Die Rust-Toolchain umfasst `rustc`, `cargo` und `rustup` im Profil `minimal` (Toolchain `stable-aarch64-unknown-linux-gnu`). Neuinstallation bei Bedarf:
 
 ```sh
+mkdir -p "$(pwd)/.tmp/tmp"
+export TMPDIR="$(pwd)/.tmp/tmp"
 CARGO_HOME="$(pwd)/.tmp/rust" RUSTUP_HOME="$(pwd)/.tmp/rustup" \
   .tmp/rustup/rustup-init -y --profile minimal
 ```
