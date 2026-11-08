@@ -14,19 +14,21 @@ dürfen nicht in systemweiten temporären Verzeichnissen abgelegt werden.
 
 ### Kurzlebige Arbeits- und Zwischendaten
 
-Für **kurzlebige** Arbeits- und Zwischendaten, die keiner dauerhaften
-Aufbewahrung bedürfen, sind systemweite temporäre Verzeichnisse zulässig —
-`/tmp/opencode` bzw. systemweites `/tmp`. Beispiele:
+Sämtliche temporären Arbeits- und Zwischendaten liegen ausschließlich unter
+`<Projektroot>/.tmp/`, bei Bedarf in Zweck-Unterverzeichnissen. Systemweite
+Verzeichnisse wie `/tmp`, `/var/tmp` oder `/tmp/opencode` sind keine
+Schreibziele. Die Regel gilt für Dateien, die ein Auftrag oder ein Werkzeug
+bewusst anlegt. Wählt ein Werkzeug seinen Temp-Pfad selbst, ist `TMPDIR` auf
+`<Projektroot>/.tmp/tmp` zu setzen; schreibt es trotzdem außerhalb, ist das
+ein Befund und zu melden, kein stillschweigend hingenommener Zustand.
 
-* Buch-, EPUB- oder sonstige Medienextraktionen als Session-Zwischenschritt
-* temporäre Analysedaten
-* vergleichbare Session-Artefakte, die nach der Session keinen Wert mehr haben
+Grund: Der Projektroot liegt auf einer HDD, das System und damit systemweites
+`/tmp` auf einer SD. Schreiblast auf der SD ist zu vermeiden, weil ihre
+Lebensdauer das Risiko trägt. Zweiter Grund: Projektgrenze.
 
 Es gelten zwei Grenzen:
 
-* **Keine dauerhaften Projektdateien** in `/tmp` — alles, was später noch
-  gebraucht wird (Toolchains, Caches, Hilfsmittel, generierte Dateien mit
-  Bestand), wohnt unter `<Projektroot>/.tmp/` oder im Projektverzeichnis.
+* **Keine Schreibvorgänge außerhalb des Projektroots.**
 * **Atomare projektinterne Schreibvorgänge** bleiben an ihrem jeweiligen Ort:
   temporäre Dateien, die Teil einer sicheren Rename-/Persistenzlogik sind,
   werden weiterhin dort erzeugt, wo der atomare Vorgang stattfindet
