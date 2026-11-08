@@ -227,6 +227,97 @@ noch nicht implementiert.**
 
 ---
 
+## Festlegungen zur Charakteranlage (Entscheidungen a–e)
+
+Die folgenden Punkte sind als Regeln der Charakteranlage beschlossen.
+Dieser Abschnitt ist die maßgebliche Regelstelle; andere Dokumente
+(zum Beispiel `Projekt-Status.md` Eintrag 22) verweisen nur und
+wiederholen die Regeln nicht.
+
+### (a) Anlage über `POST /characters`; Ablehnungen je Fall mit stabilem Grund
+
+- Die Anlage läuft über Realm-HTTP `POST /characters` auf dem
+  bestehenden HTTP-Port — demselben Port, über den auch
+  `GET /characters` angeboten wird.
+- Die `account_id` stammt ausschließlich aus der Sessionprüfung; die
+  vergebene `character_id` ist eine positive Datenbank-ID; die Anlage
+  erfolgt in einer Transaktion.
+- Jede Ablehnung trägt einen stabilen Grund im Feld `error`: die
+  Antwort ist ein JSON-Objekt mit genau diesem Feld, der Grundtext
+  ist kleingeschrieben. Das ist wörtlich die Antwortform der
+  bestehenden `GET /characters`-Route (`characters_for`,
+  `src/realm-rs/src/health.rs`).
+- Die HTTP-Statuscodes für die überlappenden Fälle sind an dieser
+  GET-Route abgelesen und gelten unverändert für die Anlage:
+
+| Ablehnungsfall | HTTP-Status | Grund im Feld `error` |
+|---|---|---|
+| fehlende, leere, mehrfach gelieferte oder ungültige Session; Session ohne gültige positive `account_id` | 401 | `invalid session` |
+| falscher Realm (`realm_id` fehlt, mehrfach, ungültig oder passt nicht zum Realm) | 400 | `wrong realm` |
+| Auth-Ausfall (Auth nicht verfügbar oder Prüfaufruf gescheitert) | 503 | `auth unavailable` |
+| DB-Ausfall | 503 | für die GET-Route als `characters unavailable` belegt; der stabile Grundtoken der Anlage ist im Umsetzungsschritt festzulegen |
+
+- *Name nicht 3–10 Zeichen*, *Name bereits vergeben* und *Rasse
+  nicht wählbar* sind in der GET-Route nicht angelegt, weil diese
+  Route solche Prüfungen nicht kennt; von dort ist kein Code
+  ablesbar. Diese Antworten erfolgen im Format wie die bestehende
+  GET-Route (Feld `error`, stabiler Grund); der konkrete
+  HTTP-Statuscode ist offen und wird im Umsetzungsschritt
+  festgelegt — nicht erfunden.
+- Bei *Name bereits vergeben* verlässt sich die Anlage auf den
+  UNIQUE-Index `idx_char_name` (`src/realm-rs/migrations/001_characters.sql:30`):
+  es gibt kein Prüfen vor dem INSERT, der Index entscheidet.
+- Bei *Rasse nicht wählbar* entscheidet die realmseitige
+  Konfiguration `SELECTABLE_RACES` (Abschnitt „Speicherort der
+  Rassen- und Startattributdaten").
+
+### (b) Startattribute aus der RAM-Kopie; Schreibpfad
+
+- Die sieben Startwerte stammen aus der beim Realm-Start geladenen
+  RAM-Kopie `race_start_attributes` (`World.race_start_attributes`,
+  geladen durch `db::load_race_start_attributes`, fail-closed beim
+  Start, danach unveränderlich). Innerhalb der Anlage erfolgt keine
+  DB-Lesung der Matrix.
+- Der Schreibpfad nutzt die bestehende Attributschreibfunktion
+  `db::write_attributes`. Sie schreibt `Attributes.dexterity` in die
+  Spalte `characters.agility`; der aus `race_definitions.dexterity`
+  abgeleitete Startwert wird damit auf diesem Weg in
+  `characters.agility` geschrieben. Die übrigen sechs Werte führen in
+  beiden Tabellen denselben Namen.
+
+### (c) Rasse unveränderlich; Klassenwahl bleibt bei Level 9
+
+- Die Rasse ist nach der Anlage unveränderlich. Es gibt keinen
+  Nachzug einer anderen Rasse und keinen Respec in V1.
+- Die Grundklassenwahl bleibt bei Level 9 (`class.rs`,
+  `CLASS_CHOICE_LEVEL`); auch dort gilt weiterhin: kein Respec.
+
+### (d) Keine Starter-Ausrüstung; kanonische Schreibweise der Rasse
+
+- V1 kennt keine Starter-Ausrüstung: ein neu angelegter Charakter
+  beginnt ohne Gegenstände.
+- Beim Anlegen wird die Rasse in der kleingeschriebenen kanonischen
+  Schreibweise gespeichert (`mensch`, `elf`, `andorer`; Abschnitt
+  „Spielbare Rassen bei der Erstellung").
+
+### (e) Umfassende Regelstelle für unbekannte Klassenwerte
+
+- Die Zuordnung eines unbekannten Wertes des Feldes `char_class` auf
+  `Adventurer` bleibt Bestand und wird **nicht** geändert
+  (`ClassStatus::from_db_name`, `src/realm-rs/src/class.rs`).
+- Ab dem Umsetzungsschritt wird diese Zuordnung protokolliert —
+  ohne Geheimnisse und ohne Namen Dritter. Umsetzungsstelle ist der
+  Aufrufpunkt der Zuordnung (Aufrufer von `ClassStatus::from_db_name`,
+  `src/realm-rs/src/db.rs`); diese Regelstelle steht hier und ein
+  zweites Mal nicht in der Doku von `class.rs`.
+- Die Rücknormalisierung im Persistpfad bleibt unverändert: der
+  Persistpfad liest den Wert tolerant über `from_db_name` und
+  schreibt die kanonische Bezeichnung über
+  `ClassStatus::canonical_db_name()` mit `db::write_character_class`
+  zurück (`src/realm-rs/src/persist.rs`).
+
+---
+
 ## Serverseitige Charakterdaten
 
 Der Realm-Server kennt beispielsweise:
