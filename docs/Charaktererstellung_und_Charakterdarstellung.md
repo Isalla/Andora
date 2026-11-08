@@ -10,9 +10,17 @@ Der Server speichert ausschließlich abstrakte Charakter- und Appearance-Werte. 
 
 ---
 
-## Charaktererstellung
+## Regelbereich Charaktererstellung
 
-Nur während der Charaktererstellung übermittelt der Client Appearance-Daten an den Server.
+Dieser Regelbereich führt die Charakterstruktur an einer Stelle zusammen:
+VERBINDLICH-Liste, Angebot des Erstellungsablaufs, Spielbare Rassen,
+Vorname, Startklasse und Startwerte, Umgang mit Platzhaltercharakteren,
+Speicherort der Rassen- und Startattributdaten sowie die Beschlüsse dieser
+Runde (Feld-zu-Quelle-Tabelle, `idia`, Startdatenstruktur, Regel 8b).
+Jeder Fakt steht genau einmal; andere Stellen verweisen. Die fachlichen
+Entscheidungen a–j der Anlage stehen im Abschnitt „Festlegungen zur
+Charakteranlage (Entscheidungen a–j)" — dieser Regelbereich bindet sie an,
+ohne sie zu duplizieren.
 
 ### Verbindliche Regeln der Charakteranlage
 
@@ -28,7 +36,7 @@ Der Erstellungsablauf validiert mindestens:
 2. **Name** – Länge und zulässiger Zeichensatz werden serverseitig geprüft; der Name darf kein Ersatz für die `character_id` sein.
 3. **Eindeutigkeit** – ein bereits vergebener Name wird abgelehnt, statt einen zweiten Datensatz anzulegen.
 4. **Rasse und Startklasse** – die übermittelte Rasse wird gegen die gültigen aktivierten Werte geprüft und in kanonischer Form gespeichert; die Startklasse folgt den Regeln des Klassensystems. Appearance-Felder gehören nicht zum V1-Umfang der Erstellung; ihre Prüfung und Speicherung ist für einen späteren Auftrag offen.
-5. **Initiale Datensätze** – neben dem Charakter-Datensatz werden die zugehörigen Startdatensätze angelegt (zum Beispiel Ausrüstung/Inventar, Fähigkeiten, Questzustand), damit kein unvollständiger Charakter entsteht.
+5. **Initiale Datensätze** — die Anlage schreibt genau **einen** Charakterdatensatz: die `characters`-Zeile und ihre sieben Grundattribute (Regel 8b, Abschnitt „Beschlüsse dieser Runde"). Die zugehörigen Tabellen `inventory`, `character_abilities`, `quests`, `skills` und `character_cooldowns` erhalten bei der Anlage **keine** Startzeilen; das Fehlen der Zeile ist ihr leerer Anfangszustand (Abschnitt „Startdatenstruktur"). Ein unvollständiger Charakter entsteht dadurch nicht; Starterausrüstung wird nicht erfunden („Festlegungen", (d) und (j)).
 6. **Transaktionsgrenzen** – die Anlage der Datensätze erfolgt so, dass ein Fehler keinen halb angelegten Charakter hinterlässt.
 
 ### Angebot des Erstellungsablaufs
@@ -41,19 +49,19 @@ Charakterliste `GET /characters`:
 POST /characters?session_id=<Login-Session>
 ```
 
-- Die `session_id` wird über die vorhandene signierte Auth-API
-  geprüft; die `account_id` stammt ausschließlich aus dieser Prüfung.
+- Die Prüfung der `session_id` läuft über die vorhandene signierte
+  Auth-API; Sitzung, `account_id` und `character_id` folgen der
+  VERBINDLICH-Liste.
 - Eine clientgelieferte `account_id` oder `character_id` ist ohne
   Wirkung und wird abgelehnt.
-- Die `character_id` ist die vom Server vergebene positive
-  Datenbank-ID in der Realm-Datenbank dieses Realms.
-- Die Anlage erfolgt in einer Transaktion, damit kein halber
-  Charakter zurückbleibt.
-- Die Prüfung auf einen bereits vergebenen Namen erfolgt vor der
-  Transaktion gegen dieselbe Realm-Datenbank.
-
-Der Realm-Einstieg selbst bleibt davon unberührt und legt niemals
-einen Charakter an (`Login_Realm_Architektur.md` Abschnitt 6).
+- Die vergebene Datenbank-ID (VERBINDLICH-Liste) stammt aus der
+  Realm-Datenbank dieses Realms.
+- Transaktionsgrenzen: Eintrag 6 der VERBINDLICH-Liste; die
+  Regelstelle der Anlage mit der Prüfung vor der Transaktion und
+  dem Index als letzter Durchsetzung ist Abschnitt (a) der
+  „Festlegungen zur Charakteranlage".
+- Der Realm-Einstieg bleibt unberührt: Eintrag 1 der
+  VERBINDLICH-Liste (`Login_Realm_Architektur.md` Abschnitt 6).
 
 ### Spielbare Rassen bei der Erstellung
 
@@ -94,58 +102,32 @@ Bei der Charaktererstellung wird ausschließlich der **Vorname** vergeben.
 
 ### Startklasse und Startwerte bei der Erstellung
 
-- Jeder neu erstellte Charakter beginnt als **Abenteurer**; die
-  Grundklassenwahl erfolgt wie im Klassensystem dokumentiert
-  später (`Klassensystem.md`, `Rassen-Fraktionen.md` Abschnitt 10).
-- Die sieben Grundattribute werden aus der rassischen
-  Startwertmatrix gesetzt (`Attribute_und_Regeneration.md`
-  Abschnitt 2).
-- Die zugehörigen Startdatensätze werden vollständig und
-  fehlerfrei angelegt. Der konkrete Umfang der Startdatensätze
-  wird mit dem Umsetzungsauftrag festgelegt; es wird keine
-  Starterausrüstung erfunden.
+- Jeder neu erstellte Charakter beginnt als **Abenteurer**; `char_class`
+  erhält diesen Wert bei der Anlage als Konstante (Feld-zu-Quelle-
+  Tabelle, Abschnitt „Beschlüsse dieser Runde"). Die Grundklassenwahl
+  erfolgt wie im Klassensystem dokumentiert später
+  (`Klassensystem.md`, `Rassen-Fraktionen.md` Abschnitt 10) und bleibt
+  bei Level 9 („Festlegungen", (c)).
+- Die sieben Grundattribute werden aus der rassischen Startwertmatrix
+  gesetzt. Zahlquelle ist `Attribute_und_Regeneration.md` Abschnitt 2;
+  RAM-Kopie und Schreibpfad sind in „Festlegungen", (b) geregelt;
+  Datenbasis und Spaltennamen im Abschnitt „Speicherort der Rassen-
+  und Startattributdaten".
+- Startdatensätze: Eintrag 5 der VERBINDLICH-Liste und Abschnitt
+  „Startdatenstruktur". Es wird keine Starterausrüstung erfunden
+  („Festlegungen", (d) und (j)).
 
 ### Umgang mit vorhandenen Test- und Platzhaltercharakteren
 
 Bestehende Charakterdatensätze werden **nicht** per Migration auf
-die kanonischen Rassenwerte umgestellt. Die Erstellung schreibt
-ausschließlich kanonische Werte. Der Realm liest das Feld
-`race` tolerant: ein unbekannter oder abweichend geschriebener
-Wert wird protokolliert, verhindert aber **nicht** den Einstieg.
-Vorhandene Platzhaltercharaktere werden nicht umgeschrieben und nicht
-per Migration angepasst; sie werden mit der Zeit durch neu angelegte
-Charaktere abgelöst.
+die kanonischen Rassenwerte umgestellt und nicht umgeschrieben; sie
+werden mit der Zeit durch neu angelegte Charaktere abgelöst. Die
+Erstellung schreibt ausschließlich kanonische Werte („Spielbare
+Rassen bei der Erstellung"). Der Realm liest das Feld `race` tolerant:
+ein unbekannter oder abweichend geschriebener Wert wird protokolliert,
+verhindert aber **nicht** den Einstieg.
 
-### Appearance beim Erstellen
-
-Dabei werden ausschließlich abstrakte Werte übertragen, beispielsweise:
-
-```text
-race = human
-gender = male
-body = 2
-face = 1
-hair = 2
-hair_color = 4
-skin = 3
-```
-
-Die Beispiele in diesem Abschnitt und den folgenden Abschnitten sind illustrativ. Für die Rasse gilt ausschließlich der kanonische Rassenwert aus Abschnitt „Spielbare Rassen bei der Erstellung". Dort lautet der Menschenwert `mensch`, nicht `human`.
-
-Der Client übermittelt keine:
-
-* Sprite-Dateien
-* Texturen
-* Character-Set-Namen
-* Asset-Pfade
-* Mod-Namen
-* grafischen Dateien
-
-Der Server prüft lediglich, ob die übermittelten Werte für die jeweilige Charaktererstellung gültig sind, und speichert anschließend die kanonischen Appearance-Werte beim Charakter.
-
----
-
-## Speicherort der Rassen- und Startattributdaten
+### Speicherort der Rassen- und Startattributdaten
 
 Die rassische Startwertmatrix liegt **serverseitig als Daten** vor und wird
 vom Realm beim Start geladen. Verbindliche Zahlenquelle ist
@@ -178,11 +160,8 @@ Die Tabelle führt Geschicklichkeit unter `dexterity`; die `characters`-Tabelle
 führt dieselbe Größe unter `agility` (seit Migration 001, durch Migration 011
 unverändert). Bei den übrigen sechs Grundattributen stimmen die Spaltennamen
 beider Tabellen überein. Die Namenszuordnung zwischen `agility` und `dexterity`
-besitzt der Realm bereits in seinem Attribut-Lese- und -Schreibpfad. Zu
-ergänzen ist sie bei der Charakteranlage: der aus `race_definitions.dexterity`
-abgeleitete Startwert muss beim Anlegen in die Spalte `characters.agility`
-geschrieben werden. Diese Verwendung der Rassetabelle bei der Charakteranlage
-ist derzeit nicht implementiert.
+besitzt der Realm bereits in seinem Attribut-Lese- und -Schreibpfad; welcher
+Schreibpfad sie bei der Charakteranlage trägt, regelt „Festlegungen", (b).
 
 Die realmseitige Konfiguration enthält nur kanonische Rassenwerte. Ein
 unbekannter oder nicht kanonischer Wert führt zu einem Abbruch des
@@ -222,9 +201,107 @@ Abschnitte 6 und 11) sind von der Rassetabelle getrennt. Die Tabelle
 verändert weder Klassenwerte noch Regenerationswerte noch bestehende
 Attributswirkungen.
 
-**Status: Datenbasis, Loader und realmseitige Konfiguration implementiert.
-Die Anwendung der Matrix bei der Charakteranlage (`POST /characters`) ist
-noch nicht implementiert.**
+Der Implementierungsstatus dieses Abschnitts steht ausschließlich in
+`Projekt-Status.md` (Eintrag 22) und wird hier nicht wiederholt.
+
+### Beschlüsse dieser Runde (1–10): Feldquellen, `idia`, Startdatenstruktur, Zuständigkeiten
+
+Die Beschlüsse dieser Runde sind in diesem Abschnitt festgehalten.
+Eintrag 5 der VERBINDLICH-Liste ist deckungsgleich mit dieser Struktur
+gefasst; die Abschnitte (a) und (b) der „Festlegungen zur
+Charakteranlage" verweisen auf die Tabellen dieses Abschnitts.
+
+#### Feld-zu-Quelle-Tabelle aller `characters`-Spalten
+
+Abgeleitet aus den Migrationen 001 bis 030: die Tabelle `characters`
+führt genau die 29 Spalten der folgenden Tabelle — Migration 001 legt
+19 Spalten an (davon `gold`, seit Migration 019 als `idia` geführt),
+die Migrationen 008, 010, 011, 012, 018 und 019 ergänzen die übrigen;
+keine weitere Migration in diesem Bereich ändert die Spaltenmenge.
+
+Die Quelle nennt, wer den Wert bei der Anlage bestimmt:
+**Sitzung** (aus der Sessionprüfung), **geprüfte Anfrage**
+(clientgeliefert, serverseitig geprüft), **Konstante** (vom
+Anlegepfad vorgegeben), **Rassenmatrix** (RAM-Kopie beim Start),
+**Datenbank** (AUTO_INCREMENT) oder **DB-Default** (von der Anlage
+nicht geschrieben; der in der Migration definierte Standardwert gilt).
+
+| Spalte | Quelle | Wert/Bemerkung bei der Anlage |
+|---|---|---|
+| `id` | Datenbank | AUTO_INCREMENT; die vergebene positive Datenbank-ID (VERBINDLICH-Liste) |
+| `account_id` | Sitzung | ausschließlich aus der Sessionprüfung |
+| `name` | geprüfte Anfrage | Vorname nach Abschnitt „Vorname"; `idx_char_name` als letzte Durchsetzung ((a)) |
+| `race` | geprüfte Anfrage | kanonischer, wählbarer Wert („Spielbare Rassen") |
+| `char_class` | Konstante | `Adventurer` (kanonische Schreibweise); Leserseite: (e) |
+| `strength` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `agility` | Rassenmatrix | Wert aus `race_definitions.dexterity` (Zuordnung: Abschnitt „Speicherort") |
+| `intelligence` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `constitution` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `wisdom` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `luck` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `endurance` | Rassenmatrix | via (b) und `db::write_attributes` |
+| `level` | DB-Default | 1 |
+| `exp` | DB-Default | 0 |
+| `idia` | DB-Default | 0 (Beschluss: Start-`idia` ist 0, kein Startbetrag) |
+| `hp` | DB-Default | 100 |
+| `mana` | DB-Default | 50 |
+| `mana_max` | DB-Default | 50 (Migration 010) |
+| `zone_id` | DB-Default | 0 |
+| `pos_x` | DB-Default | 0 |
+| `pos_y` | DB-Default | 0 |
+| `guild_id` | DB-Default | NULL |
+| `created_at` | DB-Default | CURRENT_TIMESTAMP |
+| `combat_armor` | DB-Default | 0 (Migration 008) |
+| `faction_transition` | DB-Default | 0 (Migration 012) |
+| `free_attr_points` | DB-Default | 0 (Migration 018) |
+| `rested_pool` | DB-Default | 0 (Migration 018) |
+| `logout_at` | DB-Default | NULL (Migration 018) |
+| `persist_revision` | DB-Default | 0 (Migration 019) |
+
+#### Startdatenstruktur
+
+Die Anlage schreibt genau **eine** Zeile — in `characters` (mit dem
+Attribut-Update derselben Zeile, Regel 8b). Die zugehörigen Tabellen
+erhalten bei der Anlage keine Startzeilen; für sie ist das Fehlen der
+Zeile das definierte Startbild:
+
+| Tabelle (Migration) | Zeile bei der Anlage | Bedeutung des Fehlens |
+|---|---|---|
+| `inventory` (002) | keine | leeres Inventar; der Persistenzpfad schreibt Vollbestände später selbst |
+| `character_abilities` (010) | keine | **3c — OFFEN**, siehe unten |
+| `quests` (004) | keine | keine Quests; der Quest-Lader liefert die leere Liste |
+| `skills` (003) | keine | kein Eintrag = Startstufe 1 (`db::load_weapon_skill`) |
+| `character_cooldowns` (020) | keine | keine Cooldowns; der Lader liefert die leere Liste |
+
+**3c — Startfähigkeiten: OFFEN.** Der Realm lädt beim Start alle Zeilen
+der Tabelle `ability_definitions` (`db::load_ability_definitions`,
+angelegt in Migration 010) in die Ability-Registry. Der Seed der
+Migration führt sechs Fähigkeitsdefinitionen (`fire_bolt`,
+`healing_light`, `soul_rend`, `frost_nova`, `choke`, `battle_shout`)
+und ist in der Migration selbst ausdrücklich als **provisorisch**
+markiert („keine endgültigen Fähigkeiten"). Eine vollständige
+maßgebliche Fähigkeitsliste existiert damit **nicht**. Bis sie
+vorliegt, gilt: die Anlage schreibt keine Zeile in
+`character_abilities`, und ein Startfähigkeiten-Umfang wird **nicht**
+festgelegt und **nicht** erfunden.
+
+#### Regel 8b — Spaltenzuständigkeit je Statement
+
+Die Anlege-Transaktion enthält genau zwei Statements, die `characters`
+schreiben, und sonst nichts außer dem Abschluss:
+
+| Statement | Zuständigkeit (einzige) |
+|---|---|
+| `INSERT INTO characters (account_id, name, race, char_class)` | diese vier Spalten; `id` entsteht durch AUTO_INCREMENT |
+| `UPDATE characters SET strength, agility, intelligence, constitution, wisdom, luck, endurance` (`db::write_attributes`) | die sieben Grundattribute |
+| `COMMIT` (bei Erfolg) / Widerruf ohne Commit (jeder Fehlerpfad) | schreibt keine Spalte |
+
+Jede Spalte hat genau eine Zuständigkeit; keine andere Stelle schreibt
+bei der Anlage an `characters`. Die 17 nicht geschriebenen Spalten
+behalten ihren DB-Default, `id` trägt die vergebene positive
+Datenbank-ID. Der Konfliktfall erreicht das
+Attribut-Update nicht: die Indexentscheidung (1062, (a)) liegt vor
+ihm.
 
 ---
 
@@ -233,16 +310,19 @@ noch nicht implementiert.**
 Die folgenden Punkte sind als Regeln der Charakteranlage beschlossen.
 Dieser Abschnitt ist die maßgebliche Regelstelle; andere Dokumente
 (zum Beispiel `Projekt-Status.md` Eintrag 22) verweisen nur und
-wiederholen die Regeln nicht.
+wiederholen die Regeln nicht. Die Struktur des Charaktersatzes —
+Feldquellen, Startdatenstruktur, Statement-Zuständigkeiten — steht im
+Regelbereich im Abschnitt „Beschlüsse dieser Runde (1–10)"; dieser
+Abschnitt verweist darauf und wiederholt jene Tabellen nicht.
 
 ### (a) Anlage über `POST /characters`; Ablehnungen je Fall mit stabilem Grund
 
 - Die Anlage läuft über Realm-HTTP `POST /characters` auf dem
   bestehenden HTTP-Port — demselben Port, über den auch
   `GET /characters` angeboten wird.
-- Die `account_id` stammt ausschließlich aus der Sessionprüfung; die
-  vergebene `character_id` ist eine positive Datenbank-ID; die Anlage
-  erfolgt in einer Transaktion.
+- Voraussetzung sind Sessionprüfung mit ausschließlich dort hergenommener
+  `account_id`, positive Datenbank-ID und Transaktion — sie stehen in der
+  VERBINDLICH-Liste des Regelbereichs und werden hier nicht wiederholt.
 - Jede Ablehnung trägt einen stabilen Grund im Feld `error`: die
   Antwort ist ein JSON-Objekt mit genau diesem Feld, der Grundtext
   ist kleingeschrieben. Das ist wörtlich die Antwortform der
@@ -303,6 +383,10 @@ wiederholen die Regeln nicht.
   abgeleitete Startwert wird damit auf diesem Weg in
   `characters.agility` geschrieben. Die übrigen sechs Werte führen in
   beiden Tabellen denselben Namen.
+- Welche Spalten die Anlage insgesamt schreibt, wem sie ihre Werte
+  verdanken und welche Spalten ihre DB-Defaults behalten, steht in der
+  Feld-zu-Quelle-Tabelle und in Regel 8b (Regelbereich, Abschnitt
+  „Beschlüsse dieser Runde") — hier nicht wiederholt.
 
 ### (c) Rasse unveränderlich; Klassenwahl bleibt bei Level 9
 
@@ -345,6 +429,35 @@ wiederholen die Regeln nicht.
 - Präzisierung des Grundes: Das heißt **nicht** „keine Items in der
   Datenbank". Item-Definitionen sind vorhanden; es fehlt der
   Achsen-Content für die ausrüstbaren Definitionen.
+
+---
+
+## Appearance beim Erstellen
+
+Nur während der Charaktererstellung übermittelt der Client Appearance-Daten an den Server. Dabei werden ausschließlich abstrakte Werte übertragen, beispielsweise:
+
+```text
+race = human
+gender = male
+body = 2
+face = 1
+hair = 2
+hair_color = 4
+skin = 3
+```
+
+Die Beispiele in diesem Abschnitt und den folgenden Abschnitten sind illustrativ. Für die Rasse gilt ausschließlich der kanonische Rassenwert aus Abschnitt „Spielbare Rassen bei der Erstellung". Dort lautet der Menschenwert `mensch`, nicht `human`.
+
+Der Client übermittelt keine:
+
+* Sprite-Dateien
+* Texturen
+* Character-Set-Namen
+* Asset-Pfade
+* Mod-Namen
+* grafischen Dateien
+
+Der Server prüft lediglich, ob die übermittelten Werte für die jeweilige Charaktererstellung gültig sind, und speichert anschließend die kanonischen Appearance-Werte beim Charakter.
 
 ---
 
